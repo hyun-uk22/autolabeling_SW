@@ -1,0 +1,11 @@
+# requirements.txt
+openai
+anthropic
+boto3
+pydantic<2
+python-dotenv
+numpy<2
+opencv-python
+pillow
+matplotlib
+tqdm

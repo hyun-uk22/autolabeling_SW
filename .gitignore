@@ -1,0 +1,67 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables and local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+aws_credentials
+
+# Local IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Auto-labeling datasets and generated outputs
+data/raw/
+data/labeled/
+data/visualized/
+data/ground_truth/
+data/**/run_metrics.csv
+data/**/run_metrics.jsonl
+data/**/classes.txt
+data/**/coco_annotations.json
+data/**/vision_annotations.jsonl
+
+# Large model/checkpoint artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.ckpt
+models/
+checkpoints/
+runs/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
