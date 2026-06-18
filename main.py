@@ -12,6 +12,8 @@ from src.agents.insight_agent import DatasetInsightAgent
 from src.utils.format_converter import LabelExportWriter, normalize_label_formats
 from src.utils.visualize import visualize_boxes
 from src.utils.evaluation import evaluate_yolo_dirs
+from src.plugins.orchestrator import TaskPluginOrchestrator
+from src.plugins.registry import create_default_registry
 
 load_dotenv()
 
@@ -121,7 +123,7 @@ def main():
         "--label_formats",
         type=str,
         default="yolo",
-        help="Comma-separated export formats: yolo, pascal_voc, coco, custom, or all",
+        help="Comma-separated export formats: yolo, pascal_voc, coco, vision_json, custom, or all",
     )
     parser.add_argument(
         "--custom_label_template",
@@ -134,6 +136,17 @@ def main():
         type=str,
         default=".json",
         help="File extension for custom label exports.",
+    )
+    parser.add_argument(
+        "--plugin_config",
+        type=str,
+        default=None,
+        help="Optional JSON configuration for task-specific specialist model plugins.",
+    )
+    parser.add_argument(
+        "--plugin_fail_fast",
+        action="store_true",
+        help="Stop the run when a specialist plugin fails instead of recording the error.",
     )
     args = parser.parse_args()
 
@@ -159,6 +172,16 @@ def main():
     except Exception as e:
         print(f"[!] ERROR: Invalid label export setup: {e}")
         return
+
+    plugin_orchestrator = None
+    if args.plugin_config:
+        try:
+            plugin_registry = create_default_registry()
+            plugins = plugin_registry.load_config(args.plugin_config)
+            plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=args.plugin_fail_fast)
+        except Exception as e:
+            print(f"[!] ERROR: Invalid plugin setup: {e}")
+            return
     
     required_keys = []
     if "gpt" in low_model_name.lower() or "gpt" in high_model_name.lower():
@@ -191,13 +214,13 @@ def main():
     )
     insighter = DatasetInsightAgent()
 
-    images = [f for f in os.listdir(args.img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    images = sorted(f for f in os.listdir(args.img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg')))
     if not images:
         print(f"No images found in {args.img_dir}.")
         print("Running sample setup script automatically...")
         from src.utils.setup_samples import download_samples
         download_samples()
-        images = [f for f in os.listdir(args.img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        images = sorted(f for f in os.listdir(args.img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg')))
 
     print(f"\n🚀 Starting Agentic Auto-Labeling Experiment ({len(images)} images)")
     print(f"   - Low-Level (Draft): {low_model_name}")
@@ -206,6 +229,8 @@ def main():
     print(f"   - Task Type: {args.task_type}")
     print(f"   - Uncertainty Threshold: {verifier.threshold} (Escalate if Consistency < {verifier.threshold})")
     print(f"   - Label Formats: {', '.join(label_writer.formats)}")
+    if plugin_orchestrator:
+        print(f"   - Specialist Plugins: {', '.join(plugin_orchestrator.names) or 'none'}")
     print("-" * 60)
     
     # Metrics for Paper
@@ -226,6 +251,14 @@ def main():
         try:
             # Core Agentic Workflow
             result, status = verifier.process(img_path, args.prompt, task_type=args.task_type)
+            plugin_records = []
+            if plugin_orchestrator:
+                result, plugin_records = plugin_orchestrator.process(
+                    img_path,
+                    args.prompt,
+                    args.task_type,
+                    result,
+                )
             insighter.add_result(result)
             
             # Save Labels & Visualizations
@@ -261,6 +294,8 @@ def main():
                 "consistency_score": result.consistency_score,
                 "mean_confidence": result.mean_confidence,
                 "uncertainty_score": result.uncertainty_score,
+                "plugin_scores": json.dumps(result.plugin_scores, ensure_ascii=False),
+                "plugin_records": json.dumps(plugin_records, ensure_ascii=False),
                 "low_api_attempts": low_client.api_attempts - low_attempts_before,
                 "high_api_attempts": high_client.api_attempts - high_attempts_before,
                 "elapsed_sec": elapsed,
@@ -296,6 +331,30 @@ def main():
         else:
             evaluation = evaluate_yolo_dirs(args.out_dir, args.gt_dir, args.eval_iou)
 
+    run_summary = {
+        "images": len(images),
+        "task_type": args.task_type,
+        "label_formats": label_writer.formats,
+        "total_labels": total_objects_found,
+        "total_elapsed_sec": total_auto_time,
+        "avg_elapsed_sec": total_auto_time / len(images) if images else 0.0,
+        "manual_time_per_image_sec": manual_time_per_image,
+        "estimated_manual_time_sec": total_manual_time,
+        "time_saved_pct": time_saved_pct,
+        "low_model": low_model_name,
+        "high_model": high_model_name,
+        "low_api_attempts": low_client.api_attempts,
+        "high_api_attempts": high_client.api_attempts,
+        "escalation_count": escalation_count,
+        "escalation_rate": escalation_count / len(images) if images else 0.0,
+        "cost_reduction_pct": cost_reduction_pct,
+        "plugins": plugin_orchestrator.names if plugin_orchestrator else [],
+        "evaluation": evaluation,
+    }
+    summary_path = os.path.join(args.out_dir, "run_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(run_summary, f, ensure_ascii=False, indent=2)
+
     print("\n" + "="*60)
     print(" 📊 ABLATION & PERFORMANCE REPORT (For Paper Table 1)")
     print("="*60)
@@ -319,6 +378,7 @@ def main():
         print(f"\n[Ground Truth Evaluation @ IoU {args.eval_iou:.2f}]")
         print(f" - Precision:             {evaluation['precision']:.3f}")
         print(f" - Recall:                {evaluation['recall']:.3f}")
+        print(f" - F1:                    {evaluation['f1']:.3f}")
         print(f" - Mean IoU:              {evaluation['mean_iou']:.3f}")
 
     print(insighter.get_report())
@@ -333,6 +393,7 @@ def main():
     if run_records:
         print(f" - Run Metrics CSV: {os.path.abspath(metrics_csv_path)}")
         print(f" - Run Metrics JSONL: {os.path.abspath(metrics_jsonl_path)}")
+        print(f" - Run Summary JSON: {os.path.abspath(summary_path)}")
     print("="*60)
 
 if __name__ == "__main__":

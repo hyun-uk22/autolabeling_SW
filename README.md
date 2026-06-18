@@ -19,7 +19,12 @@
 ```text
 .
 ├── main.py                         # 실행 엔트리포인트
+├── convert_labels.py               # 기존 라벨 파일을 내부 포맷으로 읽어 타겟 포맷으로 변환
+├── evaluate_experiments.py         # 여러 실행 결과를 비교해 정량 평가 리포트 생성
 ├── requirements.txt                # Python 의존성
+├── requirements-specialists.txt    # 전문 모델 plugin 선택 의존성
+├── configs/
+│   └── plugins.example.json        # 태스크별 plugin 설정 예시
 ├── data/
 │   ├── raw/                        # 입력 이미지
 │   ├── labeled/                    # 출력 라벨 및 메트릭
@@ -32,11 +37,18 @@
     ├── core/
     │   ├── llm_client.py           # Bedrock Claude, OpenAI, Anthropic Vision LLM 호출
     │   └── models.py               # DetectionResult, BoundingBox 모델
+    ├── plugins/
+    │   ├── base.py                 # 전문 모델 plugin 인터페이스
+    │   ├── registry.py             # built-in/custom plugin 등록 및 설정 로드
+    │   ├── orchestrator.py         # 태스크 필터링, 결과 병합, cross-model 점수
+    │   └── builtin.py              # DINO/SAM/pose/OCR/tracking/classification adapter
     └── utils/
         ├── format_converter.py     # YOLO/Pascal VOC/COCO/custom 포맷 저장
         ├── visualize.py            # 바운딩 박스 시각화
         ├── geometry.py             # IoU 및 consistency 계산
         ├── evaluation.py           # YOLO ground truth 평가
+        ├── label_importer.py       # YOLO/VOC/COCO/Vision JSONL/CSV/JSON 라벨 입력
+        ├── label_validator.py      # 변환 결과 검증
         └── setup_samples.py        # 샘플 이미지 다운로드
 ```
 
@@ -125,6 +137,26 @@ ground truth 라벨이 있을 때 평가까지 실행하는 예시:
 python main.py --gt_dir data/ground_truth --eval_iou 0.5
 ```
 
+기존 라벨 파일을 다른 포맷으로 변환하는 예시:
+
+```bash
+python convert_labels.py ^
+  --input data/external_labels ^
+  --img_dir data/raw ^
+  --out_dir data/converted ^
+  --source_format auto ^
+  --target_formats yolo,pascal_voc,coco,vision_json
+```
+
+여러 실험 결과를 비교해 논문용 정량 리포트를 만드는 예시:
+
+```bash
+python evaluate_experiments.py ^
+  --runs low=data/runs/low high=data/runs/high cascade=data/runs/cascade ^
+  --gt_dir data/ground_truth ^
+  --out_dir data/reports
+```
+
 같은 모델로 디버깅만 하고 싶을 때:
 
 ```bash
@@ -153,6 +185,8 @@ python main.py --allow_same_model
 | `--label_formats` | `yolo` | 출력 라벨 형식. `yolo`, `pascal_voc`, `coco`, `vision_json`, `custom`, `all`을 쉼표로 조합 |
 | `--custom_label_template` | `None` | custom 라벨 출력에 사용할 템플릿 파일 |
 | `--custom_label_extension` | `.json` | custom 라벨 파일 확장자 |
+| `--plugin_config` | `None` | 태스크별 전문 모델 plugin JSON 설정 파일 |
+| `--plugin_fail_fast` | `False` | plugin 오류 발생 시 기록 후 계속하지 않고 즉시 중단 |
 
 ## 입력 형식
 
@@ -321,6 +355,161 @@ data/labeled/
 
 이 포맷은 classification, detection, segmentation, pose, OCR, tracking 결과를 모두 보존하기 위한 프로젝트 공통 포맷입니다. YOLO/Pascal VOC처럼 특정 태스크에 제한된 포맷으로 표현하기 어려운 라벨은 이 포맷을 사용합니다.
 
+## 전문 모델 Plugin
+
+기본 실행은 기존과 동일한 VLM cascade만 사용합니다. `--plugin_config`를 지정하면 VLM 결과를 seed로 사용해 현재 태스크를 지원하는 전문 모델 plugin을 설정 순서대로 실행합니다.
+
+선택 의존성 설치:
+
+```bash
+pip install -r requirements-specialists.txt
+```
+
+실행 예시:
+
+```bash
+python main.py ^
+  --task_type segmentation ^
+  --label_formats coco,vision_json ^
+  --plugin_config configs/plugins.example.json
+```
+
+태스크별 기본 chain:
+
+| task_type | 실행 plugin | 역할 |
+| --- | --- | --- |
+| `classification` | `classification` | CLIP 기반 zero-shot classification |
+| `object_detection` | `grounding_dino` | VLM 후보 label 기반 text-conditioned bbox 탐지 |
+| `segmentation` | `grounding_dino` -> `sam` | bbox 탐지 후 SAM polygon refinement |
+| `pose_estimation` | `pose` | Ultralytics pose 모델로 keypoint 생성 |
+| `ocr` | `ocr` | EasyOCR로 text region과 문자열 생성 |
+| `tracking` | `grounding_dino` -> `tracking` | 후보 탐지와 ByteTrack 기반 track id 생성 |
+| `all` | 설정된 모든 plugin | 모든 plugin을 설정 순서대로 실행 |
+
+`configs/plugins.example.json`에서 다음을 조정할 수 있습니다.
+
+- plugin 활성화 여부와 실행 순서
+- 지원 task 목록
+- 모델 checkpoint/model id
+- CPU/GPU 장치
+- Grounding DINO box/text threshold
+- 후보 class 목록
+- plugin별 consistency weight
+- OCR 언어
+- tracking backend
+
+전문 모델은 실제 plugin 실행 시점에만 import하고 모델을 로드합니다. `requirements-specialists.txt`를 설치하지 않았거나 checkpoint 다운로드에 실패하면 기본값에서는 해당 오류를 `plugin_records`에 기록하고 나머지 파이프라인을 계속합니다. `--plugin_fail_fast`를 지정하면 즉시 중단합니다.
+
+plugin 결과는 기존 VLM 결과와 병합되고 다음 정보가 저장됩니다.
+
+- `plugin_scores`: 전문 모델 confidence 또는 VLM 결과와의 agreement
+- `plugin_metadata`: 사용 모델과 plugin별 실행 정보
+- `plugin_records`: 성공/실패, agreement, error
+- 갱신된 `consistency_score`, `mean_confidence`, `uncertainty_score`
+
+tracking plugin은 현재 `--img_dir` 안의 정렬된 프레임 이미지 시퀀스를 순서대로 처리합니다. 비디오 파일을 직접 디코딩하는 입력 경로는 아직 제공하지 않습니다.
+
+### 외부 Plugin 추가
+
+외부 plugin은 `VisionTaskPlugin`을 상속하고 `refine()`을 구현합니다.
+
+```python
+from src.plugins.base import PluginOutput, VisionTaskPlugin
+
+
+class MyDetectorPlugin(VisionTaskPlugin):
+    plugin_name = "my_detector"
+    supported_tasks = {"object_detection"}
+
+    def refine(self, image_path, prompt, seed_result):
+        result = self.run_model(image_path, seed_result)
+        return PluginOutput(result=result, score=0.9, metadata={"model": "my-model"})
+```
+
+설정의 `class`에 `module:ClassName`을 지정하면 registry가 동적으로 등록합니다.
+
+```json
+{
+  "plugins": [
+    {
+      "name": "my_detector",
+      "class": "my_package.detector:MyDetectorPlugin",
+      "tasks": ["object_detection"],
+      "weight": 1.0,
+      "config": {}
+    }
+  ]
+}
+```
+
+## 기존 라벨 변환
+
+`convert_labels.py`는 외부 데이터셋의 라벨을 내부 `DetectionResult`로 읽은 뒤 원하는 출력 포맷으로 다시 저장합니다.
+
+지원 입력:
+
+| source_format | 입력 형태 |
+| --- | --- |
+| `auto` | 확장자와 구조로 자동 추론 |
+| `yolo` | YOLO txt 디렉터리 또는 단일 txt. `classes.txt` 또는 `--classes` 사용 |
+| `pascal_voc` | Pascal VOC XML 파일 또는 디렉터리 |
+| `coco` | COCO annotations JSON |
+| `vision_json` | 프로젝트 공통 `vision_annotations.jsonl` |
+| `csv` | `image`/`image_name`과 `label`, `xmin`, `ymin`, `xmax`, `ymax` 컬럼 |
+| `generic_json` | 중첩 JSON 안의 `xmin`, `ymin`, `xmax`, `ymax` 객체를 휴리스틱으로 추출 |
+
+변환 과정에서는 `label_validator.py`가 다음 문제를 검사합니다.
+
+- 결과 라벨이 비어 있음
+- 이미지 파일 누락 또는 열기 실패
+- 좌표가 `0.0~1.0` 범위를 벗어남
+- `xmin >= xmax` 또는 `ymin >= ymax`
+- label/text/keypoint/track id 누락
+- polygon point 부족
+
+검증 결과는 `conversion_report.json`에 저장됩니다. `--strict`를 사용하면 검증 이슈가 있는 레코드는 변환하지 않습니다. 이미지가 없거나 열 수 없는 레코드는 이미지 크기 기반 변환이 불가능하므로 항상 건너뜁니다.
+
+## 정량 평가 리포트
+
+`main.py`는 실행마다 다음 파일을 저장합니다.
+
+- `run_metrics.csv`
+- `run_metrics.jsonl`
+- `run_summary.json`
+
+`evaluate_experiments.py`는 여러 실행 폴더를 받아 ablation 표를 만듭니다.
+
+```bash
+python evaluate_experiments.py ^
+  --runs low=data/runs/low high=data/runs/high cascade=data/runs/cascade ^
+  --gt_dir data/ground_truth ^
+  --iou 0.5 ^
+  --manual_time_per_image 45 ^
+  --low_unit_cost 1 ^
+  --high_unit_cost 10
+```
+
+출력:
+
+- `experiment_report.json`
+- `experiment_report.csv`
+- `experiment_report.md`
+
+리포트 지표:
+
+| 지표 | 설명 |
+| --- | --- |
+| `precision` | Ground Truth YOLO 대비 정밀도 |
+| `recall` | Ground Truth YOLO 대비 재현율 |
+| `f1` | precision/recall 조화 평균 |
+| `mean_iou` | 매칭된 bbox의 평균 IoU |
+| `avg_elapsed_sec` | 이미지당 평균 처리 시간 |
+| `time_saved_pct` | 수동 라벨링 기준 시간 절감률 |
+| `low_api_attempts` | 경량 모델 API 호출 수 |
+| `high_api_attempts` | 고성능 모델 API 호출 수 |
+| `escalation_rate` | 고성능 모델로 에스컬레이션된 이미지 비율 |
+| `estimated_relative_cost` | low/high 상대 단가 기반 추정 비용 |
+
 ### 사용자 정의 라벨
 
 `--label_formats custom`은 템플릿 파일을 읽어 이미지별 라벨 파일을 생성합니다. 템플릿에는 Python `str.format` placeholder를 사용할 수 있습니다. JSON/XML처럼 중괄호를 리터럴로 써야 하는 포맷은 `{{`와 `}}`로 이스케이프합니다.
@@ -397,6 +586,8 @@ data/visualized/
 | `consistency_score` | 반복 추론 결과 간 IoU 기반 일관성 |
 | `mean_confidence` | 최종 또는 초안 결과의 평균 confidence |
 | `uncertainty_score` | `1 - ((consistency + confidence) / 2)` |
+| `plugin_scores` | 전문 모델별 confidence/agreement JSON |
+| `plugin_records` | plugin 실행 성공/실패와 교차 일관성 JSON |
 | `low_api_attempts` | 해당 이미지에서 발생한 low model API 요청 시도 수 |
 | `high_api_attempts` | 해당 이미지에서 발생한 high model API 요청 시도 수 |
 | `elapsed_sec` | 이미지 처리 시간 |

@@ -1,0 +1,6 @@
+# Install requirements.txt first. These dependencies are only required when
+# the corresponding specialist plugins are enabled.
+torch
+transformers
+ultralytics
+easyocr

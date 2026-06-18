@@ -105,6 +105,8 @@ def result_to_export_dict(result: DetectionResult, image_path: str) -> dict:
         "consistency_score": result.consistency_score,
         "mean_confidence": result.mean_confidence,
         "uncertainty_score": result.uncertainty_score,
+        "plugin_scores": result.plugin_scores,
+        "plugin_metadata": result.plugin_metadata,
         "classifications": [item.dict() for item in result.classifications],
         "boxes": [box_to_export_dict(box, 0, width, height) for box in result.boxes],
         "segments": [

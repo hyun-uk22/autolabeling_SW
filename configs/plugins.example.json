@@ -1,0 +1,70 @@
+{
+  "plugins": [
+    {
+      "name": "classification",
+      "enabled": true,
+      "tasks": ["classification"],
+      "weight": 1.0,
+      "config": {
+        "model": "openai/clip-vit-base-patch32",
+        "device": "cpu",
+        "labels": ["person", "animal", "vehicle", "document", "indoor", "outdoor"],
+        "top_k": 3
+      }
+    },
+    {
+      "name": "grounding_dino",
+      "enabled": true,
+      "tasks": ["object_detection", "segmentation", "tracking"],
+      "weight": 1.2,
+      "config": {
+        "model": "IDEA-Research/grounding-dino-tiny",
+        "device": "cpu",
+        "box_threshold": 0.35,
+        "text_threshold": 0.25
+      }
+    },
+    {
+      "name": "sam",
+      "enabled": true,
+      "tasks": ["segmentation"],
+      "weight": 1.0,
+      "config": {
+        "model": "sam2_b.pt",
+        "device": "cpu"
+      }
+    },
+    {
+      "name": "pose",
+      "enabled": true,
+      "tasks": ["pose_estimation"],
+      "weight": 1.0,
+      "config": {
+        "model": "yolo11n-pose.pt",
+        "device": "cpu",
+        "keypoint_threshold": 0.25
+      }
+    },
+    {
+      "name": "ocr",
+      "enabled": true,
+      "tasks": ["ocr"],
+      "weight": 1.0,
+      "config": {
+        "languages": ["ko", "en"],
+        "gpu": false
+      }
+    },
+    {
+      "name": "tracking",
+      "enabled": true,
+      "tasks": ["tracking"],
+      "weight": 1.0,
+      "config": {
+        "model": "yolo11n.pt",
+        "tracker": "bytetrack.yaml",
+        "device": "cpu"
+      }
+    }
+  ]
+}

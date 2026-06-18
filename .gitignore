@@ -42,11 +42,17 @@ data/raw/
 data/labeled/
 data/visualized/
 data/ground_truth/
+data/converted/
+data/reports/
 data/**/run_metrics.csv
 data/**/run_metrics.jsonl
 data/**/classes.txt
 data/**/coco_annotations.json
 data/**/vision_annotations.jsonl
+data/**/conversion_report.json
+data/**/experiment_report.json
+data/**/experiment_report.csv
+data/**/experiment_report.md
 
 # Large model/checkpoint artifacts
 *.pt

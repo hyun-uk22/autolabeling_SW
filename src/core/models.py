@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 class ClassificationLabel(BaseModel):
     label: str = Field(..., description="Image-level class name")
@@ -64,3 +64,5 @@ class DetectionResult(BaseModel):
     uncertainty_score: Optional[float] = None
     consistency_score: Optional[float] = None
     mean_confidence: Optional[float] = None
+    plugin_scores: Dict[str, float] = Field(default_factory=dict)
+    plugin_metadata: Dict[str, Any] = Field(default_factory=dict)

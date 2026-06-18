@@ -34,3 +34,23 @@
 - Added `.gitignore` for GitHub publishing.
 - Excluded local secrets, virtual environments, Python caches, generated datasets, generated labels, visualizations, metrics, model checkpoints, logs, and temporary files.
 - Kept `.env.example` trackable while ignoring real `.env` files.
+
+## 2026-06-18 14:25:03 +09:00
+
+- Added `convert_labels.py` for converting existing external labels into supported target formats.
+- Added `src/utils/label_importer.py` with YOLO, Pascal VOC, COCO, Vision JSONL, CSV, and generic JSON import support.
+- Added `src/utils/label_validator.py` to detect empty conversions, missing images, invalid coordinates, malformed boxes, incomplete polygons, and missing label fields.
+- Extended detection evaluation with GT-only false negative handling and F1 score.
+- Added run summary JSON output from `main.py`.
+- Added `evaluate_experiments.py` and experiment report utilities for low-only, high-only, and cascade ablation comparisons.
+- Updated `.gitignore` and `README.md` for conversion outputs, validation reports, and quantitative experiment reports.
+
+## 2026-06-18 15:49:30 +09:00
+
+- Added an internal task specialist plugin architecture with a common `VisionTaskPlugin` interface, dynamic registry, JSON configuration loader, and result orchestrator.
+- Added built-in lazy-loading adapters for CLIP classification, Grounding DINO detection, SAM segmentation, Ultralytics pose estimation, EasyOCR, and Ultralytics tracking.
+- Added cross-model result merging, plugin confidence/agreement scores, plugin provenance metadata, and uncertainty recalculation.
+- Added `--plugin_config` and `--plugin_fail_fast` options to `main.py` while preserving the existing VLM-only default path.
+- Added `configs/plugins.example.json` and `requirements-specialists.txt` for optional specialist model setup.
+- Sorted input image names so frame-sequence tracking has deterministic ordering.
+- Documented built-in task chains, configuration, failure behavior, and external plugin registration in `README.md`.

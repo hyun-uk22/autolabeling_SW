@@ -93,9 +93,19 @@ def get_result_labels(result: DetectionResult) -> List[str]:
     return labels
 
 def compute_result_consistency(result1: DetectionResult, result2: DetectionResult) -> float:
-    if result1.boxes or result2.boxes:
+    if result1.boxes and result2.boxes:
         return compute_pairwise_consistency(result1.boxes, result2.boxes)
-    if result1.segments or result2.segments:
+    if result1.boxes and result2.segments:
+        return compute_pairwise_consistency(
+            result1.boxes,
+            [segment_to_box(segment) for segment in result2.segments],
+        )
+    if result1.segments and result2.boxes:
+        return compute_pairwise_consistency(
+            [segment_to_box(segment) for segment in result1.segments],
+            result2.boxes,
+        )
+    if result1.segments and result2.segments:
         boxes1 = [segment_to_box(segment) for segment in result1.segments]
         boxes2 = [segment_to_box(segment) for segment in result2.segments]
         return compute_pairwise_consistency(boxes1, boxes2)
