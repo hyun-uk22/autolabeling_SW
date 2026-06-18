@@ -1,6 +1,6 @@
 # Agentic Auto-Labeling System
-
-이미지 폴더를 입력으로 받아 AWS Bedrock Claude Vision 모델로 객체를 탐지하고, 결과를 YOLO, Pascal VOC, COCO, 사용자 정의 라벨 형식과 시각화 이미지로 저장하는 자동 라벨링 실험용 프로젝트입니다. 저용량 Claude 모델로 여러 번 초안을 생성한 뒤 결과 일관성이 낮으면 고용량 Claude 모델로 에스컬레이션하는 계층형 검증 구조를 사용합니다.
+- 소프트웨어 중심대학 프로젝트
+- 이미지 폴더를 입력으로 받아 AWS Bedrock Claude Vision 모델로 객체를 탐지하고, 결과를 YOLO, Pascal VOC, COCO, 사용자 정의 라벨 형식과 시각화 이미지로 저장하는 자동 라벨링 실험용 프로젝트입니다. 저용량 Claude 모델로 여러 번 초안을 생성한 뒤 결과 일관성이 낮으면 고용량 Claude 모델로 에스컬레이션하는 계층형 검증 구조를 사용합니다.
 
 ## 주요 기능
 
