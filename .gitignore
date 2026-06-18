@@ -71,3 +71,6 @@ logs/
 tmp/
 temp/
 *.tmp
+
+conference.docx
+proposal.md

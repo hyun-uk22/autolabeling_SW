@@ -54,3 +54,11 @@
 - Added `configs/plugins.example.json` and `requirements-specialists.txt` for optional specialist model setup.
 - Sorted input image names so frame-sequence tracking has deterministic ordering.
 - Documented built-in task chains, configuration, failure behavior, and external plugin registration in `README.md`.
+
+## 2026-06-18 15:55:25 +09:00
+
+- Added `transform_label_format.md` with the detailed label conversion specification, architecture, workflow, CLI contract, input/output behavior, validation rules, reports, examples, limitations, and extension guidance.
+
+## 2026-06-18 16:19:23 +09:00
+
+- Added `generate_label.md` with the detailed automatic label generation specification, VLM cascade workflow, task schemas, consistency and uncertainty calculations, specialist plugin behavior, output metrics, evaluation flow, examples, limitations, and recommended improvements.
