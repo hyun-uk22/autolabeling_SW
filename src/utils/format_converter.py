@@ -107,18 +107,18 @@ def result_to_export_dict(result: DetectionResult, image_path: str) -> dict:
         "uncertainty_score": result.uncertainty_score,
         "plugin_scores": result.plugin_scores,
         "plugin_metadata": result.plugin_metadata,
-        "classifications": [item.dict() for item in result.classifications],
+        "classifications": [item.model_dump() for item in result.classifications],
         "boxes": [box_to_export_dict(box, 0, width, height) for box in result.boxes],
         "segments": [
             {
                 "label": segment.label,
                 "confidence": segment.confidence,
-                "polygon": [point.dict() for point in segment.polygon],
+                "polygon": [point.model_dump() for point in segment.polygon],
                 "polygon_pixels": [point_to_pixel(point, width, height) for point in segment.polygon],
             }
             for segment in result.segments
         ],
-        "poses": [pose.dict() for pose in result.poses],
+        "poses": [pose.model_dump() for pose in result.poses],
         "texts": [
             {
                 "text": text.text,

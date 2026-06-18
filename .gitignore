@@ -44,6 +44,7 @@ data/visualized/
 data/ground_truth/
 data/converted/
 data/reports/
+data/workflow/
 data/**/run_metrics.csv
 data/**/run_metrics.jsonl
 data/**/classes.txt
@@ -71,6 +72,9 @@ logs/
 tmp/
 temp/
 *.tmp
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 conference.docx
 proposal.md

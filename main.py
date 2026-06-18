@@ -14,11 +14,17 @@ from src.utils.visualize import visualize_boxes
 from src.utils.evaluation import evaluate_yolo_dirs
 from src.plugins.orchestrator import TaskPluginOrchestrator
 from src.plugins.registry import create_default_registry
+from src.core.model_config import (
+    DEFAULT_BEDROCK_HIGH_MODEL_ID,
+    DEFAULT_BEDROCK_LOW_MODEL_ID,
+    required_api_keys,
+    resolve_model_names,
+    validate_cascade_setup,
+)
+from src.utils.result_metrics import count_result_labels
 
 load_dotenv()
 
-DEFAULT_BEDROCK_LOW_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-DEFAULT_BEDROCK_HIGH_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 SUPPORTED_TASK_TYPES = {
     "classification",
     "object_detection",
@@ -28,75 +34,6 @@ SUPPORTED_TASK_TYPES = {
     "tracking",
     "all",
 }
-
-def is_bedrock_model(model_name: str) -> bool:
-    return model_name.startswith("bedrock:") or model_name.startswith("anthropic.claude")
-
-def as_bedrock_model(model_id: str | None) -> str | None:
-    if not model_id:
-        return None
-    return model_id if model_id.startswith("bedrock:") else f"bedrock:{model_id}"
-
-def model_capacity_rank(model_name: str) -> int:
-    normalized = model_name.lower()
-    if "haiku" in normalized:
-        return 1
-    if "sonnet" in normalized:
-        return 2
-    if "opus" in normalized:
-        return 3
-    return 0
-
-def resolve_model_names(args) -> tuple[str, str]:
-    low_model = (
-        args.low_model
-        or os.getenv("LOW_MODEL")
-        or as_bedrock_model(os.getenv("AWS_BEDROCK_LOW_MODEL_ID"))
-    )
-    high_model = (
-        args.high_model
-        or os.getenv("HIGH_MODEL")
-        or as_bedrock_model(os.getenv("AWS_BEDROCK_HIGH_MODEL_ID"))
-        or as_bedrock_model(os.getenv("AWS_BEDROCK_MODEL_ID"))
-    )
-
-    if not low_model and high_model and is_bedrock_model(high_model):
-        low_model = as_bedrock_model(DEFAULT_BEDROCK_LOW_MODEL_ID)
-    if not high_model and low_model and is_bedrock_model(low_model):
-        high_model = as_bedrock_model(DEFAULT_BEDROCK_HIGH_MODEL_ID)
-
-    return low_model or "gpt-4o-mini", high_model or "gpt-4o"
-
-def validate_cascade_setup(low_model_name: str, high_model_name: str, allow_same_model: bool) -> bool:
-    low_rank = model_capacity_rank(low_model_name)
-    high_rank = model_capacity_rank(high_model_name)
-
-    if low_model_name == high_model_name:
-        print("[!] ERROR: LOW_MODEL and HIGH_MODEL are identical.")
-        print("[!] This does not support the paper claim of a heterogeneous capacity cascade.")
-        print("[!] For AWS Bedrock Claude, use a lightweight model for LOW_MODEL and a stronger model for HIGH_MODEL.")
-        print(f"    Example LOW_MODEL=bedrock:{DEFAULT_BEDROCK_LOW_MODEL_ID}")
-        print(f"    Example HIGH_MODEL=bedrock:{DEFAULT_BEDROCK_HIGH_MODEL_ID}")
-        if allow_same_model:
-            print("[!] Continuing because --allow_same_model was set.")
-            return True
-        return False
-
-    if low_rank and high_rank and low_rank >= high_rank:
-        print("[!] WARNING: LOW_MODEL does not appear lighter than HIGH_MODEL.")
-        print("[!] Recommended order for the cascade is Haiku < Sonnet < Opus.")
-
-    return True
-
-def count_labels(result) -> int:
-    return (
-        len(result.classifications)
-        + len(result.boxes)
-        + len(result.segments)
-        + len(result.poses)
-        + len(result.texts)
-        + len(result.tracks)
-    )
 
 def main():
     parser = argparse.ArgumentParser(description="Agentic Auto-Labeling System - Paper Experiment Mode")
@@ -154,8 +91,17 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.vis_dir, exist_ok=True)
 
-    low_model_name, high_model_name = resolve_model_names(args)
-    if not validate_cascade_setup(low_model_name, high_model_name, args.allow_same_model):
+    low_model_name, high_model_name = resolve_model_names(args.low_model, args.high_model)
+    cascade_valid, cascade_messages = validate_cascade_setup(
+        low_model_name,
+        high_model_name,
+        args.allow_same_model,
+    )
+    for message in cascade_messages:
+        print(f"[!] {'WARNING' if cascade_valid else 'ERROR'}: {message}")
+    if not cascade_valid:
+        print(f"    Example LOW_MODEL=bedrock:{DEFAULT_BEDROCK_LOW_MODEL_ID}")
+        print(f"    Example HIGH_MODEL=bedrock:{DEFAULT_BEDROCK_HIGH_MODEL_ID}")
         return
 
     try:
@@ -183,15 +129,7 @@ def main():
             print(f"[!] ERROR: Invalid plugin setup: {e}")
             return
     
-    required_keys = []
-    if "gpt" in low_model_name.lower() or "gpt" in high_model_name.lower():
-        required_keys.append("OPENAI_API_KEY")
-    if (
-        ("claude" in low_model_name.lower() and not is_bedrock_model(low_model_name))
-        or ("claude" in high_model_name.lower() and not is_bedrock_model(high_model_name))
-    ):
-        required_keys.append("ANTHROPIC_API_KEY")
-
+    required_keys = required_api_keys(low_model_name, high_model_name)
     missing_keys = [key for key in required_keys if not os.getenv(key)]
     if missing_keys:
         print(f"[!] ERROR: Missing API key(s): {', '.join(missing_keys)}")
@@ -267,7 +205,7 @@ def main():
             
             elapsed = time.time() - start_time
             total_auto_time += elapsed
-            label_count = count_labels(result)
+            label_count = count_result_labels(result)
             total_objects_found += label_count
             
             if status == "Escalated":

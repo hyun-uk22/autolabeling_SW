@@ -4,13 +4,14 @@
 
 이 문서는 이미지로부터 새 라벨을 생성하는 자동 라벨링 기능의 상세 명세, 실행 조건, 데이터 흐름, 계층적 검증 방식, 태스크별 처리, 전문 모델 plugin 연동, 출력 및 평가 과정을 설명한다.
 
-자동 라벨 생성의 실행 진입점은 `main.py`다.
+자동 라벨 생성의 직접 실행 진입점은 `main.py`다. 자연어 계획, 승인 interrupt, checkpoint/resume, 복합 operation이 필요하면 `agentic_workflow.py`를 사용한다.
 
 이 기능은 기존 라벨 파일을 다른 포맷으로 바꾸는 `convert_labels.py`와 구분된다.
 
 | 기능 | 입력 | 출력 | 실행 파일 |
 | --- | --- | --- | --- |
 | 자동 라벨 생성 | 이미지 + 자연어 prompt | 새 라벨과 검증 지표 | `main.py` |
+| Agentic 복합 workflow | 자연어 또는 WorkflowPlan | 생성/변환/평가 결과 | `agentic_workflow.py` |
 | 기존 라벨 변환 | 기존 라벨 + 원본 이미지 | 변환된 라벨 | `convert_labels.py` |
 
 ## 2. 설계 목표
@@ -934,7 +935,7 @@ consistency 미달 시 high VLM 1회
 
 모든 VLM retry가 실패하거나 JSON parsing이 실패하면 empty result가 반환될 수 있다.
 
-현재 `main.py` 자동 라벨 생성 경로에는 `label_validator.py`가 연결되어 있지 않으므로 empty result도 빈 라벨 파일로 저장될 수 있다.
+직접 실행하는 `main.py` 경로에는 `label_validator.py`가 연결되어 있지 않으므로 empty result도 빈 라벨 파일로 저장될 수 있다. LangGraph의 `agentic_workflow.py` 경로는 validation 및 repair node를 거친다.
 
 ## 28. 태스크별 실행 예시
 
@@ -1093,6 +1094,7 @@ python evaluate_experiments.py `
 | --- | --- |
 | `README.md` | 프로젝트 설치 및 일반 사용법 |
 | `transform_label_format.md` | 기존 라벨 포맷 변환 상세 명세 |
+| `agentic_workflow.md` | LangGraph 상위 orchestrator 상세 명세 |
 | `proposal.md` | 연구 제안과 평가 계획 |
 | `abstract.md` | 논문 초록 |
 | `changelog.md` | 변경 이력 |

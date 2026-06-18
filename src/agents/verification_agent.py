@@ -2,6 +2,7 @@ from typing import Tuple
 from ..core.llm_client import VisionLLMClient
 from ..core.models import DetectionResult
 from ..utils.geometry import get_consistency_score
+from ..utils.result_metrics import mean_result_confidence, uncertainty_score
 from .labeling_agent import LabelingAgent
 
 class HierarchicalVerificationAgent:
@@ -23,23 +24,11 @@ class HierarchicalVerificationAgent:
         )
 
     def _mean_confidence(self, result: DetectionResult) -> float:
-        confidences = []
-        confidences.extend(item.confidence for item in result.classifications)
-        confidences.extend(item.confidence for item in result.boxes)
-        confidences.extend(item.confidence for item in result.segments)
-        confidences.extend(item.confidence for item in result.poses)
-        confidences.extend(item.confidence for item in result.texts)
-        confidences.extend(item.confidence for item in result.tracks)
-        for pose in result.poses:
-            confidences.extend(point.confidence for point in pose.keypoints)
-        if not confidences:
-            return 0.0
-        return sum(confidences) / len(confidences)
+        return mean_result_confidence(result)
 
     def _uncertainty_score(self, consistency: float, confidence: float) -> float:
         # Proposal metric: combine repeated-inference IoU consistency and model confidence.
-        reliability = (consistency + confidence) / 2
-        return 1.0 - reliability
+        return uncertainty_score(consistency, confidence)
 
     def process(self, image_path: str, prompt: str, task_type: str = "object_detection") -> Tuple[DetectionResult, str]:
         # 1. Labeling Agent: repeated low-cost inference for draft labels.

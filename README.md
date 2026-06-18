@@ -19,12 +19,14 @@
 ```text
 .
 ├── main.py                         # 실행 엔트리포인트
+├── agentic_workflow.py             # LangGraph 자연어/복합 workflow 엔트리포인트
 ├── convert_labels.py               # 기존 라벨 파일을 내부 포맷으로 읽어 타겟 포맷으로 변환
 ├── evaluate_experiments.py         # 여러 실행 결과를 비교해 정량 평가 리포트 생성
 ├── requirements.txt                # Python 의존성
 ├── requirements-specialists.txt    # 전문 모델 plugin 선택 의존성
 ├── configs/
-│   └── plugins.example.json        # 태스크별 plugin 설정 예시
+│   ├── plugins.example.json        # 태스크별 plugin 설정 예시
+│   └── workflow.example.json       # generate/convert/evaluate 복합 plan 예시
 ├── data/
 │   ├── raw/                        # 입력 이미지
 │   ├── labeled/                    # 출력 라벨 및 메트릭
@@ -42,6 +44,12 @@
     │   ├── registry.py             # built-in/custom plugin 등록 및 설정 로드
     │   ├── orchestrator.py         # 태스크 필터링, 결과 병합, cross-model 점수
     │   └── builtin.py              # DINO/SAM/pose/OCR/tracking/classification adapter
+    ├── workflow/
+    │   ├── models.py               # Typed WorkflowPlan과 checkpoint state
+    │   ├── planner.py              # 자연어 요청을 구조화된 plan으로 변환
+    │   ├── runtime.py              # 재사용 가능한 generate/convert/evaluate service
+    │   ├── schema_repair.py        # schema 재분석 후보와 라벨 repair
+    │   └── graph.py                # LangGraph 노드, 분기, 반복, 승인 interrupt
     └── utils/
         ├── format_converter.py     # YOLO/Pascal VOC/COCO/custom 포맷 저장
         ├── visualize.py            # 바운딩 박스 시각화
@@ -82,6 +90,18 @@ HIGH_MODEL=bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
 
 ```bash
 python main.py
+```
+
+자연어 상위 orchestrator를 사용하는 경우:
+
+```bash
+python agentic_workflow.py --request "data/raw 이미지를 segmentation 라벨링하고 COCO로 저장해줘"
+```
+
+경로와 복합 operation을 재현 가능하게 지정하려면 JSON plan을 사용합니다.
+
+```bash
+python agentic_workflow.py --plan configs/workflow.example.json --thread-id experiment-001
 ```
 
 현재 `.env`에서 `LOW_MODEL`과 `HIGH_MODEL`이 같은 값이면 실행 전에 중단됩니다. 논문 주장인 heterogeneous capacity cascade를 만족하려면 두 모델이 달라야 합니다.
@@ -164,6 +184,36 @@ python main.py --allow_same_model
 ```
 
 이 옵션은 논문 실험 결과 산출용으로는 권장하지 않습니다.
+
+## LangGraph Workflow
+
+`agentic_workflow.py`는 자연어 또는 typed JSON plan을 받아 `generate`, `convert`, `evaluate`를 한 workflow에서 순서대로 실행합니다.
+
+지원 기능:
+
+- 변환 parse 실패 시 schema 후보 재분석 및 제한 횟수 재시도
+- 라벨 validation 실패 시 repair node 이동
+- VLM과 전문 plugin agreement가 threshold 미만이면 high VLM 검증
+- high VLM 호출 전 LangGraph interrupt 승인
+- SQLite checkpoint와 `thread_id` 기반 중단/재개
+- 이미지별 checkpoint state와 `workflow_history.json`
+- generate/convert/evaluate 복합 operation
+- task type과 plugin config 기반 동적 전문 모델 선택
+
+승인 요청으로 중단된 workflow 재개:
+
+```bash
+python agentic_workflow.py --thread-id experiment-001 --resume approve
+python agentic_workflow.py --thread-id experiment-001 --resume reject
+```
+
+현재 checkpoint 상태 확인:
+
+```bash
+python agentic_workflow.py --thread-id experiment-001 --status
+```
+
+사용자 승인 없이 실행하려면 `--auto-approve`를 사용합니다. 상세 명세는 `agentic_workflow.md`를 참조합니다.
 
 ## CLI 옵션
 

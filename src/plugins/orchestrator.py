@@ -3,6 +3,7 @@ from typing import Iterable, List, Tuple
 
 from ..core.models import DetectionResult
 from ..utils.geometry import calculate_iou, compute_result_consistency
+from ..utils.result_metrics import mean_result_confidence
 from .base import VisionTaskPlugin
 
 
@@ -70,13 +71,6 @@ def merge_results(base: DetectionResult, incoming: DetectionResult) -> Detection
     _merge_by_key(result.texts, incoming.texts, lambda item: (item.text, round(item.xmin, 2), round(item.ymin, 2)))
     _merge_by_key(result.tracks, incoming.tracks, lambda item: (item.frame_id, item.track_id))
     return result
-
-
-def mean_result_confidence(result: DetectionResult) -> float:
-    values = []
-    for field in ["classifications", "boxes", "segments", "poses", "texts", "tracks"]:
-        values.extend(getattr(item, "confidence", 1.0) for item in getattr(result, field))
-    return sum(values) / len(values) if values else 0.0
 
 
 class TaskPluginOrchestrator:

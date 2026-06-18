@@ -2,10 +2,12 @@
 openai
 anthropic
 boto3
-pydantic<2
+pydantic>=2.7.4,<3
 python-dotenv
 numpy<2
 opencv-python
 pillow
 matplotlib
 tqdm
+langgraph
+langgraph-checkpoint-sqlite

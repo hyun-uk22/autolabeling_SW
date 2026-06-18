@@ -1,0 +1,38 @@
+{
+  "request_summary": "Generate segmentation labels, convert outputs, and evaluate the run.",
+  "operations": [
+    {
+      "action": "generate",
+      "task_type": "segmentation",
+      "img_dir": "data/raw",
+      "out_dir": "data/runs/plugin_cascade",
+      "vis_dir": "data/runs/plugin_cascade_visualized",
+      "formats": ["coco", "vision_json"],
+      "prompt": "Segment all prominent objects and assign concise class names.",
+      "plugin_config": "configs/plugins.example.json",
+      "threshold": 0.75,
+      "inference_count": 3,
+      "draft_temperature": 0.7,
+      "require_approval": true,
+      "max_retries": 2
+    },
+    {
+      "action": "convert",
+      "input_path": "data/runs/plugin_cascade/vision_annotations.jsonl",
+      "img_dir": "data/raw",
+      "out_dir": "data/converted/workflow",
+      "formats": ["coco", "vision_json"],
+      "source_format": "auto",
+      "strict": false,
+      "max_retries": 2
+    },
+    {
+      "action": "evaluate",
+      "out_dir": "data/reports/workflow",
+      "gt_dir": "data/ground_truth",
+      "runs": {
+        "plugin_cascade": "data/runs/plugin_cascade"
+      }
+    }
+  ]
+}
