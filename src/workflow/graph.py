@@ -313,9 +313,14 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
             return {
                 "conversion_records": records,
                 "conversion_input_summary": loaded["input_summary"],
-                "resolved_source_format": source_format,
+                "resolved_source_format": loaded.get("resolved_source_format", source_format),
                 "operation_status": "conversion_loaded",
-                "history": _event(state, "conversion_loaded", source_format=source_format, records=len(records)),
+                "history": _event(
+                    state,
+                    "conversion_loaded",
+                    source_format=loaded.get("resolved_source_format", source_format),
+                    records=len(records),
+                ),
             }
         except Exception as exc:
             return {

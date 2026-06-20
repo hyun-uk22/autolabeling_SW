@@ -18,6 +18,11 @@ from src.core.workspace import (
     save_workspace,
 )
 from src.workflow.service import execute_workflow_plan
+from src.workflow.conversation import (
+    build_conversation_plan,
+    describe_plan,
+    describe_result,
+)
 
 
 st.set_page_config(page_title="AutoLabel", page_icon=":material/dataset:", layout="wide")
@@ -161,14 +166,18 @@ SOURCE_OPTIONS = ["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "g
 TASK_OPTIONS = ["object_detection", "classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"]
 
 
+def execute_plan(plan, auto_approve=False):
+    with st.spinner("작업 실행 중"):
+        return execute_workflow_plan(
+            plan,
+            auto_approve=auto_approve,
+            thread_id=f"streamlit-{uuid.uuid4()}",
+        )
+
+
 def run_plan(plan, auto_approve=False):
     try:
-        with st.spinner("작업 실행 중"):
-            result = execute_workflow_plan(
-                plan,
-                auto_approve=auto_approve,
-                thread_id=f"streamlit-{uuid.uuid4()}",
-            )
+        result = execute_plan(plan, auto_approve=auto_approve)
         if result.get("status") == "completed":
             st.success("작업이 완료되었습니다.")
         else:
@@ -256,6 +265,63 @@ if "workspace" not in st.session_state:
 
 workspace = st.session_state.workspace
 st.markdown(f'<div class="workspace-path">{html.escape(workspace)}</div>', unsafe_allow_html=True)
+
+st.markdown('<div class="panel-title">대화형 작업</div>', unsafe_allow_html=True)
+st.caption("원하는 데이터 작업을 자연어로 입력하세요. Workspace를 탐색한 뒤 실행 계획을 먼저 보여드립니다.")
+
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = [{
+        "role": "assistant",
+        "content": (
+            "어떤 작업을 진행할까요? 예: `현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘`"
+        ),
+    }]
+if "pending_proposal" not in st.session_state:
+    st.session_state.pending_proposal = None
+
+for message in st.session_state.chat_messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+pending_proposal = st.session_state.pending_proposal
+if pending_proposal:
+    approve_column, cancel_column, _ = st.columns([1, 1, 4])
+    with approve_column:
+        execute_chat_plan = st.button("계획 실행", type="primary", use_container_width=True)
+    with cancel_column:
+        cancel_chat_plan = st.button("취소", use_container_width=True)
+    if execute_chat_plan:
+        try:
+            result = execute_plan(pending_proposal["plan"], auto_approve=True)
+            response = describe_result(result, workspace)
+        except Exception as exc:
+            response = f"작업 실행 중 오류가 발생했습니다: {exc}"
+        st.session_state.chat_messages.append({"role": "assistant", "content": response})
+        st.session_state.pending_proposal = None
+        st.rerun()
+    if cancel_chat_plan:
+        st.session_state.chat_messages.append({"role": "assistant", "content": "작업을 취소했습니다."})
+        st.session_state.pending_proposal = None
+        st.rerun()
+
+chat_request = st.chat_input(
+    "예: 현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘",
+    disabled=bool(st.session_state.pending_proposal),
+)
+if chat_request:
+    st.session_state.chat_messages.append({"role": "user", "content": chat_request})
+    try:
+        proposal = build_conversation_plan(chat_request, workspace)
+        response = describe_plan(proposal, workspace)
+        st.session_state.pending_proposal = proposal
+    except (OSError, ValueError) as exc:
+        response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
+    st.session_state.chat_messages.append({"role": "assistant", "content": response})
+    st.rerun()
+
+st.divider()
+st.markdown('<div class="panel-title">고급 작업</div>', unsafe_allow_html=True)
+st.caption("경로와 실행 옵션을 직접 지정하려면 아래 기능을 사용하세요.")
 convert_tab, generate_tab, evaluate_tab, settings_tab = st.tabs(["형식 변환", "라벨 생성", "평가", "설정"])
 
 with convert_tab:

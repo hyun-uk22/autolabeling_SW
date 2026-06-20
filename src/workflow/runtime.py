@@ -264,12 +264,17 @@ class WorkflowRuntime:
             classes_path=operation.classes_path,
             duplicate_iou=operation.duplicate_iou,
         )
+        detected_formats = list(batch.report.get("formats", {}))
+        resolved_source_format = source_format
+        if source_format == "auto":
+            resolved_source_format = detected_formats[0] if len(detected_formats) == 1 else "mixed"
         return {
             "records": [
                 {"image": image, "result": result.model_dump()}
                 for image, result in batch.records
             ],
             "input_summary": batch.report,
+            "resolved_source_format": resolved_source_format,
         }
 
     def validate_conversion(self, operation: OperationPlan, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
