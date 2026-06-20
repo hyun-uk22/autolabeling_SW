@@ -54,7 +54,8 @@ LangGraph
       "img_dir": "data/raw",
       "out_dir": "data/converted",
       "formats": ["coco"],
-      "source_format": "auto"
+      "source_format": "auto",
+      "duplicate_iou": 0.85
     },
     {
       "action": "evaluate",
@@ -67,6 +68,8 @@ LangGraph
 ```
 
 `convert`는 `input_path`, `evaluate`는 `runs`가 필수다. Pydantic validation과 graph의 plan validation node가 이를 검사한다.
+
+`convert`의 디렉터리 `input_path`와 `source_format: "auto"`를 함께 사용하면 지원되는 표준 라벨 포맷을 파일별로 판별하고 이미지별로 병합한다. `duplicate_iou`는 같은 클래스 공간 라벨의 중복 기준이며 입력 탐색·병합 상세 결과는 conversion report의 `input_summary`에 저장된다.
 
 ## 4. 자연어 Planner
 

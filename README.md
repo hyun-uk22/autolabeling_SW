@@ -1,10 +1,13 @@
 # Agentic Auto-Labeling System
 
-이미지 폴더를 입력으로 받아 AWS Bedrock Claude Vision 모델로 객체를 탐지하고, 결과를 YOLO, Pascal VOC, COCO, 사용자 정의 라벨 형식과 시각화 이미지로 저장하는 자동 라벨링 실험용 프로젝트입니다. 저용량 Claude 모델로 여러 번 초안을 생성한 뒤 결과 일관성이 낮으면 고용량 Claude 모델로 에스컬레이션하는 계층형 검증 구조를 사용합니다.
+이미지 데이터셋의 라벨 생성, 표준 포맷 혼합 입력 변환, 검증, 평가를 하나의 workflow로 실행하는 vision dataset 도구입니다. AWS Bedrock, OpenAI, Anthropic VLM cascade와 선택적 task specialist plugin을 지원하며 CLI, Streamlit, Windows 데스크톱 인터페이스를 제공합니다.
 
 ## 주요 기능
 
 - classification, object detection, segmentation, pose estimation, OCR, tracking 라벨링
+- YOLO, COCO, Pascal VOC 등 표준 라벨 혼합 입력의 파일별 감지·병합·변환
+- LangGraph 기반 generate/convert/evaluate 복합 workflow, 승인, checkpoint, 재개
+- Streamlit localhost UI와 Windows PySide6 설치형 앱
 - LLM 출력 JSON을 내부 `DetectionResult` 구조로 정규화
 - YOLO, Pascal VOC XML, COCO JSON, 범용 Vision JSONL, 사용자 정의 템플릿 라벨 파일 생성
 - 바운딩 박스가 그려진 시각화 이미지 생성
@@ -22,8 +25,13 @@
 ├── agentic_workflow.py             # LangGraph 자연어/복합 workflow 엔트리포인트
 ├── convert_labels.py               # 기존 라벨 파일을 내부 포맷으로 읽어 타겟 포맷으로 변환
 ├── evaluate_experiments.py         # 여러 실행 결과를 비교해 정량 평가 리포트 생성
+├── desktop_app.py                  # Windows 데스크톱 GUI 엔트리포인트
+├── web_app.py                      # 설치 전 확인용 Streamlit 인터페이스
 ├── requirements.txt                # Python 의존성
+├── requirements-desktop.txt        # PySide6 및 Windows 패키징 의존성
+├── requirements-web.txt            # Streamlit 로컬 웹 UI 의존성
 ├── requirements-specialists.txt    # 전문 모델 plugin 선택 의존성
+├── packaging/                      # PyInstaller/Inno Setup 빌드 구성
 ├── configs/
 │   ├── plugins.example.json        # 태스크별 plugin 설정 예시
 │   └── workflow.example.json       # generate/convert/evaluate 복합 plan 예시
@@ -38,7 +46,9 @@
     │   └── insight_agent.py        # 라벨 분포 리포트
     ├── core/
     │   ├── llm_client.py           # Bedrock Claude, OpenAI, Anthropic Vision LLM 호출
-    │   └── models.py               # DetectionResult, BoundingBox 모델
+    │   ├── models.py               # DetectionResult, BoundingBox 모델
+    │   ├── user_settings.py        # 사용자 환경 변수 저장·복원
+    │   └── workspace.py            # workspace 저장과 상대 경로 해석
     ├── plugins/
     │   ├── base.py                 # 전문 모델 plugin 인터페이스
     │   ├── registry.py             # built-in/custom plugin 등록 및 설정 로드
@@ -48,8 +58,10 @@
     │   ├── models.py               # Typed WorkflowPlan과 checkpoint state
     │   ├── planner.py              # 자연어 요청을 구조화된 plan으로 변환
     │   ├── runtime.py              # 재사용 가능한 generate/convert/evaluate service
+    │   ├── service.py              # desktop/web 공통 workflow 실행 진입점
     │   ├── schema_repair.py        # schema 재분석 후보와 라벨 repair
     │   └── graph.py                # LangGraph 노드, 분기, 반복, 승인 interrupt
+    ├── ui/                         # 변환/생성/평가/설정 데스크톱 화면
     └── utils/
         ├── format_converter.py     # YOLO/Pascal VOC/COCO/custom 포맷 저장
         ├── visualize.py            # 바운딩 박스 시각화
@@ -92,11 +104,67 @@ HIGH_MODEL=bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
 python main.py
 ```
 
+관련 문서:
+
+| 문서 | 내용 |
+| --- | --- |
+| [transform_label_format.md](transform_label_format.md) | 혼합 라벨 입력, 병합, 검증, 출력 포맷 명세 |
+| [generate_label.md](generate_label.md) | 자동 라벨 생성과 전문 모델 plugin 명세 |
+| [agentic_workflow.md](agentic_workflow.md) | LangGraph orchestration, 승인, 재개, 복합 작업 |
+| [desktop_setup.md](desktop_setup.md) | Windows GUI, Streamlit, installer 빌드와 배포 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 환경, 테스트, pull request 기준 |
+| [SECURITY.md](SECURITY.md) | 취약점 신고, credential 및 데이터 보안 정책 |
+
 자연어 상위 orchestrator를 사용하는 경우:
 
 ```bash
 python agentic_workflow.py --request "data/raw 이미지를 segmentation 라벨링하고 COCO로 저장해줘"
 ```
+
+## Windows 데스크톱 앱
+
+`packaging/build.ps1`을 실행하면 `dist-installer/AutoLabel-Setup.exe`가 생성됩니다. 이 파일은 Git에서 제외되므로 공개 배포본은 코드 서명 후 GitHub Releases에 첨부합니다. 설치 후 GUI에서 다음 작업을 실행할 수 있습니다.
+
+- 혼합 라벨 포맷 자동 감지, 병합 및 변환
+- VLM 기반 자동 라벨 생성
+- 실험 결과 평가
+- AWS/OpenAI/Anthropic 인증 정보와 모델 설정 저장
+
+사용자 설정은 설치 디렉터리가 아닌 `%APPDATA%\AutoLabel\.env`에 저장되며 저장 즉시 현재 앱에 적용됩니다. API key와 AWS secret은 화면에서 password 형태로 표시되지만 `.env` 파일에는 평문으로 저장되므로 Windows 사용자 계정과 파일 접근 권한을 보호해야 합니다. 실제 `.env`는 Git과 installer에 포함되지 않습니다.
+
+소스에서 GUI를 실행하거나 installer를 다시 빌드하는 방법은 [desktop_setup.md](desktop_setup.md)를 참고합니다. 기본 installer는 API 기반 기능과 라벨 변환·평가 의존성을 포함하고, 용량이 큰 `torch`, `transformers`, `ultralytics`, `easyocr` specialist 의존성 및 모델 가중치는 포함하지 않습니다.
+
+설치하지 않고 데스크톱 앱을 실행하려면 다음 의존성을 추가합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-desktop.txt
+.\.venv\Scripts\python.exe desktop_app.py
+```
+
+## 설치 전 브라우저 확인
+
+`setup.exe`를 설치하지 않고 동일한 변환·생성·평가 workflow를 localhost에서 먼저 실행할 수 있습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-web.txt
+.\.venv\Scripts\python.exe -m streamlit run web_app.py
+```
+
+브라우저에서 `http://localhost:8501`을 연다. Streamlit 설정 화면과 Windows 데스크톱 앱은 `%APPDATA%\AutoLabel\.env`를 공유하므로 localhost에서 저장한 API 및 모델 설정을 설치 앱에서도 그대로 사용할 수 있습니다. 웹 화면은 로컬 서버 파일 경로를 입력받기 때문에 외부 네트워크에 공개하지 않는 것을 기본 운영 방식으로 합니다.
+
+Streamlit과 설치형 앱은 시작할 때 작업 workspace를 선택합니다. 각 화면의 기본 경로는 workspace 기준 상대 경로로 표시되고 실행 시 절대 경로로 변환됩니다.
+
+```text
+data/raw                 이미지 디렉터리
+data/labeled             라벨 출력
+data/visualized          시각화 출력
+data/converted           변환 출력
+data/ground_truth        평가 ground truth
+data/reports             평가 리포트
+configs/plugins.json     plugin 설정
+```
+
+workspace 선택 화면에서 `표준 폴더 구조 생성`을 선택하면 필요한 디렉터리와 빈 `configs/plugins.json`을 생성합니다. 기존 데이터셋 디렉터리를 그대로 사용할 때는 선택하지 않아도 됩니다. 마지막 workspace 선택값은 `%APPDATA%\AutoLabel\workspace.json`에 저장됩니다.
 
 경로와 복합 operation을 재현 가능하게 지정하려면 JSON plan을 사용합니다.
 
@@ -165,8 +233,11 @@ python convert_labels.py ^
   --img_dir data/raw ^
   --out_dir data/converted ^
   --source_format auto ^
+  --duplicate_iou 0.85 ^
   --target_formats yolo,pascal_voc,coco,vision_json
 ```
+
+디렉터리를 `auto`로 입력하면 YOLO TXT, Pascal VOC XML, COCO JSON, Vision JSONL, bbox CSV를 파일별로 판별해 한 번에 읽습니다. 같은 이미지의 동일 클래스 공간 라벨은 IoU 기준으로 병합한 뒤 exporter를 한 번만 실행하므로, 포맷별 반복 실행으로 인한 출력 덮어쓰기를 피할 수 있습니다. 판별되지 않은 파일, importer 실패, 중복 제거와 클래스 충돌은 `conversion_report.json`의 `input_summary`에 기록됩니다.
 
 여러 실험 결과를 비교해 논문용 정량 리포트를 만드는 예시:
 
@@ -500,7 +571,7 @@ class MyDetectorPlugin(VisionTaskPlugin):
 
 | source_format | 입력 형태 |
 | --- | --- |
-| `auto` | 확장자와 구조로 자동 추론 |
+| `auto` | 단일 파일 자동 추론 또는 디렉터리 내 지원 포맷 파일별 자동 판별·통합 |
 | `yolo` | YOLO txt 디렉터리 또는 단일 txt. `classes.txt` 또는 `--classes` 사용 |
 | `pascal_voc` | Pascal VOC XML 파일 또는 디렉터리 |
 | `coco` | COCO annotations JSON |
@@ -518,6 +589,8 @@ class MyDetectorPlugin(VisionTaskPlugin):
 - polygon point 부족
 
 검증 결과는 `conversion_report.json`에 저장됩니다. `--strict`를 사용하면 검증 이슈가 있는 레코드는 변환하지 않습니다. 이미지가 없거나 열 수 없는 레코드는 이미지 크기 기반 변환이 불가능하므로 항상 건너뜁니다.
+
+혼합 입력의 기본 중복 기준은 `--duplicate_iou 0.85`입니다. 같은 클래스와 겹침 기준을 만족하면 confidence가 높은 라벨을 유지하고, confidence가 같으면 COCO, Pascal VOC, YOLO 순으로 우선합니다. 같은 위치의 서로 다른 클래스는 자동 삭제하지 않고 모두 유지하며 충돌로 보고합니다. 등록되지 않은 사용자 정의 JSON schema는 자동 변환하지 않습니다.
 
 ## 정량 평가 리포트
 

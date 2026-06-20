@@ -23,6 +23,7 @@ class OperationPlan(BaseModel):
     gt_dir: Optional[str] = None
     runs: Dict[str, str] = Field(default_factory=dict)
     source_format: str = "auto"
+    duplicate_iou: float = Field(default=0.85, gt=0.0, le=1.0)
     threshold: float = 0.75
     eval_iou: float = 0.5
     inference_count: int = 3
@@ -93,6 +94,7 @@ class WorkflowState(TypedDict, total=False):
     resolved_source_format: str
     last_error: str
     conversion_records: List[Dict[str, Any]]
+    conversion_input_summary: Dict[str, Any]
     conversion_issues: List[Dict[str, Any]]
     run_records: List[Dict[str, Any]]
     operation_outputs: List[Dict[str, Any]]

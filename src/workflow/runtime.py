@@ -15,7 +15,7 @@ from ..plugins.registry import create_default_registry
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
 from ..utils.format_converter import LabelExportWriter
 from ..utils.geometry import compute_result_consistency, get_consistency_score
-from ..utils.label_importer import find_image_path, import_labels
+from ..utils.label_importer import find_image_path, import_labels_with_report
 from ..utils.label_validator import summarize_validation, validate_result
 from ..utils.result_metrics import count_result_labels, mean_result_confidence, uncertainty_score
 from ..utils.visualize import visualize_boxes
@@ -256,14 +256,21 @@ class WorkflowRuntime:
         summary["summary_path"] = summary_path
         return summary
 
-    def load_conversion(self, operation: OperationPlan, source_format: str) -> List[Dict[str, Any]]:
-        records = import_labels(
+    def load_conversion(self, operation: OperationPlan, source_format: str) -> Dict[str, Any]:
+        batch = import_labels_with_report(
             operation.input_path,
             operation.img_dir,
             source_format=source_format,
             classes_path=operation.classes_path,
+            duplicate_iou=operation.duplicate_iou,
         )
-        return [{"image": image, "result": result.model_dump()} for image, result in records]
+        return {
+            "records": [
+                {"image": image, "result": result.model_dump()}
+                for image, result in batch.records
+            ],
+            "input_summary": batch.report,
+        }
 
     def validate_conversion(self, operation: OperationPlan, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         validations = []
@@ -285,6 +292,7 @@ class WorkflowRuntime:
         records: List[Dict[str, Any]],
         validations: List[Dict[str, Any]],
         source_format: str,
+        input_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         validation_map = {item["image"]: item["issues"] for item in validations}
         writer = LabelExportWriter(
@@ -312,6 +320,7 @@ class WorkflowRuntime:
             "action": "convert",
             "input": operation.input_path,
             "resolved_source_format": source_format,
+            "input_summary": input_summary or {},
             "target_formats": writer.formats,
             "records_read": len(records),
             "records_converted": converted,

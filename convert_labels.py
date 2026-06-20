@@ -3,7 +3,7 @@ import json
 import os
 
 from src.utils.format_converter import LabelExportWriter
-from src.utils.label_importer import find_image_path, import_labels
+from src.utils.label_importer import find_image_path, import_labels_with_report
 from src.utils.label_validator import summarize_validation, validate_result
 
 
@@ -26,15 +26,25 @@ def main():
     parser.add_argument("--classes", default=None, help="Optional classes.txt for YOLO input")
     parser.add_argument("--custom_label_template", default=None, help="Template path for custom output")
     parser.add_argument("--custom_label_extension", default=".json", help="Extension for custom output")
+    parser.add_argument(
+        "--duplicate_iou",
+        type=float,
+        default=0.85,
+        help="IoU threshold for merging duplicate labels from mixed input formats",
+    )
     parser.add_argument("--strict", action="store_true", help="Skip records with validation issues")
     args = parser.parse_args()
+    if not 0.0 < args.duplicate_iou <= 1.0:
+        parser.error("--duplicate_iou must be greater than 0 and at most 1")
 
-    records = import_labels(
+    import_batch = import_labels_with_report(
         args.input,
         args.img_dir,
         source_format=args.source_format,
         classes_path=args.classes,
+        duplicate_iou=args.duplicate_iou,
     )
+    records = import_batch.records
     writer = LabelExportWriter(
         args.out_dir,
         formats=args.target_formats,
@@ -64,6 +74,7 @@ def main():
     report = {
         "input": args.input,
         "source_format": args.source_format,
+        "input_summary": import_batch.report,
         "target_formats": writer.formats,
         "records_read": len(records),
         "records_converted": converted,

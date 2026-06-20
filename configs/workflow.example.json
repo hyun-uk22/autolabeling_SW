@@ -23,6 +23,7 @@
       "out_dir": "data/converted/workflow",
       "formats": ["coco", "vision_json"],
       "source_format": "auto",
+      "duplicate_iou": 0.85,
       "strict": false,
       "max_retries": 2
     },

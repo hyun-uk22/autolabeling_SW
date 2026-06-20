@@ -88,6 +88,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
             "schema_candidates": [],
             "schema_index": 0,
             "conversion_records": [],
+            "conversion_input_summary": {},
             "conversion_issues": [],
             "run_records": [],
             "history": _event(state, "operation_started", action=raw["action"]),
@@ -305,11 +306,13 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
         index = state.get("schema_index", 0)
         source_format = candidates[index] if index < len(candidates) else operation.source_format
         try:
-            records = runtime.load_conversion(operation, source_format)
+            loaded = runtime.load_conversion(operation, source_format)
+            records = loaded["records"]
             if not records:
                 raise ValueError(f"No records parsed with source format {source_format}")
             return {
                 "conversion_records": records,
+                "conversion_input_summary": loaded["input_summary"],
                 "resolved_source_format": source_format,
                 "operation_status": "conversion_loaded",
                 "history": _event(state, "conversion_loaded", source_format=source_format, records=len(records)),
@@ -362,6 +365,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
                 state.get("conversion_records", []),
                 state.get("conversion_issues", []),
                 state.get("resolved_source_format", operation.source_format),
+                state.get("conversion_input_summary", {}),
             )
             return {
                 "operation_outputs": list(state.get("operation_outputs", [])) + [output],
