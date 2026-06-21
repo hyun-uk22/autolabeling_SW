@@ -146,6 +146,34 @@ names:
         self.assertEqual(batch.report["merge"]["label_normalizations"][0]["numeric_label"], "3")
         self.assertEqual(batch.report["merge"]["label_normalizations"][0]["canonical_label"], "Lion")
 
+    def test_inferred_yolo_numeric_label_mapping_applies_to_yolo_only_records(self):
+        self._write("yolo/image_a.txt", "3 0.300000 0.300000 0.400000 0.400000\n")
+        self._write("yolo/image_b.txt", "3 0.500000 0.500000 0.200000 0.200000\n")
+        self._write(
+            "voc/image_a.xml",
+            """<?xml version="1.0" encoding="utf-8"?>
+<annotation>
+  <filename>image_a.jpg</filename>
+  <size><width>100</width><height>100</height><depth>3</depth></size>
+  <object><name>Lion</name><bndbox><xmin>10</xmin><ymin>10</ymin><xmax>50</xmax><ymax>50</ymax></bndbox></object>
+</annotation>
+""",
+        )
+
+        batch = import_labels_with_report(self.label_dir, self.image_dir, source_format="auto")
+
+        labels_by_image = {
+            image_name: [box.label for box in result.boxes]
+            for image_name, result in batch.records
+        }
+        self.assertEqual(labels_by_image["image_a.jpg"], ["Lion"])
+        self.assertEqual(labels_by_image["image_b.jpg"], ["Lion"])
+        self.assertEqual(batch.report["class_list"], ["Lion"])
+        self.assertEqual(
+            batch.report["merge"]["global_label_normalizations"][0]["numeric_label"],
+            "3",
+        )
+
     def test_explicit_yolo_yaml_classes_path_is_supported(self):
         yaml_path = self._write(
             "custom_names.yaml",

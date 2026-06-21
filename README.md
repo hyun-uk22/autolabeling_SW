@@ -603,7 +603,7 @@ class MyDetectorPlugin(VisionTaskPlugin):
 
 검증 결과는 `conversion_report.json`에 저장됩니다. `--strict`를 사용하면 검증 이슈가 있는 레코드는 변환하지 않습니다. 이미지가 없거나 열 수 없는 레코드는 이미지 크기 기반 변환이 불가능하므로 항상 건너뜁니다.
 
-혼합 입력의 기본 중복 기준은 `--duplicate_iou 0.85`입니다. 같은 클래스와 겹침 기준을 만족하면 confidence가 높은 라벨을 유지하고, confidence가 같으면 COCO, Pascal VOC, YOLO 순으로 우선합니다. 같은 위치에서 YOLO 숫자 라벨과 VOC/COCO 클래스명이 겹치면 실제 클래스명을 canonical label로 사용하고 `input_summary.merge.label_normalizations`에 기록합니다. 그 외 서로 다른 클래스는 자동 삭제하지 않고 모두 유지하며 충돌로 보고합니다. 등록되지 않은 사용자 정의 JSON schema는 자동 변환하지 않습니다.
+혼합 입력의 기본 중복 기준은 `--duplicate_iou 0.85`입니다. 같은 클래스와 겹침 기준을 만족하면 confidence가 높은 라벨을 유지하고, confidence가 같으면 COCO, Pascal VOC, YOLO 순으로 우선합니다. 같은 위치에서 YOLO 숫자 라벨과 VOC/COCO 클래스명이 겹치면 실제 클래스명을 canonical label로 사용하고 `input_summary.merge.label_normalizations`에 기록합니다. 이렇게 확인된 숫자 class id와 클래스명의 대응이 하나로만 결정되면 같은 변환 배치의 YOLO-only 라벨에도 전파하고, 전파 내역은 `input_summary.merge.global_label_normalizations`에 기록합니다. 그 외 서로 다른 클래스는 자동 삭제하지 않고 모두 유지하며 충돌로 보고합니다. 등록되지 않은 사용자 정의 JSON schema는 자동 변환하지 않습니다.
 
 ## 정량 평가 리포트
 

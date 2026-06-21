@@ -737,6 +737,46 @@ def _canonical_image_key(image_name: str) -> str:
     return os.path.splitext(os.path.basename(normalized))[0].casefold()
 
 
+def _apply_inferred_numeric_label_mapping(
+    records: List[Tuple[str, DetectionResult]],
+    label_normalizations: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    candidates: Dict[str, set] = {}
+    for item in label_normalizations:
+        numeric_label = str(item.get("numeric_label", "")).strip()
+        canonical_label = str(item.get("canonical_label", "")).strip()
+        if numeric_label.isdigit() and canonical_label and not canonical_label.isdigit():
+            candidates.setdefault(numeric_label, set()).add(canonical_label)
+
+    inferred = {
+        numeric_label: next(iter(labels))
+        for numeric_label, labels in candidates.items()
+        if len(labels) == 1
+    }
+    if not inferred:
+        return []
+
+    propagated: List[Dict[str, Any]] = []
+    fields = ("boxes", "segments", "classifications", "poses", "tracks")
+    for image_name, result in records:
+        for field in fields:
+            for item in getattr(result, field):
+                label = getattr(item, "label", None)
+                if str(label) not in inferred:
+                    continue
+                numeric_label = str(label)
+                canonical_label = inferred[numeric_label]
+                item.label = canonical_label
+                propagated.append({
+                    "image": image_name,
+                    "type": f"{field}_global_numeric_label",
+                    "numeric_label": numeric_label,
+                    "canonical_label": canonical_label,
+                    "reason": "inferred_from_matching_named_label",
+                })
+    return propagated
+
+
 def merge_label_records(
     records: List[Tuple[str, DetectionResult, LabelSource]],
     duplicate_iou: float = 0.85,
@@ -829,11 +869,14 @@ def merge_label_records(
         }
         output.append((entry["image_name"], result))
     output.sort(key=lambda item: item[0].casefold())
+    global_normalizations = _apply_inferred_numeric_label_mapping(output, label_normalizations)
+    label_normalizations.extend(global_normalizations)
     return output, {
         "duplicate_iou": duplicate_iou,
         "duplicates_removed": duplicates_removed,
         "conflicts": conflicts,
         "label_normalizations": label_normalizations,
+        "global_label_normalizations": global_normalizations,
         "image_identity_collisions": identity_collisions,
     }
 

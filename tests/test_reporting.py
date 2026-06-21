@@ -25,6 +25,25 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(missing_label["severity"], "high")
         self.assertEqual(empty_coco["code"], "no_annotations")
         self.assertEqual(empty_coco["category"], "output_format")
+        self.assertEqual(empty_coco["affected_path"], "D:/output.json")
+        self.assertIn("D:/output.json", empty_coco["fix_instruction"])
+        self.assertTrue(empty_coco["suggestions"])
+
+    def test_user_action_report_prioritizes_specific_fix_instructions(self):
+        report = build_user_action_report(
+            [{"image": "missing.jpg", "issues": ["missing_image:D:/images/missing.jpg"]}],
+            total_records=1,
+        )
+
+        record = report["detailed_records"][0]
+
+        self.assertEqual(report["status"], "needs_review")
+        self.assertEqual(record["status"], "blocked")
+        self.assertIn("D:/images/missing.jpg", record["priority_actions"][0])
+        self.assertEqual(
+            record["detailed_issues"][0]["affected_path"],
+            "D:/images/missing.jpg",
+        )
 
     def test_completion_rate_uses_all_processed_records(self):
         report = build_user_action_report(
