@@ -35,6 +35,7 @@ CLASS_LIST_PRIORITY = {
 class LabelSource:
     path: str
     format: str
+    search_root: Optional[str] = None
 
 
 @dataclass
@@ -166,19 +167,42 @@ def load_yolo_yaml_classes(yaml_path: Optional[str]) -> List[str]:
     return []
 
 
-def _candidate_yolo_class_paths(source_path: str, classes_path: Optional[str] = None) -> List[str]:
+def _candidate_yolo_class_paths(
+    source_path: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> List[str]:
     if classes_path:
         return [classes_path]
     base_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
-    candidates = [os.path.join(base_dir, name) for name in YOLO_DATASET_FILENAMES]
-    if os.path.isdir(base_dir):
+    search_dirs = []
+    current = os.path.abspath(base_dir)
+    root = os.path.abspath(search_root) if search_root else current
+    while True:
+        search_dirs.append(current)
+        if current == root or os.path.dirname(current) == current:
+            break
+        try:
+            common = os.path.commonpath([current, root])
+        except ValueError:
+            break
+        if common != root:
+            break
+        current = os.path.dirname(current)
+
+    candidates = []
+    for directory in search_dirs:
+        candidates.extend(os.path.join(directory, name) for name in YOLO_DATASET_FILENAMES)
+    for directory in search_dirs:
+        if not os.path.isdir(directory):
+            continue
         candidates.extend(
-            os.path.join(base_dir, name)
-            for name in sorted(os.listdir(base_dir))
+            os.path.join(directory, name)
+            for name in sorted(os.listdir(directory))
             if name.lower().endswith((".yaml", ".yml"))
             and name.lower() not in YOLO_DATASET_FILENAMES
         )
-    candidates.append(os.path.join(base_dir, "classes.txt"))
+    candidates.extend(os.path.join(directory, "classes.txt") for directory in search_dirs)
     return candidates
 
 
@@ -191,13 +215,21 @@ def load_classes(classes_path: Optional[str]) -> List[str]:
         return [line.strip() for line in f if line.strip()]
 
 
-def load_yolo_classes(source_path: str, classes_path: Optional[str] = None) -> List[str]:
-    classes, _ = resolve_yolo_class_mapping(source_path, classes_path)
+def load_yolo_classes(
+    source_path: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> List[str]:
+    classes, _ = resolve_yolo_class_mapping(source_path, classes_path, search_root)
     return classes
 
 
-def resolve_yolo_class_mapping(source_path: str, classes_path: Optional[str] = None) -> Tuple[List[str], Optional[str]]:
-    for candidate in _candidate_yolo_class_paths(source_path, classes_path):
+def resolve_yolo_class_mapping(
+    source_path: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> Tuple[List[str], Optional[str]]:
+    for candidate in _candidate_yolo_class_paths(source_path, classes_path, search_root):
         class_list = load_classes(candidate)
         if class_list:
             return class_list, os.path.abspath(candidate)
@@ -226,7 +258,7 @@ def _labels_from_result(result: DetectionResult) -> List[str]:
 
 def _classes_for_source(source: LabelSource, classes_path: Optional[str]) -> List[str]:
     if source.format == "yolo":
-        return load_yolo_classes(source.path, classes_path)
+        return load_yolo_classes(source.path, classes_path, source.search_root)
     if source.format == "coco":
         with open(source.path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -251,14 +283,14 @@ def _classes_for_source(source: LabelSource, classes_path: Optional[str]) -> Lis
 def _source_metadata(source: LabelSource, classes_path: Optional[str]) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}
     if source.format == "yolo":
-        class_list, mapping_path = resolve_yolo_class_mapping(source.path, classes_path)
+        class_list, mapping_path = resolve_yolo_class_mapping(source.path, classes_path, source.search_root)
         metadata["class_mapping"] = {
             "status": "found" if class_list else "missing",
             "path": mapping_path,
             "classes": len(class_list),
             "searched": [
                 os.path.abspath(path)
-                for path in _candidate_yolo_class_paths(source.path, classes_path)
+                for path in _candidate_yolo_class_paths(source.path, classes_path, source.search_root)
             ],
         }
     return metadata
@@ -303,8 +335,13 @@ def parse_yolo_file(path: str, image_name: str, class_list: List[str]) -> Tuple[
     return image_name, result
 
 
-def import_yolo(input_path: str, image_dir: str, classes_path: Optional[str] = None) -> List[Tuple[str, DetectionResult]]:
-    class_list = load_yolo_classes(input_path, classes_path)
+def import_yolo(
+    input_path: str,
+    image_dir: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> List[Tuple[str, DetectionResult]]:
+    class_list = load_yolo_classes(input_path, classes_path, search_root)
     files = []
     if os.path.isdir(input_path):
         files = [
@@ -482,10 +519,11 @@ def _import_with_format(
     image_dir: str,
     source_format: str,
     classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
 ) -> List[Tuple[str, DetectionResult]]:
     fmt = source_format
     if fmt == "yolo":
-        return import_yolo(input_path, image_dir, classes_path=classes_path)
+        return import_yolo(input_path, image_dir, classes_path=classes_path, search_root=search_root)
     if fmt == "pascal_voc":
         return import_pascal_voc(input_path)
     if fmt == "coco":
@@ -563,7 +601,11 @@ def _detect_label_file(path: str, image_dir: str) -> Tuple[Optional[str], Option
 def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelSource], Dict[str, Any]]:
     if not os.path.isdir(input_path):
         fmt = infer_label_format(input_path)
-        return [LabelSource(path=input_path, format=fmt)], {
+        return [LabelSource(
+            path=input_path,
+            format=fmt,
+            search_root=os.path.dirname(os.path.abspath(input_path)),
+        )], {
             "files_scanned": 1,
             "skipped_files": [],
         }
@@ -581,7 +623,7 @@ def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelS
                 continue
             fmt, reason = _detect_label_file(path, image_dir)
             if fmt:
-                sources.append(LabelSource(path=path, format=fmt))
+                sources.append(LabelSource(path=path, format=fmt, search_root=os.path.abspath(input_path)))
             elif reason:
                 skipped.append({"path": os.path.abspath(path), "reason": reason})
     sources.sort(key=lambda item: (item.format, item.path.lower()))
@@ -617,6 +659,11 @@ def _prefer_new(existing, existing_format: str, new, new_format: str) -> bool:
     return SOURCE_PRIORITY.get(new_format, 0) > SOURCE_PRIORITY.get(existing_format, 0)
 
 
+def _is_numeric_label(label: str) -> bool:
+    text = str(label).strip()
+    return text.isdigit()
+
+
 def _merge_spatial_items(
     target: list,
     target_sources: List[str],
@@ -627,17 +674,40 @@ def _merge_spatial_items(
     image_name: str,
     item_type: str,
     conflicts: List[Dict[str, Any]],
+    label_normalizations: List[Dict[str, Any]],
 ) -> int:
     duplicates = 0
     for item in incoming:
         item_values = value_getter(item)
         duplicate_index = None
+        normalized = False
         for index, existing in enumerate(target):
             overlap = _spatial_iou(value_getter(existing), item_values)
             if overlap < duplicate_iou:
                 continue
             if existing.label == item.label:
                 duplicate_index = index
+                break
+            existing_numeric = _is_numeric_label(existing.label)
+            incoming_numeric = _is_numeric_label(item.label)
+            if existing_numeric != incoming_numeric:
+                duplicates += 1
+                existing_format = target_sources[index]
+                chosen_label = item.label if existing_numeric else existing.label
+                numeric_label = existing.label if existing_numeric else item.label
+                if existing_numeric:
+                    target[index] = item.model_copy(deep=True)
+                    target_sources[index] = incoming_format
+                label_normalizations.append({
+                    "image": image_name,
+                    "type": item_type,
+                    "numeric_label": numeric_label,
+                    "canonical_label": chosen_label,
+                    "iou": round(overlap, 6),
+                    "existing_format": existing_format,
+                    "incoming_format": incoming_format,
+                })
+                normalized = True
                 break
             conflicts.append({
                 "image": image_name,
@@ -648,6 +718,8 @@ def _merge_spatial_items(
                 "existing_format": target_sources[index],
                 "incoming_format": incoming_format,
             })
+        if normalized:
+            continue
         if duplicate_index is None:
             target.append(item.model_copy(deep=True))
             target_sources.append(incoming_format)
@@ -672,6 +744,7 @@ def merge_label_records(
     grouped: Dict[str, Dict[str, Any]] = {}
     duplicates_removed = 0
     conflicts: List[Dict[str, Any]] = []
+    label_normalizations: List[Dict[str, Any]] = []
     identity_collisions = []
 
     for image_name, result, source in records:
@@ -706,6 +779,7 @@ def merge_label_records(
             image_name,
             "box_label_conflict",
             conflicts,
+            label_normalizations,
         )
         duplicates_removed += _merge_spatial_items(
             merged.segments,
@@ -717,6 +791,7 @@ def merge_label_records(
             image_name,
             "segment_label_conflict",
             conflicts,
+            label_normalizations,
         )
 
         existing_classes = {item.label: index for index, item in enumerate(merged.classifications)}
@@ -758,6 +833,7 @@ def merge_label_records(
         "duplicate_iou": duplicate_iou,
         "duplicates_removed": duplicates_removed,
         "conflicts": conflicts,
+        "label_normalizations": label_normalizations,
         "image_identity_collisions": identity_collisions,
     }
 
@@ -774,7 +850,8 @@ def import_labels_with_report(
         sources, discovery = discover_label_sources(input_path, image_dir)
     else:
         fmt = infer_label_format(input_path) if source_format == "auto" else source_format
-        sources = [LabelSource(path=input_path, format=fmt)]
+        search_root = input_path if os.path.isdir(input_path) else os.path.dirname(os.path.abspath(input_path))
+        sources = [LabelSource(path=input_path, format=fmt, search_root=os.path.abspath(search_root))]
 
     imported = []
     processed_sources = []
@@ -787,9 +864,15 @@ def import_labels_with_report(
                 image_dir,
                 source.format,
                 classes_path=classes_path,
+                search_root=source.search_root,
             )
             source_classes = _classes_for_source(source, classes_path)
-            if not source_classes:
+            metadata = _source_metadata(source, classes_path)
+            has_unmapped_yolo = (
+                source.format == "yolo"
+                and metadata.get("class_mapping", {}).get("status") == "missing"
+            )
+            if not source_classes and not has_unmapped_yolo:
                 for _, result in source_records:
                     _append_unique(source_classes, _labels_from_result(result))
             processed_sources.append({
@@ -797,7 +880,7 @@ def import_labels_with_report(
                 "format": source.format,
                 "records": len(source_records),
                 "classes": source_classes,
-                **_source_metadata(source, classes_path),
+                **metadata,
             })
             class_sources.append((source.format, os.path.abspath(source.path), source_classes))
             imported.extend((image_name, result, source) for image_name, result in source_records)

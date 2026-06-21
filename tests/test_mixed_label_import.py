@@ -103,6 +103,19 @@ names:
         self.assertEqual(batch.report["processed_files"][0]["class_mapping"]["status"], "found")
         self.assertTrue(batch.report["processed_files"][0]["class_mapping"]["path"].endswith("data.yaml"))
 
+    def test_nested_yolo_source_uses_mapping_from_input_root(self):
+        self._write(
+            "data.yaml",
+            "names: [ant, bear, tiger, Lion]\n",
+        )
+        self._write("yolo/image_a.txt", "3 0.300000 0.300000 0.400000 0.400000\n")
+
+        batch = import_labels_with_report(self.label_dir, self.image_dir, source_format="auto")
+
+        self.assertEqual(batch.records[0][1].boxes[0].label, "Lion")
+        self.assertEqual(batch.report["class_list"], ["ant", "bear", "tiger", "Lion"])
+        self.assertTrue(batch.report["processed_files"][0]["class_mapping"]["path"].endswith("data.yaml"))
+
     def test_yolo_without_mapping_reports_missing_class_mapping(self):
         self._write("image_a.txt", "3 0.300000 0.300000 0.400000 0.400000\n")
 
@@ -111,6 +124,27 @@ names:
         self.assertEqual(batch.records[0][1].boxes[0].label, "3")
         self.assertEqual(batch.report["processed_files"][0]["class_mapping"]["status"], "missing")
         self.assertIn("classes.txt", "\n".join(batch.report["processed_files"][0]["class_mapping"]["searched"]))
+
+    def test_unmapped_yolo_numeric_label_uses_matching_named_label_from_other_format(self):
+        self._write("yolo/image_a.txt", "3 0.300000 0.300000 0.400000 0.400000\n")
+        self._write(
+            "voc/image_a.xml",
+            """<?xml version="1.0" encoding="utf-8"?>
+<annotation>
+  <filename>image_a.jpg</filename>
+  <size><width>100</width><height>100</height><depth>3</depth></size>
+  <object><name>Lion</name><bndbox><xmin>10</xmin><ymin>10</ymin><xmax>50</xmax><ymax>50</ymax></bndbox></object>
+</annotation>
+""",
+        )
+
+        batch = import_labels_with_report(self.label_dir, self.image_dir, source_format="auto")
+
+        self.assertEqual(len(batch.records), 1)
+        self.assertEqual([box.label for box in batch.records[0][1].boxes], ["Lion"])
+        self.assertEqual(batch.report["class_list"], ["Lion"])
+        self.assertEqual(batch.report["merge"]["label_normalizations"][0]["numeric_label"], "3")
+        self.assertEqual(batch.report["merge"]["label_normalizations"][0]["canonical_label"], "Lion")
 
     def test_explicit_yolo_yaml_classes_path_is_supported(self):
         yaml_path = self._write(
