@@ -173,22 +173,34 @@ class IssueActionReporter:
         """이슈 문자열을 분석하여 카테고리화"""
         issue_key = issue_str.split(":", 1)[0].split("[")[0]
 
+        # 동적 이슈는 기본 템플릿보다 먼저 처리해야 실제 경로를 메시지에 보존할 수 있다.
+        if issue_str.startswith("missing_image:"):
+            info = self.ISSUE_ACTIONS["missing_image"].copy()
+            info["original_issue"] = issue_str
+            info["affected_path"] = issue_str.split(":", 1)[1]
+            info["message"] = f"이미지 파일을 찾을 수 없습니다: {info['affected_path']}"
+            info["fix_instruction"] = (
+                f"이미지 파일 `{info['affected_path']}`을 복원하거나 "
+                "라벨 파일의 이미지 이름이 실제 파일명과 일치하도록 수정해주세요"
+            )
+            return info
+
+        if issue_str.startswith("image_open_failed:"):
+            info = self.ISSUE_ACTIONS["image_open_failed"].copy()
+            info["original_issue"] = issue_str
+            info["affected_path"] = issue_str.split(":", 1)[1]
+            info["fix_instruction"] = (
+                f"이미지 파일 `{info['affected_path']}`이 손상되지 않았는지 확인하고 "
+                "지원 형식(PNG, JPG, JPEG)으로 다시 저장해주세요"
+            )
+            return info
+
         if issue_key in self.ISSUE_ACTIONS:
             action_info = self.ISSUE_ACTIONS[issue_key].copy()
             action_info["original_issue"] = issue_str
+            action_info["affected_path"] = ""
+            action_info["fix_instruction"] = self._build_fix_instruction(issue_key, "")
             return action_info
-
-        # 동적 이슈 처리
-        if "missing_image:" in issue_str:
-            info = self.ISSUE_ACTIONS["missing_image"].copy()
-            info["original_issue"] = issue_str
-            info["message"] = f"이미지 파일을 찾을 수 없습니다: {issue_str.split(':', 1)[1]}"
-            return info
-
-        if "image_open_failed:" in issue_str:
-            info = self.ISSUE_ACTIONS["image_open_failed"].copy()
-            info["original_issue"] = issue_str
-            return info
 
         # 기본값
         return {
@@ -197,8 +209,27 @@ class IssueActionReporter:
             "message": issue_str,
             "user_action": "이슈를 수동으로 검토해주세요",
             "suggestions": ["로그 파일 확인", "지원팀 문의"],
-            "original_issue": issue_str
+            "original_issue": issue_str,
+            "affected_path": "",
+            "fix_instruction": "워크플로우 로그와 원본 이슈를 확인한 뒤 수동으로 검토해주세요",
         }
+
+    def _build_fix_instruction(self, issue_key: str, path: str) -> str:
+        target = f" `{path}`" if path else ""
+        instructions = {
+            "empty_result": f"라벨 파일{target}에 객체 라벨 행 또는 annotation을 추가하거나 해당 샘플을 제외하고 다시 변환해주세요",
+            "missing_image": f"이미지 파일{target}을 복원하거나 라벨 파일의 이미지 이름이 실제 파일명과 일치하도록 수정해주세요",
+            "image_open_failed": f"이미지 파일{target}이 손상되지 않았는지 확인하고 지원 형식(PNG, JPG, JPEG)으로 다시 저장해주세요",
+            "invalid_image_size": f"이미지 파일{target}을 올바른 크기의 이미지로 교체해주세요",
+            "coordinate_out_of_range": f"라벨 파일{target}의 좌표를 0~1 정규화 좌표로 수정해주세요. 픽셀 좌표라면 이미지 width/height로 나눠 정규화해주세요",
+            "invalid_box_order": f"라벨 파일{target}에서 xmin < xmax, ymin < ymax가 되도록 좌표 순서를 수정해주세요",
+            "confidence_out_of_range": f"라벨 파일{target}의 confidence 값을 0~1 범위로 정규화해주세요",
+            "no_label_rows": f"YOLO 출력 파일{target}에 class_id x_center y_center width height 행이 생기도록 bounding box 라벨을 추가해주세요",
+            "no_objects": f"Pascal VOC 파일{target}에 object/name/bndbox 항목이 포함되도록 수정해주세요",
+            "no_annotations": f"COCO 파일{target}의 annotations와 categories가 비어 있지 않도록 원본 라벨을 확인해주세요",
+            "no_label_records": f"Vision JSON 파일{target}에 boxes, segments, poses, texts, tracks 중 하나 이상의 라벨 record를 추가해주세요",
+        }
+        return instructions.get(issue_key, f"파일{target}의 원본 이슈를 확인하고 라벨 구조 또는 출력 포맷 설정을 수정해주세요")
 
     def generate_action_report(
         self,
@@ -234,7 +265,7 @@ class IssueActionReporter:
             "issues_by_category": {cat: len(items) for cat, items in by_category.items()},
             "detailed_issues": categorized_issues,
             "priority_actions": [
-                issue["user_action"] for issue in critical + high
+                issue.get("fix_instruction") or issue["user_action"] for issue in critical + high
             ][:3],  # 최대 3개 우선순위 액션
             "metadata": {
                 "has_labels": result_data and result_data.get("objects", 0) > 0 if result_data else False
@@ -292,7 +323,7 @@ class IssueActionReporter:
         # 블로킹 이슈가 많으면
         blocked_count = sum(1 for r in records if r.get("status") == "blocked")
         if blocked_count > len(records) * 0.3:
-            actions.append(f"⚠️ {blocked_count}개 파일이 블로킹 상태입니다. 우선적으로 처리가 필요합니다.")
+            actions.append(f"{blocked_count}개 파일이 블로킹 상태입니다. 우선적으로 처리가 필요합니다.")
 
         # 특정 이슈가 많으면
         all_categories = {}
@@ -303,24 +334,24 @@ class IssueActionReporter:
 
         if all_categories.get("input_data", 0) > 0:
             actions.append(
-                f"📁 입력 데이터 문제가 {all_categories['input_data']}건 발견되었습니다. "
+                f"입력 데이터 문제가 {all_categories['input_data']}건 발견되었습니다. "
                 "원본 데이터를 확인해주세요."
             )
 
         if all_categories.get("label_quality", 0) > 0:
             actions.append(
-                f"🏷️ 라벨 품질 문제가 {all_categories['label_quality']}건 발견되었습니다. "
+                f"라벨 품질 문제가 {all_categories['label_quality']}건 발견되었습니다. "
                 "라벨링 도구 설정을 확인해주세요."
             )
 
         if all_categories.get("file_system", 0) > 0:
             actions.append(
-                f"📂 파일 시스템 문제가 {all_categories['file_system']}건 발견되었습니다. "
+                f"파일 시스템 문제가 {all_categories['file_system']}건 발견되었습니다. "
                 "파일 경로와 권한을 확인해주세요."
             )
 
         if not actions:
-            actions.append("✅ 대부분의 데이터가 정상적으로 처리되었습니다.")
+            actions.append("대부분의 데이터가 정상적으로 처리되었습니다.")
 
         return actions
 
@@ -377,9 +408,23 @@ def generate_user_report(validation_records: List[Dict], export_records: List[Di
         }
 
     summary = reporter.generate_summary_report(all_reports)
+    total_records = len({record["image"] for record in validation_records})
+    if export_records:
+        total_records = max(total_records, len({record["image"] for record in [*validation_records, *export_records]}))
+    validation_clean = sum(1 for record in validation_records if not record.get("issues"))
+    needs_review = len({report["image"] for report in all_reports})
+    summary["summary"]["total_records"] = total_records
+    summary["summary"]["clean"] = validation_clean
+    summary["summary"]["needs_review"] = needs_review
+    summary["completion_rate"] = f"{(validation_clean / total_records * 100):.1f}%" if total_records > 0 else "0%"
+    for issue in summary["top_issues"]:
+        issue["percentage"] = (
+            f"{(issue['count'] / total_records * 100):.1f}%"
+            if total_records > 0 else "0%"
+        )
 
     return {
-        "status": "partial_success" if summary["summary"]["clean"] > 0 else "needs_review",
+        "status": "partial_success" if validation_clean > 0 else "needs_review",
         "message": f"{summary['summary']['needs_review']}개 파일에 문제가 발견되었습니다",
         "summary": summary["summary"],
         "completion_rate": summary["completion_rate"],
