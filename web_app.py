@@ -518,6 +518,11 @@ with generate_tab:
         with right:
             st.markdown('<div class="form-section">생성 규칙</div>', unsafe_allow_html=True)
             task_type = st.selectbox("태스크", TASK_OPTIONS)
+            generation_mode_label = st.selectbox(
+                "생성 모드",
+                ["VLM + 비전 모델", "비전 모델만"],
+                help="성능 테스트가 필요하면 비전 모델만을 선택해 VLM API 호출을 건너뜁니다.",
+            )
             generation_formats = st.multiselect("출력 포맷", FORMAT_OPTIONS, default=["yolo"], key="generation_formats")
             threshold = st.slider("신뢰도 기준", 0.0, 1.0, 0.75, 0.01)
             generation_insight_ratio = st.slider(
@@ -549,6 +554,7 @@ with generate_tab:
                 "operations": [{
                     "action": "generate",
                     "task_type": task_type,
+                    "generation_mode": "specialist_only" if generation_mode_label == "비전 모델만" else "vlm_plugin",
                     "img_dir": resolve_workspace_path(workspace, generation_images),
                     "out_dir": resolve_workspace_path(workspace, generation_output),
                     "vis_dir": resolve_workspace_path(workspace, visualization_output),

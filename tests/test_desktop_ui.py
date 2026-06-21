@@ -50,6 +50,7 @@ class DesktopUiTests(unittest.TestCase):
         generation_plan, expensive = generation.build_plan()
         self.assertTrue(expensive)
         self.assertEqual(generation_plan["operations"][0]["action"], "generate")
+        self.assertEqual(generation_plan["operations"][0]["generation_mode"], "vlm_plugin")
         self.assertEqual(
             generation_plan["operations"][0]["plugin_config"],
             str((Path(self.workspace) / "configs" / "plugins.json").resolve()),

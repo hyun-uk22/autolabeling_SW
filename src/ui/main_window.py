@@ -313,6 +313,9 @@ class GeneratePage(OperationPage):
         self.visual_dir.setText(WORKSPACE_DEFAULTS["visualized"])
         self.task_type = QComboBox()
         self.task_type.addItems(["object_detection", "classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"])
+        self.generation_mode = QComboBox()
+        self.generation_mode.addItem("VLM + 비전 모델", "vlm_plugin")
+        self.generation_mode.addItem("비전 모델만", "specialist_only")
         self.formats = FormatSelector()
         self.threshold = QDoubleSpinBox()
         self.threshold.setRange(0.0, 1.0)
@@ -330,6 +333,7 @@ class GeneratePage(OperationPage):
         self.form.addRow("라벨 출력", self.output_dir)
         self.form.addRow("시각화 출력", self.visual_dir)
         self.form.addRow("태스크", self.task_type)
+        self.form.addRow("생성 모드", self.generation_mode)
         self.form.addRow("출력 포맷", self.formats)
         self.form.addRow("신뢰도 기준", self.threshold)
         self.form.addRow("초안 추론 횟수", self.inference_count)
@@ -343,6 +347,7 @@ class GeneratePage(OperationPage):
         operation = {
             "action": "generate",
             "task_type": self.task_type.currentText(),
+            "generation_mode": self.generation_mode.currentData(),
             "img_dir": resolve_workspace_path(self.workspace, _require_path(self.image_dir, "이미지 디렉터리")),
             "out_dir": resolve_workspace_path(self.workspace, _require_path(self.output_dir, "라벨 출력")),
             "vis_dir": resolve_workspace_path(self.workspace, _require_path(self.visual_dir, "시각화 출력")),

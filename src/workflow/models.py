@@ -18,6 +18,7 @@ class OperationPlan(BaseModel):
     custom_label_template: Optional[str] = None
     custom_label_extension: str = ".json"
     prompt: str = "Detect and classify all prominent objects in this image. Output strictly as JSON."
+    generation_mode: str = "vlm_plugin"
     plugin_config: Optional[str] = None
     plugin_fail_fast: bool = False
     gt_dir: Optional[str] = None
@@ -51,6 +52,14 @@ class OperationPlan(BaseModel):
         }
         if value not in allowed:
             raise ValueError(f"Unsupported task_type: {value}")
+        return value
+
+    @field_validator("generation_mode")
+    @classmethod
+    def validate_generation_mode(cls, value):
+        allowed = {"vlm_plugin", "specialist_only"}
+        if value not in allowed:
+            raise ValueError(f"Unsupported generation_mode: {value}")
         return value
 
 

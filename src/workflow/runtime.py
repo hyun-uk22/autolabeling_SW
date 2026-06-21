@@ -60,6 +60,15 @@ class WorkflowRuntime:
             name for name in os.listdir(operation.img_dir)
             if name.lower().endswith((".png", ".jpg", ".jpeg"))
         )
+        if operation.generation_mode == "specialist_only":
+            self._ensure_generation_clients(operation, None, None)
+            return {
+                "images": images,
+                "low_model": None,
+                "high_model": None,
+                "warnings": ["specialist_only mode: VLM draft and high verification are disabled"],
+                "plugin_prepare_records": self.plugin_prepare_records,
+            }
         low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
         valid, messages = validate_cascade_setup(low_model, high_model, self.allow_same_model)
         if not valid:
@@ -76,8 +85,9 @@ class WorkflowRuntime:
             "plugin_prepare_records": self.plugin_prepare_records,
         }
 
-    def _ensure_generation_clients(self, operation: OperationPlan, low_model: str, high_model: str) -> None:
+    def _ensure_generation_clients(self, operation: OperationPlan, low_model: Optional[str], high_model: Optional[str]) -> None:
         key = (
+            operation.generation_mode,
             low_model,
             high_model,
             operation.task_type,
@@ -88,23 +98,42 @@ class WorkflowRuntime:
         )
         if key == self._generation_key:
             return
-        self.low_client = VisionLLMClient(low_model)
-        self.high_client = VisionLLMClient(high_model)
-        self.verification_agent = HierarchicalVerificationAgent(
-            self.low_client,
-            self.high_client,
-            threshold=operation.threshold,
-            inference_count=operation.inference_count,
-            draft_temperature=operation.draft_temperature,
-        )
-        plugins = load_generation_plugins(operation.plugin_config)
+        if operation.generation_mode == "specialist_only":
+            self.low_client = None
+            self.high_client = None
+            self.verification_agent = None
+        else:
+            self.low_client = VisionLLMClient(low_model)
+            self.high_client = VisionLLMClient(high_model)
+            self.verification_agent = HierarchicalVerificationAgent(
+                self.low_client,
+                self.high_client,
+                threshold=operation.threshold,
+                inference_count=operation.inference_count,
+                draft_temperature=operation.draft_temperature,
+            )
+        plugins = load_generation_plugins(operation.plugin_config, operation.generation_mode)
         self.plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=operation.plugin_fail_fast)
         self.plugin_prepare_records = self.plugin_orchestrator.prepare(operation.task_type)
         self._generation_key = key
 
     def _ensure_generation_for_operation(self, operation: OperationPlan) -> None:
+        if operation.generation_mode == "specialist_only":
+            if self._generation_key != (
+                operation.generation_mode,
+                None,
+                None,
+                operation.task_type,
+                operation.inference_count,
+                operation.draft_temperature,
+                operation.plugin_config,
+                operation.plugin_fail_fast,
+            ):
+                self._ensure_generation_clients(operation, None, None)
+            return
         low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
         if self._generation_key != (
+            operation.generation_mode,
             low_model,
             high_model,
             operation.task_type,
@@ -117,6 +146,15 @@ class WorkflowRuntime:
 
     def generate_drafts(self, image_path: str, operation: OperationPlan) -> Dict[str, Any]:
         self._ensure_generation_for_operation(operation)
+        if operation.generation_mode == "specialist_only":
+            seed = DetectionResult(task_type=operation.task_type)
+            return {
+                "drafts": [],
+                "result": seed.model_dump(),
+                "consistency": 0.0,
+                "low_attempts": 0,
+                "elapsed_sec": 0.0,
+            }
         started = time.perf_counter()
         before = self.low_client.api_attempts
         drafts, seed, consistency = self.verification_agent.generate_draft_labels(
@@ -153,6 +191,8 @@ class WorkflowRuntime:
         issues: List[str],
     ) -> Tuple[bool, str]:
         self._ensure_generation_for_operation(operation)
+        if operation.generation_mode == "specialist_only":
+            return False, "specialist_only mode disables high VLM verification"
         return self.verification_agent.needs_escalation(
             result,
             threshold=operation.threshold,
@@ -167,6 +207,13 @@ class WorkflowRuntime:
         specialist_result: DetectionResult,
     ) -> Dict[str, Any]:
         self._ensure_generation_for_operation(operation)
+        if operation.generation_mode == "specialist_only":
+            return {
+                "result": specialist_result,
+                "agreement": 0.0,
+                "high_attempts": 0,
+                "elapsed_sec": 0.0,
+            }
         started = time.perf_counter()
         before = self.high_client.api_attempts
         merged, agreement = self.verification_agent.high_verify(

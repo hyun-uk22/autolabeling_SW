@@ -180,6 +180,7 @@ LLM 호출에 실패하면 기존 규칙 parser의 오류를 사용자에게 표
 | 라벨 출력 | 생성 라벨 저장 위치 | `data/labeled` |
 | 시각화 출력 | 라벨 시각화 이미지 저장 위치 | `data/visualized` |
 | Plugin 설정 | specialist plugin 설정 | `configs/plugins.json` |
+| 생성 모드 | `VLM + 비전 모델` 또는 `비전 모델만` | `VLM + 비전 모델` |
 | 태스크 | 생성할 vision task | `object_detection` |
 | 출력 포맷 | 라벨 export 형식 | `yolo` |
 | 신뢰도 기준 | 고비용 검증 단계 판단 기준 | `0.75` |
@@ -188,6 +189,8 @@ LLM 호출에 실패하면 기존 규칙 parser의 오류를 사용자에게 표
 | 프롬프트 | 모델에 전달할 작업 지시 | 사용자 입력 |
 
 프롬프트 입력창은 빈 값으로 시작하며 한국어 예시가 placeholder로만 표시된다. 빈 프롬프트는 실행할 수 없다.
+
+`비전 모델만` 생성 모드는 성능 비교용으로 low/high VLM 호출을 건너뛴다. 기존 cascade 동작으로 되돌리려면 `VLM + 비전 모델`을 선택한다.
 
 지원 task는 다음과 같다.
 

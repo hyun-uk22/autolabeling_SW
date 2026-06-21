@@ -171,6 +171,7 @@ python main.py
 | `--prompt` | 객체 탐지 기본 prompt | VLM에 전달할 사용자 지시문 |
 | `--task_type` | `object_detection` | 라벨링 태스크 |
 | `--threshold` | `0.75` | low 결과 consistency 에스컬레이션 기준 |
+| `--generation_mode` | `vlm_plugin` | `vlm_plugin`은 VLM+전문 모델, `specialist_only`는 VLM 없이 전문 모델만 실행 |
 | `--low_model` | 환경 변수 또는 `gpt-4o-mini` | 초안 생성 VLM |
 | `--high_model` | 환경 변수 또는 `gpt-4o` | 불확실 샘플 검증 VLM |
 | `--inference_count` | `3` | low VLM 반복 추론 횟수 |
@@ -261,6 +262,8 @@ custom을 선택했는데 템플릿이 없으면 실행 전에 중단한다.
 5. orchestrator 생성
 
 전문 모델 weight는 태스크 시작 시점의 plugin prepare 단계에서 로드 또는 다운로드를 먼저 시도한다. 각 plugin은 이미 준비된 모델을 `refine()`에서 재사용한다.
+
+`generation_mode=specialist_only`에서는 low/high VLM 호출과 high verification을 건너뛰고 빈 seed 결과를 specialist plugin에 전달한다. Grounding DINO처럼 후보 class label이 필요한 모델은 `plugins.json`의 `labels`를 우선 사용하며, 설정이 없으면 성능 테스트용 기본 후보 label을 사용한다. 기존 동작으로 되돌리려면 `generation_mode`를 `vlm_plugin`으로 바꾸면 된다.
 
 ### 8.6 API key 검사
 

@@ -57,6 +57,14 @@ class PluginRegistryTests(unittest.TestCase):
         self.assertEqual(grounding_dino.config["weight"], 2.0)
         self.assertTrue(grounding_dino.supports("segmentation"))
 
+    def test_specialist_only_mode_adds_default_grounding_labels(self):
+        plugins = load_generation_plugins(generation_mode="specialist_only")
+        names = [plugin.plugin_name for plugin in plugins]
+        grounding_dino = plugins[names.index("grounding_dino")]
+
+        self.assertIn("person", grounding_dino.config["labels"])
+        self.assertIn("object", grounding_dino.config["labels"])
+
 
 if __name__ == "__main__":
     unittest.main()
