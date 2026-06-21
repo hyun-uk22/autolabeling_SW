@@ -12,7 +12,7 @@ from ..core.llm_client import VisionLLMClient
 from ..core.model_config import required_api_keys, resolve_model_names, validate_cascade_setup
 from ..core.models import DetectionResult
 from ..plugins.orchestrator import TaskPluginOrchestrator
-from ..plugins.registry import create_default_registry
+from ..plugins.registry import load_generation_plugins
 from ..reporting import (
     ArtifactAuditor,
     build_conversion_preflight,
@@ -42,6 +42,7 @@ class WorkflowRuntime:
         self.high_client = None
         self.verification_agent = None
         self.plugin_orchestrator = None
+        self.plugin_prepare_records = []
 
     def plan(self, request: str, supplied_plan: Optional[dict] = None) -> WorkflowPlan:
         return self.planner.plan(request, supplied_plan)
@@ -67,12 +68,19 @@ class WorkflowRuntime:
         if missing_keys:
             raise ValueError(f"Missing API key(s): {', '.join(missing_keys)}")
         self._ensure_generation_clients(operation, low_model, high_model)
-        return {"images": images, "low_model": low_model, "high_model": high_model, "warnings": messages}
+        return {
+            "images": images,
+            "low_model": low_model,
+            "high_model": high_model,
+            "warnings": messages,
+            "plugin_prepare_records": self.plugin_prepare_records,
+        }
 
     def _ensure_generation_clients(self, operation: OperationPlan, low_model: str, high_model: str) -> None:
         key = (
             low_model,
             high_model,
+            operation.task_type,
             operation.inference_count,
             operation.draft_temperature,
             operation.plugin_config,
@@ -89,10 +97,9 @@ class WorkflowRuntime:
             inference_count=operation.inference_count,
             draft_temperature=operation.draft_temperature,
         )
-        self.plugin_orchestrator = None
-        if operation.plugin_config:
-            plugins = create_default_registry().load_config(operation.plugin_config)
-            self.plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=operation.plugin_fail_fast)
+        plugins = load_generation_plugins(operation.plugin_config)
+        self.plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=operation.plugin_fail_fast)
+        self.plugin_prepare_records = self.plugin_orchestrator.prepare(operation.task_type)
         self._generation_key = key
 
     def _ensure_generation_for_operation(self, operation: OperationPlan) -> None:
@@ -100,6 +107,7 @@ class WorkflowRuntime:
         if self._generation_key != (
             low_model,
             high_model,
+            operation.task_type,
             operation.inference_count,
             operation.draft_temperature,
             operation.plugin_config,
@@ -277,6 +285,7 @@ class WorkflowRuntime:
             "high_api_attempts": high_attempts,
             "escalation_count": escalation_count,
             "plugins": plugins,
+            "plugin_prepare_records": self.plugin_prepare_records,
             "evaluation": evaluation,
             "performance": build_generation_performance(
                 len(records), total_elapsed, low_attempts, high_attempts, escalation_count,

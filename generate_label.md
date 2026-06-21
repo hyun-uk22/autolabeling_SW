@@ -22,7 +22,7 @@
 2. 저비용 VLM의 반복 추론으로 초안 라벨을 생성한다.
 3. 반복 결과의 self-consistency를 측정한다.
 4. consistency가 낮은 이미지만 고성능 VLM으로 에스컬레이션한다.
-5. 선택적으로 태스크별 전문 모델 plugin으로 결과를 보강한다.
+5. 태스크별 전문 모델 plugin으로 VLM 결과를 보강한다.
 6. 결과를 내부 공통 표현으로 정규화한다.
 7. YOLO, Pascal VOC, COCO, Vision JSONL, custom 포맷으로 저장한다.
 8. 처리 시간, API 호출, uncertainty, GT 평가 결과를 기록한다.
@@ -64,9 +64,9 @@
 태스크 지원은 두 층으로 구성된다.
 
 - VLM layer: 태스크별 JSON schema를 prompt로 제공해 결과를 생성한다.
-- Specialist layer: plugin 설정이 있을 때 태스크 전용 모델로 결과를 보강한다.
+- Specialist layer: 모든 라벨 생성에서 태스크 전용 모델로 결과를 보강한다.
 
-전문 모델 plugin을 지정하지 않으면 모든 태스크는 VLM 응답만으로 생성된다.
+전문 모델 plugin 설정 파일을 지정하지 않아도 기본 plugin chain이 자동으로 생성된다. 설정 파일은 기본 chain을 끄는 용도가 아니라 모델 checkpoint, 장치, threshold, weight를 조정하는 용도다.
 
 ## 5. 전체 워크플로우
 
@@ -77,7 +77,7 @@ CLI 옵션 / .env
 low/high 모델명 해석 및 cascade 검증
       |
       v
-출력 포맷 설정 + optional plugin 설정 로드
+출력 포맷 설정 + 기본 specialist plugin chain 로드
       |
       v
 API key 확인 및 VLM client 초기화
@@ -97,7 +97,7 @@ API key 확인 및 VLM client 초기화
       |          |                               |
       |          +-- threshold 미만 --> High VLM |
       |                                          |
-      |  optional specialist plugin chain        |
+      |  required specialist plugin chain        |
       |          |                               |
       |          v                               |
       |  결과 병합 + plugin score + uncertainty  |
@@ -252,16 +252,15 @@ custom을 선택했는데 템플릿이 없으면 실행 전에 중단한다.
 
 ### 8.5 Plugin 초기화
 
-`--plugin_config`가 있으면 다음 순서로 처리한다.
+라벨 생성 시 plugin은 다음 순서로 처리한다.
 
-1. built-in registry 생성
-2. JSON 설정 읽기
-3. `enabled=false` plugin 제외
-4. custom `module:ClassName` 동적 등록
-5. plugin 인스턴스 생성
-6. orchestrator 생성
+1. 기본 generation plugin chain 생성
+2. `--plugin_config`가 있으면 같은 이름의 plugin 설정을 병합
+3. custom `module:ClassName` plugin이 있으면 기본 chain 뒤에 추가
+4. plugin 인스턴스 생성
+5. orchestrator 생성
 
-전문 모델 weight는 이 단계에서 바로 로드하지 않는다. 각 plugin의 첫 `refine()` 호출에서 lazy loading한다.
+전문 모델 weight는 태스크 시작 시점의 plugin prepare 단계에서 로드 또는 다운로드를 먼저 시도한다. 각 plugin은 이미 준비된 모델을 `refine()`에서 재사용한다.
 
 ### 8.6 API key 검사
 
@@ -624,7 +623,7 @@ high 결과의 `mean_confidence`는 high 결과로 다시 계산한다.
 
 ## 18. 전문 모델 Plugin 단계
 
-plugin 설정이 없으면 이 단계는 생략된다.
+이 단계는 라벨 생성에서 항상 실행된다. 단, 전문 모델 의존성 또는 weight가 없으면 해당 오류를 `plugin_prepare_records`와 `plugin_records`에 남기고 기본값에서는 다음 plugin 및 다음 이미지 처리를 계속한다.
 
 설정 예시:
 
@@ -639,7 +638,7 @@ python main.py `
 
 orchestrator는 설정 순서대로 plugin을 순회하고 현재 `task_type`을 지원하는 plugin만 실행한다.
 
-`task_type=all`이면 설정된 모든 plugin이 실행 대상이다.
+`task_type=all`이면 기본 chain의 모든 plugin이 실행 대상이다.
 
 ### 18.2 Built-in Plugin
 
@@ -652,7 +651,7 @@ orchestrator는 설정 순서대로 plugin을 순회하고 현재 `task_type`을
 | `ocr` | EasyOCR | text detection/recognition |
 | `tracking` | `yolo11n.pt` + ByteTrack | frame sequence tracking |
 
-모델 파일은 repository에 포함되지 않으며 최초 plugin 실행 시 library가 다운로드할 수 있다.
+모델 파일은 repository에 포함되지 않으며 태스크 시작 시 plugin prepare 단계에서 library가 다운로드할 수 있다.
 
 ### 18.3 Plugin 입력
 
@@ -720,22 +719,14 @@ bedrock:...+grounding_dino+sam
 
 `--plugin_fail_fast` 사용 시 plugin 오류를 다시 발생시켜 현재 이미지의 처리 흐름을 중단한다. 바깥 이미지별 예외 처리에서 오류를 출력하고 다음 이미지로 이동한다.
 
-### 18.8 현재 Plugin 에스컬레이션 제한
+### 18.8 Plugin 기반 에스컬레이션
 
-high VLM 에스컬레이션 결정은 plugin 실행 전에 low VLM consistency만으로 완료된다.
-
-따라서 plugin이 VLM과 크게 불일치해 최종 uncertainty가 높아져도 high VLM을 두 번째로 호출하지 않는다.
+high VLM 에스컬레이션 결정은 low VLM 초안과 specialist plugin 실행 이후에 수행된다. 따라서 low VLM consistency, plugin agreement, validation issue를 함께 사용해 고성능 VLM 호출 여부를 결정할 수 있다.
 
 현재 순서:
 
 ```text
-Low VLM 반복 -> High 여부 결정 -> Optional Plugins
-```
-
-향후 권장 순서:
-
-```text
-Low VLM 반복 -> Specialist agreement -> 통합 uncertainty -> High VLM 결정
+Low VLM 반복 -> Specialist Plugins -> High 여부 결정
 ```
 
 ## 19. Dataset Insight Agent

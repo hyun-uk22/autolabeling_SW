@@ -1,6 +1,6 @@
 # Agentic Auto-Labeling System
 
-이미지 데이터셋의 라벨 생성, 표준 포맷 혼합 입력 변환, 검증, 평가를 하나의 workflow로 실행하는 vision dataset 도구입니다. AWS Bedrock, OpenAI, Anthropic VLM cascade와 선택적 task specialist plugin을 지원하며 CLI, Streamlit, Windows 데스크톱 인터페이스를 제공합니다.
+이미지 데이터셋의 라벨 생성, 표준 포맷 혼합 입력 변환, 검증, 평가를 하나의 workflow로 실행하는 vision dataset 도구입니다. AWS Bedrock, OpenAI, Anthropic VLM cascade와 태스크별 specialist vision model plugin을 함께 실행하며 CLI, Streamlit, Windows 데스크톱 인터페이스를 제공합니다.
 
 ## 주요 기능
 
@@ -491,15 +491,15 @@ data/labeled/
 
 ## 전문 모델 Plugin
 
-기본 실행은 기존과 동일한 VLM cascade만 사용합니다. `--plugin_config`를 지정하면 VLM 결과를 seed로 사용해 현재 태스크를 지원하는 전문 모델 plugin을 설정 순서대로 실행합니다.
+라벨 생성은 기본적으로 VLM cascade와 태스크별 전문 모델 plugin을 함께 사용합니다. `--plugin_config`를 지정하지 않아도 기본 plugin chain이 생성되며, `configs/plugins.json` 또는 `--plugin_config`는 모델 checkpoint, 장치, threshold, weight 같은 세부 설정을 덮어쓰는 용도로 사용합니다. 빈 `plugins.json`이 있어도 기본 chain은 비활성화되지 않습니다.
 
-선택 의존성 설치:
+전문 모델 의존성 설치:
 
 ```bash
 pip install -r requirements-specialists.txt
 ```
 
-실행 예시:
+설정 파일을 명시하는 실행 예시:
 
 ```bash
 python main.py ^
@@ -522,8 +522,6 @@ python main.py ^
 
 `configs/plugins.example.json`에서 다음을 조정할 수 있습니다.
 
-- plugin 활성화 여부와 실행 순서
-- 지원 task 목록
 - 모델 checkpoint/model id
 - CPU/GPU 장치
 - Grounding DINO box/text threshold
@@ -532,7 +530,7 @@ python main.py ^
 - OCR 언어
 - tracking backend
 
-전문 모델은 실제 plugin 실행 시점에만 import하고 모델을 로드합니다. `requirements-specialists.txt`를 설치하지 않았거나 checkpoint 다운로드에 실패하면 기본값에서는 해당 오류를 `plugin_records`에 기록하고 나머지 파이프라인을 계속합니다. `--plugin_fail_fast`를 지정하면 즉시 중단합니다.
+전문 모델은 라벨 생성 태스크 시작 시점의 plugin prepare 단계에서 import와 weight 로드/다운로드를 먼저 시도합니다. `requirements-specialists.txt`를 설치하지 않았거나 checkpoint 다운로드에 실패하면 기본값에서는 해당 오류를 `plugin_prepare_records`와 `plugin_records`에 기록하고 VLM 결과 기반 파이프라인을 계속합니다. `--plugin_fail_fast`를 지정하면 즉시 중단합니다.
 
 plugin 결과는 기존 VLM 결과와 병합되고 다음 정보가 저장됩니다.
 

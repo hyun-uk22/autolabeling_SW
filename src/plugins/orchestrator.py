@@ -82,6 +82,18 @@ class TaskPluginOrchestrator:
     def names(self) -> List[str]:
         return [plugin.plugin_name for plugin in self.plugins]
 
+    def prepare(self, task_type: str) -> List[dict]:
+        records = []
+        for plugin in self.plugins:
+            try:
+                record = plugin.prepare(task_type)
+                records.append(record)
+            except Exception as exc:
+                records.append({"plugin": plugin.plugin_name, "status": "error", "error": str(exc)})
+                if self.fail_fast:
+                    raise
+        return records
+
     def process(
         self,
         image_path: str,

@@ -13,7 +13,7 @@ from src.utils.format_converter import LabelExportWriter, normalize_label_format
 from src.utils.visualize import visualize_boxes
 from src.utils.evaluation import evaluate_yolo_dirs
 from src.plugins.orchestrator import TaskPluginOrchestrator
-from src.plugins.registry import create_default_registry
+from src.plugins.registry import load_generation_plugins
 from src.core.model_config import (
     DEFAULT_BEDROCK_HIGH_MODEL_ID,
     DEFAULT_BEDROCK_LOW_MODEL_ID,
@@ -125,15 +125,12 @@ def main():
         print(f"[!] ERROR: Invalid label export setup: {e}")
         return
 
-    plugin_orchestrator = None
-    if args.plugin_config:
-        try:
-            plugin_registry = create_default_registry()
-            plugins = plugin_registry.load_config(args.plugin_config)
-            plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=args.plugin_fail_fast)
-        except Exception as e:
-            print(f"[!] ERROR: Invalid plugin setup: {e}")
-            return
+    try:
+        plugins = load_generation_plugins(args.plugin_config)
+        plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=args.plugin_fail_fast)
+    except Exception as e:
+        print(f"[!] ERROR: Invalid plugin setup: {e}")
+        return
     
     required_keys = required_api_keys(low_model_name, high_model_name)
     missing_keys = [key for key in required_keys if not os.getenv(key)]
@@ -173,8 +170,18 @@ def main():
     print(f"   - Task Type: {args.task_type}")
     print(f"   - Uncertainty Threshold: {verifier.threshold} (Escalate if Consistency < {verifier.threshold})")
     print(f"   - Label Formats: {', '.join(label_writer.formats)}")
-    if plugin_orchestrator:
-        print(f"   - Specialist Plugins: {', '.join(plugin_orchestrator.names) or 'none'}")
+    print(f"   - Specialist Plugins: {', '.join(plugin_orchestrator.names) or 'none'}")
+    try:
+        plugin_prepare_records = plugin_orchestrator.prepare(args.task_type)
+    except Exception as e:
+        print(f"[!] ERROR: Plugin prepare failed: {e}")
+        return
+    prepared = [record["plugin"] for record in plugin_prepare_records if record.get("status") == "ok"]
+    failed = [record for record in plugin_prepare_records if record.get("status") == "error"]
+    if prepared:
+        print(f"   - Prepared Plugins: {', '.join(prepared)}")
+    for record in failed:
+        print(f"[!] Plugin prepare failed ({record['plugin']}): {record.get('error', '')}")
     print("-" * 60)
     
     # Metrics for Paper
@@ -194,15 +201,33 @@ def main():
         high_attempts_before = high_client.api_attempts
         try:
             # Core Agentic Workflow
-            result, status = verifier.process(img_path, args.prompt, task_type=args.task_type)
+            _drafts, result, _consistency = verifier.generate_draft_labels(
+                img_path,
+                args.prompt,
+                task_type=args.task_type,
+            )
             plugin_records = []
-            if plugin_orchestrator:
-                result, plugin_records = plugin_orchestrator.process(
+            result, plugin_records = plugin_orchestrator.process(
+                img_path,
+                args.prompt,
+                args.task_type,
+                result,
+            )
+            needs_high, reason = verifier.needs_escalation(
+                result,
+                plugin_records=plugin_records,
+            )
+            if needs_high:
+                print(f"\n[*] Escalating to High-Level Model: {reason}")
+                result, _agreement = verifier.high_verify(
                     img_path,
                     args.prompt,
                     args.task_type,
                     result,
                 )
+                status = "Escalated"
+            else:
+                status = "Consistent"
             insighter.add_result(result)
             
             # Save Labels & Visualizations
@@ -294,6 +319,7 @@ def main():
         "escalation_rate": escalation_count / len(images) if images else 0.0,
         "cost_reduction_pct": cost_reduction_pct,
         "plugins": plugin_orchestrator.names if plugin_orchestrator else [],
+        "plugin_prepare_records": plugin_prepare_records,
         "evaluation": evaluation,
         "dataset_insight": dataset_insight,
     }

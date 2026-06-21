@@ -25,6 +25,14 @@ class VisionTaskPlugin(ABC):
     def supports(self, task_type: str) -> bool:
         return task_type == "all" or task_type in self.supported_tasks
 
+    def prepare(self, task_type: str) -> Dict[str, Any]:
+        if not self.supports(task_type):
+            return {"plugin": self.plugin_name, "status": "skipped", "reason": f"unsupported task: {task_type}"}
+        loader = getattr(self, "_load", None)
+        if callable(loader):
+            loader()
+        return {"plugin": self.plugin_name, "status": "ok"}
+
     @abstractmethod
     def refine(
         self,
