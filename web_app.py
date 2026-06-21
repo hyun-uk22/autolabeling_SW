@@ -209,6 +209,61 @@ def parse_runs(value):
     return runs
 
 
+def render_conversation(workspace):
+    st.markdown('<div class="panel-title">대화형 작업</div>', unsafe_allow_html=True)
+    st.caption("원하는 데이터 작업을 자연어로 입력하세요. Workspace를 탐색한 뒤 실행 계획을 먼저 보여드립니다.")
+
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = [{
+            "role": "assistant",
+            "content": (
+                "어떤 작업을 진행할까요? (예: 현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘)"
+            ),
+        }]
+    if "pending_proposal" not in st.session_state:
+        st.session_state.pending_proposal = None
+
+    for message in st.session_state.chat_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    pending_proposal = st.session_state.pending_proposal
+    if pending_proposal:
+        approve_column, cancel_column, _ = st.columns([1, 1, 4])
+        with approve_column:
+            execute_chat_plan = st.button("계획 실행", type="primary", use_container_width=True)
+        with cancel_column:
+            cancel_chat_plan = st.button("취소", use_container_width=True)
+        if execute_chat_plan:
+            try:
+                result = execute_plan(pending_proposal["plan"], auto_approve=True)
+                response = describe_result(result, workspace)
+            except Exception as exc:
+                response = f"작업 실행 중 오류가 발생했습니다: {exc}"
+            st.session_state.chat_messages.append({"role": "assistant", "content": response})
+            st.session_state.pending_proposal = None
+            st.rerun()
+        if cancel_chat_plan:
+            st.session_state.chat_messages.append({"role": "assistant", "content": "작업을 취소했습니다."})
+            st.session_state.pending_proposal = None
+            st.rerun()
+
+    chat_request = st.chat_input(
+        "예: 현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘",
+        disabled=bool(st.session_state.pending_proposal),
+    )
+    if chat_request:
+        st.session_state.chat_messages.append({"role": "user", "content": chat_request})
+        try:
+            proposal = build_conversation_plan(chat_request, workspace)
+            response = describe_plan(proposal, workspace)
+            st.session_state.pending_proposal = proposal
+        except (OSError, ValueError) as exc:
+            response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
+        st.session_state.chat_messages.append({"role": "assistant", "content": response})
+        st.rerun()
+
+
 st.markdown(
     """
     <div class="app-header">
@@ -265,64 +320,12 @@ if "workspace" not in st.session_state:
 
 workspace = st.session_state.workspace
 st.markdown(f'<div class="workspace-path">{html.escape(workspace)}</div>', unsafe_allow_html=True)
-
-st.markdown('<div class="panel-title">대화형 작업</div>', unsafe_allow_html=True)
-st.caption("원하는 데이터 작업을 자연어로 입력하세요. Workspace를 탐색한 뒤 실행 계획을 먼저 보여드립니다.")
-
-if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = [{
-        "role": "assistant",
-        "content": (
-            "어떤 작업을 진행할까요? 예: `현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘`"
-        ),
-    }]
-if "pending_proposal" not in st.session_state:
-    st.session_state.pending_proposal = None
-
-for message in st.session_state.chat_messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-pending_proposal = st.session_state.pending_proposal
-if pending_proposal:
-    approve_column, cancel_column, _ = st.columns([1, 1, 4])
-    with approve_column:
-        execute_chat_plan = st.button("계획 실행", type="primary", use_container_width=True)
-    with cancel_column:
-        cancel_chat_plan = st.button("취소", use_container_width=True)
-    if execute_chat_plan:
-        try:
-            result = execute_plan(pending_proposal["plan"], auto_approve=True)
-            response = describe_result(result, workspace)
-        except Exception as exc:
-            response = f"작업 실행 중 오류가 발생했습니다: {exc}"
-        st.session_state.chat_messages.append({"role": "assistant", "content": response})
-        st.session_state.pending_proposal = None
-        st.rerun()
-    if cancel_chat_plan:
-        st.session_state.chat_messages.append({"role": "assistant", "content": "작업을 취소했습니다."})
-        st.session_state.pending_proposal = None
-        st.rerun()
-
-chat_request = st.chat_input(
-    "예: 현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘",
-    disabled=bool(st.session_state.pending_proposal),
+chat_tab, convert_tab, generate_tab, evaluate_tab, settings_tab = st.tabs(
+    ["대화형 작업", "형식 변환", "라벨 생성", "평가", "설정"]
 )
-if chat_request:
-    st.session_state.chat_messages.append({"role": "user", "content": chat_request})
-    try:
-        proposal = build_conversation_plan(chat_request, workspace)
-        response = describe_plan(proposal, workspace)
-        st.session_state.pending_proposal = proposal
-    except (OSError, ValueError) as exc:
-        response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
-    st.session_state.chat_messages.append({"role": "assistant", "content": response})
-    st.rerun()
 
-st.divider()
-st.markdown('<div class="panel-title">고급 작업</div>', unsafe_allow_html=True)
-st.caption("경로와 실행 옵션을 직접 지정하려면 아래 기능을 사용하세요.")
-convert_tab, generate_tab, evaluate_tab, settings_tab = st.tabs(["형식 변환", "라벨 생성", "평가", "설정"])
+with chat_tab:
+    render_conversation(workspace)
 
 with convert_tab:
     st.markdown('<div class="panel-title">라벨 형식 변환</div>', unsafe_allow_html=True)
@@ -376,13 +379,16 @@ with generate_tab:
             inference_count = st.number_input("초안 추론 횟수", 1, 10, 3)
         prompt = st.text_area(
             "프롬프트",
-            "Detect and classify all prominent objects in this image. Output strictly as JSON.",
+            value="",
+            placeholder="이미지에서 눈에 띄는 모든 객체를 탐지하고 분류해 주세요.",
         )
         approve_expensive = st.checkbox("고비용 모델 API 호출 승인")
         generate_submit = st.form_submit_button("라벨 생성 실행", type="primary", icon=":material/auto_awesome:")
     if generate_submit:
         if not generation_images or not generation_output or not visualization_output or not generation_formats:
             st.error("이미지, 라벨 출력, 시각화 출력 경로와 출력 포맷을 모두 지정하세요.")
+        elif not prompt.strip():
+            st.error("라벨 생성 프롬프트를 입력하세요.")
         elif not approve_expensive:
             st.error("모델 호출 승인이 필요합니다.")
         else:

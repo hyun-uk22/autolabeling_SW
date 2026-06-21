@@ -24,7 +24,7 @@ class StreamlitAppTests(unittest.TestCase):
             app.run(timeout=30)
 
             self.assertEqual(len(app.exception), 0)
-            self.assertEqual(len(app.tabs), 4)
+            self.assertEqual(len(app.tabs), 5)
             self.assertEqual(len(app.chat_input), 1)
             self.assertEqual(app.text_input[0].value, "data/labeled")
             self.assertEqual(app.text_input[1].value, "data/raw")
@@ -40,11 +40,18 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(
                 [tab.label for tab in app.tabs],
-                ["형식 변환", "라벨 생성", "평가", "설정"],
+                ["대화형 작업", "형식 변환", "라벨 생성", "평가", "설정"],
             )
             self.assertEqual(len(app.get("form")), 4)
             self.assertEqual(len(app.chat_input), 1)
             self.assertIn("어떤 작업을 진행할까요?", app.chat_message[0].markdown[0].value)
+            self.assertNotIn("`", app.chat_message[0].markdown[0].value)
+            prompt = next(area for area in app.text_area if area.label == "프롬프트")
+            self.assertEqual(prompt.value, "")
+            self.assertEqual(
+                prompt.placeholder,
+                "이미지에서 눈에 띄는 모든 객체를 탐지하고 분류해 주세요.",
+            )
 
     def test_chat_request_discovers_dataset_and_shows_execution_plan(self):
         from streamlit.testing.v1 import AppTest
@@ -71,6 +78,34 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(app.button[0].label, "계획 실행")
             self.assertIn("data/labeled", app.chat_message[-1].markdown[0].value)
             self.assertIn("coco", app.chat_message[-1].markdown[0].value)
+
+    def test_korean_generation_prompt_is_forwarded_to_workflow(self):
+        from streamlit.testing.v1 import AppTest
+
+        result = {
+            "status": "completed",
+            "operation_outputs": [],
+            "errors": [],
+            "history_path": "",
+        }
+        with tempfile.TemporaryDirectory() as workspace, patch(
+            "src.workflow.service.execute_workflow_plan",
+            return_value=result,
+        ) as execute_workflow:
+            app = AppTest.from_file("web_app.py")
+            app.session_state["workspace"] = workspace
+            app.run(timeout=30)
+
+            korean_prompt = "이미지에서 차량과 보행자를 찾아 객체 탐지 라벨을 생성해줘."
+            next(area for area in app.text_area if area.label == "프롬프트").set_value(korean_prompt)
+            next(box for box in app.checkbox if box.label == "고비용 모델 API 호출 승인").set_value(True)
+            next(button for button in app.button if button.label == "라벨 생성 실행").click()
+            app.run(timeout=30)
+
+            self.assertEqual(len(app.exception), 0)
+            execute_workflow.assert_called_once()
+            plan = execute_workflow.call_args.args[0]
+            self.assertEqual(plan["operations"][0]["prompt"], korean_prompt)
 
 
 if __name__ == "__main__":

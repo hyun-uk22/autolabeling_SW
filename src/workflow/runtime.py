@@ -14,7 +14,7 @@ from ..plugins.orchestrator import TaskPluginOrchestrator, merge_results
 from ..plugins.registry import create_default_registry
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
 from ..utils.format_converter import LabelExportWriter
-from ..utils.geometry import compute_result_consistency, get_consistency_score
+from ..utils.geometry import compute_result_consistency, consistency_metric_name, get_consistency_score
 from ..utils.label_importer import find_image_path, import_labels_with_report
 from ..utils.label_validator import summarize_validation, validate_result
 from ..utils.result_metrics import count_result_labels, mean_result_confidence, uncertainty_score
@@ -203,6 +203,7 @@ class WorkflowRuntime:
                 "status": record["status"],
                 "source_model": result.source_model,
                 "task_type": result.task_type,
+                "consistency_metric": consistency_metric_name(result.task_type),
                 "objects": count_result_labels(result),
                 "boxes": len(result.boxes),
                 "segments": len(result.segments),
@@ -241,6 +242,7 @@ class WorkflowRuntime:
             "action": "generate",
             "images": len(records),
             "task_type": operation.task_type,
+            "consistency_metric": consistency_metric_name(operation.task_type),
             "formats": formats,
             "total_labels": sum(row["objects"] for row in metric_rows),
             "total_elapsed_sec": sum(row["elapsed_sec"] for row in metric_rows),

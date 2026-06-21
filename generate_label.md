@@ -541,27 +541,38 @@ pair score = matched IoU sum / max(box count A, box count B)
 
 ### 15.2 Segmentation
 
-polygon 자체의 mask IoU가 아니라 polygon의 bounding box를 만든 뒤 bbox IoU를 계산한다.
+normalized polygon을 `512 x 512` binary mask로 rasterize한 뒤 mask IoU를 계산한다. 같은 label의 segment를 IoU가 높은 순서로 매칭하고 `0.5` 미만인 match는 제외한다. 누락 또는 추가 segment는 detection과 동일하게 분모에 반영한다.
 
 ### 15.3 Box와 Segment 교차 비교
 
 한 결과는 bbox, 다른 결과는 segment인 경우 segment bounding box와 bbox를 비교한다.
 
-### 15.4 Classification, Pose, OCR, Tracking
+### 15.4 Pose Estimation
+
+같은 label의 pose instance를 visible keypoint 위치 기반 OKS-style 점수로 매칭한다. 각 keypoint의 정규화 거리와 pose의 keypoint span에서 계산한 scale을 사용하며, 한쪽에만 존재하는 keypoint는 score를 낮춘다. COCO의 keypoint별 sigma와 object bbox를 사용하는 공식 OKS가 아니라 Ground Truth 없는 반복 추론 비교용 근사 metric이다.
+
+### 15.5 OCR
+
+text region bbox가 겹치는 결과끼리 매칭한다. 문자열은 Unicode NFC 정규화, case folding, 공백 정규화를 적용한 후 Levenshtein 편집 거리로 문자 유사도를 계산한다.
+
+```text
+OCR pair score = 0.4 * region IoU + 0.6 * character similarity
+```
+
+영역이 겹치지 않으면 같은 문자열이라도 match하지 않는다.
+
+### 15.6 Classification과 Tracking
 
 다음 문자열 집합의 Jaccard similarity를 사용한다.
 
 - classification label
-- pose label
-- visible keypoint name
-- OCR text
 - `track_id:label`
 
 ```text
 Jaccard = intersection size / union size
 ```
 
-위 방식은 태스크별 전문 metric의 근사치이며 pose keypoint 거리, OCR edit distance, tracking ID switch 등을 측정하지 않는다.
+tracking은 여전히 trajectory, ID switch, MOTA, IDF1을 측정하지 않는다.
 
 ## 16. Uncertainty 계산
 
@@ -815,6 +826,7 @@ vis_<원본 이미지 파일명>
 | `low_model` | low VLM |
 | `high_model` | high VLM |
 | `task_type` | 태스크 |
+| `consistency_metric` | task별 self-consistency metric 이름 |
 | `objects` | 전체 라벨 수 |
 | `boxes` | bbox 개수 |
 | `segments` | segment 개수 |
@@ -1062,9 +1074,9 @@ python evaluate_experiments.py `
 - plugin disagreement가 high VLM 재호출을 유발하지 않음
 - low 반복 결과 중 첫 번째 결과만 최종 초안으로 사용
 - high escalation 후 uncertainty가 high confidence 기준으로 재계산되지 않음
-- segmentation consistency는 true mask IoU가 아니라 polygon bounding box IoU
-- pose consistency는 OKS/PCK가 아니라 label/keypoint name Jaccard
-- OCR consistency는 CER/WER가 아니라 exact text set Jaccard
+- segmentation mask IoU는 512 x 512 raster 근사이며 hole/multi-polygon을 별도 표현하지 않음
+- pose consistency는 derived scale과 공통 sigma를 사용하는 OKS-style 근사이며 공식 COCO OKS가 아님
+- OCR consistency는 region IoU와 문자 유사도 조합이며 Ground Truth CER/WER 평가는 아님
 - tracking consistency는 MOT metric이 아니라 `track_id:label` set Jaccard
 - `task_type=all`은 모든 plugin을 실행하므로 비용과 시간이 크게 증가할 수 있음
 - WebP는 client가 인코딩 가능하지만 main image 목록에서 제외됨
@@ -1079,8 +1091,8 @@ python evaluate_experiments.py `
 
 1. specialist agreement를 high VLM escalation 전에 계산한다.
 2. plugin/VLM 결과를 GT로 calibration해 태스크별 weight를 학습한다.
-3. detection은 mAP, segmentation은 mask IoU/Dice를 추가한다.
-4. pose는 OKS/PCK, OCR은 CER/WER, tracking은 MOTA/IDF1을 추가한다.
+3. Ground Truth 평가에 detection mAP와 segmentation mask IoU/Dice를 추가한다.
+4. Ground Truth 평가에 공식 pose OKS/PCK, OCR CER/WER, tracking MOTA/IDF1을 추가한다.
 5. empty result와 invalid geometry를 `label_validator.py`로 검사한다.
 6. low 반복 결과를 consensus ensemble로 통합한다.
 7. high VLM 결과 이후 uncertainty를 재계산한다.
