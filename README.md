@@ -13,6 +13,7 @@
 - 실행별 처리 시간, 객체 수, confidence, uncertainty 기록
 - 선택적으로 ground truth YOLO 라벨과 precision/recall 평가
 - 전체 라벨 분포를 요약하고 클래스 불균형을 간단히 리포트
+- **데이터 검증 및 사용자 액션 리포트** - 문제 있는 데이터에 대해 무엇을 수정해야 하는지 명확히 안내
 
 ## 프로젝트 구조
 
@@ -402,6 +403,53 @@ COCO 구조는 `images`, `annotations`, `categories`를 포함합니다. bbox는
 data/labeled/
 └── vision_annotations.jsonl
 ```
+
+### User Action Report (사용자 액션 리포트)
+
+변환 작업(convert) 실행 시 `user_action_report.json` 파일이 자동으로 생성됩니다. 이 리포트는 문제가 있는 데이터에 대해 **사용자가 무엇을 수정해야 하는지 명확히 안내**합니다.
+
+```text
+data/labeled/
+├── conversion_report.json        # 전체 변환 로그 (기술적 상세)
+└── user_action_report.json       # 사용자 액션 가이드 (⭐ 핵심)
+```
+
+리포트 구조:
+- **summary**: 전체 통계 (성공/실패/경고 개수)
+- **top_issues**: 가장 많이 발생한 문제 TOP 5
+- **recommended_actions**: 우선순위 조치사항
+- **detailed_records**: 파일별 상세 문제와 해결 방법
+
+예시:
+
+```json
+{
+  "status": "partial_success",
+  "completion_rate": "95.0%",
+  "summary": {
+    "total_records": 100,
+    "clean": 95,
+    "needs_review": 5
+  },
+  "top_issues": [
+    {
+      "issue_type": "coordinate_out_of_range",
+      "count": 3,
+      "action": "좌표를 정규화하거나 원본 라벨을 수정해주세요"
+    }
+  ],
+  "recommended_actions": [
+    "🏷️ 라벨 품질 문제가 3건 발견되었습니다. 라벨링 도구 설정을 확인해주세요."
+  ]
+}
+```
+
+각 문제마다:
+- **severity**: critical(즉시 수정), high(우선 권장), medium(시간날 때)
+- **user_action**: 구체적인 해결 방법
+- **suggestions**: 단계별 제안사항
+
+상세 가이드: [`docs/user_action_report_guide.md`](docs/user_action_report_guide.md)
 
 이 포맷은 classification, detection, segmentation, pose, OCR, tracking 결과를 모두 보존하기 위한 프로젝트 공통 포맷입니다. YOLO/Pascal VOC처럼 특정 태스크에 제한된 포맷으로 표현하기 어려운 라벨은 이 포맷을 사용합니다.
 

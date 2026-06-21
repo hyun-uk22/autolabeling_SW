@@ -249,20 +249,26 @@ class LabelExportWriter:
         self._next_annotation_id = 1
         os.makedirs(output_dir, exist_ok=True)
 
-    def save(self, result: DetectionResult, image_path: str) -> Dict[str, str]:
+    def save(
+        self,
+        result: DetectionResult,
+        image_path: str,
+        formats: Optional[Iterable[str]] = None,
+    ) -> Dict[str, str]:
         image_name = os.path.basename(image_path)
+        active_formats = list(dict.fromkeys(normalize_label_formats(formats or self.formats)))
         paths = {}
-        if "yolo" in self.formats:
+        if "yolo" in active_formats:
             paths["yolo"] = save_as_yolo(result, image_name, self.output_dir, self.class_list)
-        if "pascal_voc" in self.formats:
+        if "pascal_voc" in active_formats:
             paths["pascal_voc"] = save_as_pascal_voc(result, image_path, self.output_dir, self.class_list)
-        if "coco" in self.formats:
+        if "coco" in active_formats:
             self._add_coco_image(result, image_path)
             paths["coco"] = os.path.join(self.output_dir, "coco_annotations.json")
-        if "vision_json" in self.formats:
+        if "vision_json" in active_formats:
             self.vision_json_records.append(result_to_export_dict(result, image_path))
             paths["vision_json"] = os.path.join(self.output_dir, "vision_annotations.jsonl")
-        if "custom" in self.formats:
+        if "custom" in active_formats:
             paths["custom"] = self._save_custom(result, image_path)
         return paths
 
@@ -273,7 +279,7 @@ class LabelExportWriter:
             with open(classes_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(self.class_list))
             paths["classes"] = classes_path
-        if "coco" in self.formats:
+        if "coco" in self.formats and (self.coco_images or self.coco_annotations):
             coco_path = os.path.join(self.output_dir, "coco_annotations.json")
             categories = [
                 {"id": idx + 1, "name": label, "supercategory": "object"}
@@ -289,7 +295,7 @@ class LabelExportWriter:
             with open(coco_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             paths["coco"] = coco_path
-        if "vision_json" in self.formats:
+        if "vision_json" in self.formats and self.vision_json_records:
             jsonl_path = os.path.join(self.output_dir, "vision_annotations.jsonl")
             with open(jsonl_path, "w", encoding="utf-8") as f:
                 for record in self.vision_json_records:

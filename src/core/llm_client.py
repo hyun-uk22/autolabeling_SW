@@ -29,6 +29,13 @@ def extract_json(text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
         print(f"[Warning] Failed to parse JSON. Raw output: {text[:100]}...")
         return {"boxes": []}
 
@@ -97,76 +104,94 @@ def parse_labeling_result(data: dict, task_type: str) -> DetectionResult:
     result = DetectionResult(task_type=task_type)
 
     for item in data.get("classifications", []):
-        item["confidence"] = normalize_confidence(item.get("confidence", 1.0))
-        if item.get("label"):
-            result.classifications.append(ClassificationLabel(**item))
+        try:
+            item["confidence"] = normalize_confidence(item.get("confidence", 1.0))
+            if item.get("label"):
+                result.classifications.append(ClassificationLabel(**item))
+        except (TypeError, ValueError, KeyError):
+            continue
 
     for item in data.get("boxes", []):
-        item = normalize_box_like(item)
-        if item.get("label") and item["xmin"] < item["xmax"] and item["ymin"] < item["ymax"]:
-            result.boxes.append(BoundingBox(**item))
+        try:
+            item = normalize_box_like(item)
+            if item.get("label") and item["xmin"] < item["xmax"] and item["ymin"] < item["ymax"]:
+                result.boxes.append(BoundingBox(**item))
+        except (TypeError, ValueError, KeyError):
+            continue
 
     for item in data.get("segments", []):
-        points = []
-        for point in item.get("polygon", []):
-            points.append(
-                Point(
-                    x=normalize_coordinate(point.get("x", 0.0)),
-                    y=normalize_coordinate(point.get("y", 0.0)),
+        try:
+            points = []
+            for point in item.get("polygon", []):
+                points.append(
+                    Point(
+                        x=normalize_coordinate(point.get("x", 0.0)),
+                        y=normalize_coordinate(point.get("y", 0.0)),
+                    )
                 )
-            )
-        if item.get("label") and len(points) >= 3:
-            result.segments.append(
-                PolygonSegment(
-                    label=item["label"],
-                    polygon=points,
-                    confidence=normalize_confidence(item.get("confidence", 1.0)),
+            if item.get("label") and len(points) >= 3:
+                result.segments.append(
+                    PolygonSegment(
+                        label=item["label"],
+                        polygon=points,
+                        confidence=normalize_confidence(item.get("confidence", 1.0)),
+                    )
                 )
-            )
+        except (TypeError, ValueError, KeyError):
+            continue
 
     for item in data.get("poses", []):
-        keypoints = []
-        for point in item.get("keypoints", []):
-            if not point.get("name"):
-                continue
-            keypoints.append(
-                Keypoint(
-                    name=point["name"],
-                    x=normalize_coordinate(point.get("x", 0.0)),
-                    y=normalize_coordinate(point.get("y", 0.0)),
-                    visible=normalize_bool(point.get("visible", True)),
-                    confidence=normalize_confidence(point.get("confidence", 1.0)),
+        try:
+            keypoints = []
+            for point in item.get("keypoints", []):
+                if not point.get("name"):
+                    continue
+                keypoints.append(
+                    Keypoint(
+                        name=point["name"],
+                        x=normalize_coordinate(point.get("x", 0.0)),
+                        y=normalize_coordinate(point.get("y", 0.0)),
+                        visible=normalize_bool(point.get("visible", True)),
+                        confidence=normalize_confidence(point.get("confidence", 1.0)),
+                    )
                 )
-            )
-        if keypoints:
-            result.poses.append(
-                PoseInstance(
-                    label=item.get("label", "person"),
-                    keypoints=keypoints,
-                    confidence=normalize_confidence(item.get("confidence", 1.0)),
+            if keypoints:
+                result.poses.append(
+                    PoseInstance(
+                        label=item.get("label", "person"),
+                        keypoints=keypoints,
+                        confidence=normalize_confidence(item.get("confidence", 1.0)),
+                    )
                 )
-            )
+        except (TypeError, ValueError, KeyError):
+            continue
 
     for item in data.get("texts", []):
-        item = normalize_box_like(item)
-        if item.get("text") and item["xmin"] < item["xmax"] and item["ymin"] < item["ymax"]:
-            result.texts.append(TextRegion(**item))
+        try:
+            item = normalize_box_like(item)
+            if item.get("text") and item["xmin"] < item["xmax"] and item["ymin"] < item["ymax"]:
+                result.texts.append(TextRegion(**item))
+        except (TypeError, ValueError, KeyError):
+            continue
 
     for item in data.get("tracks", []):
-        item = normalize_box_like(item)
-        if item.get("track_id") and item.get("label") and item["xmin"] < item["xmax"] and item["ymin"] < item["ymax"]:
-            result.tracks.append(
-                TrackInstance(
-                    track_id=str(item["track_id"]),
-                    frame_id=int(item.get("frame_id", 0)),
-                    label=item["label"],
-                    xmin=item["xmin"],
-                    ymin=item["ymin"],
-                    xmax=item["xmax"],
-                    ymax=item["ymax"],
-                    confidence=item["confidence"],
+        try:
+            item = normalize_box_like(item)
+            if item.get("track_id") and item.get("label") and item["xmin"] < item["xmax"] and item["ymin"] < item["ymax"]:
+                result.tracks.append(
+                    TrackInstance(
+                        track_id=str(item["track_id"]),
+                        frame_id=int(item.get("frame_id", 0)),
+                        label=item["label"],
+                        xmin=item["xmin"],
+                        ymin=item["ymin"],
+                        xmax=item["xmax"],
+                        ymax=item["ymax"],
+                        confidence=item["confidence"],
+                    )
                 )
-            )
+        except (TypeError, ValueError, KeyError):
+            continue
 
     return result
 

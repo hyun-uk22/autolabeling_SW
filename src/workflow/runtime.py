@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
+from ..agents.conversion_agent import ConversionQualityAgent
+from ..agents.issue_reporter import generate_user_report
 from ..agents.labeling_agent import LabelingAgent
 from ..core.llm_client import VisionLLMClient
 from ..core.model_config import required_api_keys, resolve_model_names, validate_cascade_setup
@@ -16,7 +18,7 @@ from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save
 from ..utils.format_converter import LabelExportWriter
 from ..utils.geometry import compute_result_consistency, get_consistency_score
 from ..utils.label_importer import find_image_path, import_labels
-from ..utils.label_validator import summarize_validation, validate_result
+from ..utils.label_validator import summarize_validation
 from ..utils.result_metrics import count_result_labels, mean_result_confidence, uncertainty_score
 from ..utils.visualize import visualize_boxes
 from .models import OperationPlan, WorkflowPlan
@@ -35,6 +37,7 @@ class WorkflowRuntime:
         self.high_client = None
         self.labeling_agent = None
         self.plugin_orchestrator = None
+        self.conversion_agent = ConversionQualityAgent()
 
     def plan(self, request: str, supplied_plan: Optional[dict] = None) -> WorkflowPlan:
         return self.planner.plan(request, supplied_plan)
@@ -193,10 +196,13 @@ class WorkflowRuntime:
             custom_extension=operation.custom_label_extension,
         )
         metric_rows = []
+        yolo_written = False
         for record in records:
-            result = DetectionResult.model_validate(record["result"])
+            result = self.conversion_agent.repair_detection_result(DetectionResult.model_validate(record["result"]))
             image_path = os.path.join(operation.img_dir, record["image"])
-            label_paths = writer.save(result, image_path)
+            resolved_formats = self.conversion_agent.resolve_export_formats(result, formats, operation.task_type)
+            label_paths = writer.save(result, image_path, formats=resolved_formats)
+            yolo_written = yolo_written or "yolo" in resolved_formats
             vis_path = visualize_boxes(image_path, result, operation.vis_dir)
             metric_rows.append({
                 "image": record["image"],
@@ -221,6 +227,7 @@ class WorkflowRuntime:
                 "elapsed_sec": record.get("elapsed_sec", 0.0),
                 "label_path": label_paths.get("yolo") or next(iter(label_paths.values()), ""),
                 "label_paths": json.dumps(label_paths, ensure_ascii=False),
+                "resolved_formats": json.dumps(resolved_formats, ensure_ascii=False),
                 "visualization_path": vis_path,
             })
         artifacts = writer.finalize()
@@ -235,7 +242,7 @@ class WorkflowRuntime:
                 for row in metric_rows:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         evaluation = None
-        if operation.gt_dir and os.path.isdir(operation.gt_dir) and "yolo" in formats:
+        if operation.gt_dir and os.path.isdir(operation.gt_dir) and yolo_written:
             evaluation = evaluate_yolo_dirs(operation.out_dir, operation.gt_dir, operation.eval_iou)
         summary = {
             "action": "generate",
@@ -270,7 +277,15 @@ class WorkflowRuntime:
         for record in records:
             image_path = find_image_path(operation.img_dir, record["image"])
             result = DetectionResult.model_validate(record["result"])
-            validations.append({"image": record["image"], "issues": validate_result(result, image_path)})
+            issues = self.conversion_agent.validate_input(result, image_path)
+            validations.append({
+                "image": record["image"],
+                "issues": issues,
+                "blocking_issues": self.conversion_agent.blocking_input_issues(
+                    issues,
+                    strict=operation.strict,
+                ),
+            })
         return validations
 
     def repair_conversion(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -294,20 +309,35 @@ class WorkflowRuntime:
             custom_extension=operation.custom_label_extension,
         )
         converted = 0
+        export_records = []
         for record in records:
             issues = validation_map.get(record["image"], [])
-            blocking = any(
-                issue.startswith("missing_image:")
-                or issue.startswith("image_open_failed:")
-                or issue == "invalid_image_size"
-                for issue in issues
+            blocking_issues = self.conversion_agent.blocking_input_issues(
+                issues,
+                strict=operation.strict,
             )
-            if blocking or (operation.strict and issues):
+            if blocking_issues:
                 continue
             image_path = find_image_path(operation.img_dir, record["image"])
-            writer.save(DetectionResult.model_validate(record["result"]), image_path)
+            result = self.conversion_agent.repair_detection_result(DetectionResult.model_validate(record["result"]))
+            resolved_formats = self.conversion_agent.resolve_export_formats(result, writer.formats)
+            label_paths = writer.save(result, image_path, formats=resolved_formats)
+            export_issues = self.conversion_agent.audit_record_exports(label_paths)
+            export_records.append({
+                "image": record["image"],
+                "paths": label_paths,
+                "issues": export_issues,
+                "recovery": self.conversion_agent.summarize_recovery(writer.formats, resolved_formats, export_issues),
+            })
+            if export_issues:
+                continue
             converted += 1
         artifacts = writer.finalize()
+        artifact_issues = self.conversion_agent.audit_final_artifacts(artifacts)
+
+        # 사용자 액션 리포트 생성
+        user_report = generate_user_report(validations, export_records)
+
         report = {
             "action": "convert",
             "input": operation.input_path,
@@ -316,13 +346,26 @@ class WorkflowRuntime:
             "records_read": len(records),
             "records_converted": converted,
             "validation": summarize_validation(validations),
+            "export_validation": {
+                "failed_records": sum(bool(record["issues"]) for record in export_records),
+                "artifact_issues": artifact_issues,
+            },
+            "user_action_report": user_report,  # 사용자 액션 리포트 추가
             "records": validations,
+            "exports": export_records,
             "artifacts": artifacts,
         }
         report_path = os.path.join(operation.out_dir, "conversion_report.json")
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
+
+        # 별도의 사용자 액션 리포트 파일 생성
+        user_action_path = os.path.join(operation.out_dir, "user_action_report.json")
+        with open(user_action_path, "w", encoding="utf-8") as f:
+            json.dump(user_report, f, ensure_ascii=False, indent=2)
+
         report["report_path"] = report_path
+        report["user_action_report_path"] = user_action_path
         return report
 
     def conversion_schema_candidates(self, operation: OperationPlan) -> List[str]:

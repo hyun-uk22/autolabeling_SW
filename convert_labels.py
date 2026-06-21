@@ -2,9 +2,10 @@ import argparse
 import json
 import os
 
+from src.agents.conversion_agent import ConversionQualityAgent
 from src.utils.format_converter import LabelExportWriter
 from src.utils.label_importer import find_image_path, import_labels
-from src.utils.label_validator import summarize_validation, validate_result
+from src.utils.label_validator import summarize_validation
 
 
 def main():
@@ -41,25 +42,38 @@ def main():
         custom_template_path=args.custom_label_template,
         custom_extension=args.custom_label_extension,
     )
+    conversion_agent = ConversionQualityAgent()
 
     validation_records = []
+    export_records = []
     converted = 0
     for image_name, result in records:
         image_path = find_image_path(args.img_dir, image_name)
-        issues = validate_result(result, image_path)
-        validation_records.append({"image": image_name, "issues": issues})
-        blocking_issues = [
-            issue for issue in issues
-            if issue.startswith("missing_image:")
-            or issue.startswith("image_open_failed:")
-            or issue == "invalid_image_size"
-        ]
+        repaired_result = conversion_agent.repair_detection_result(result)
+        issues = conversion_agent.validate_input(repaired_result, image_path)
+        blocking_issues = conversion_agent.blocking_input_issues(issues, strict=args.strict)
+        validation_records.append({
+            "image": image_name,
+            "issues": issues,
+            "blocking_issues": blocking_issues,
+        })
         if blocking_issues or (args.strict and issues):
             continue
-        writer.save(result, image_path)
+        resolved_formats = conversion_agent.resolve_export_formats(repaired_result, writer.formats)
+        label_paths = writer.save(repaired_result, image_path, formats=resolved_formats)
+        export_issues = conversion_agent.audit_record_exports(label_paths)
+        export_records.append({
+            "image": image_name,
+            "paths": label_paths,
+            "issues": export_issues,
+            "recovery": conversion_agent.summarize_recovery(writer.formats, resolved_formats, export_issues),
+        })
+        if export_issues:
+            continue
         converted += 1
 
     artifacts = writer.finalize()
+    artifact_issues = conversion_agent.audit_final_artifacts(artifacts)
     validation_summary = summarize_validation(validation_records)
     report = {
         "input": args.input,
@@ -68,8 +82,13 @@ def main():
         "records_read": len(records),
         "records_converted": converted,
         "validation": validation_summary,
+        "export_validation": {
+            "failed_records": sum(bool(record["issues"]) for record in export_records),
+            "artifact_issues": artifact_issues,
+        },
         "artifacts": artifacts,
         "records": validation_records,
+        "exports": export_records,
     }
 
     os.makedirs(args.out_dir, exist_ok=True)

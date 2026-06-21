@@ -7,6 +7,7 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 
 from src.core.llm_client import VisionLLMClient
+from src.agents.conversion_agent import ConversionQualityAgent
 from src.agents.verification_agent import HierarchicalVerificationAgent
 from src.agents.insight_agent import DatasetInsightAgent
 from src.utils.format_converter import LabelExportWriter, normalize_label_formats
@@ -106,8 +107,6 @@ def main():
 
     try:
         requested_formats = args.label_formats
-        if args.label_formats == "yolo" and args.task_type != "object_detection":
-            requested_formats = "vision_json"
         label_formats = normalize_label_formats(requested_formats)
         label_writer = LabelExportWriter(
             args.out_dir,
@@ -115,6 +114,7 @@ def main():
             custom_template_path=args.custom_label_template,
             custom_extension=args.custom_label_extension,
         )
+        conversion_agent = ConversionQualityAgent()
     except Exception as e:
         print(f"[!] ERROR: Invalid label export setup: {e}")
         return
@@ -177,6 +177,7 @@ def main():
     escalation_count = 0
     total_objects_found = 0
     run_records = []
+    yolo_written = False
 
     # Process with progress bar
     pbar = tqdm(images, desc="Labeling", unit="img")
@@ -197,10 +198,13 @@ def main():
                     args.task_type,
                     result,
                 )
+            result = conversion_agent.repair_detection_result(result)
             insighter.add_result(result)
             
             # Save Labels & Visualizations
-            label_paths = label_writer.save(result, img_path)
+            resolved_formats = conversion_agent.resolve_export_formats(result, label_writer.formats, args.task_type)
+            label_paths = label_writer.save(result, img_path, formats=resolved_formats)
+            yolo_written = yolo_written or "yolo" in resolved_formats
             vis_path = visualize_boxes(img_path, result, args.vis_dir)
             
             elapsed = time.time() - start_time
@@ -239,6 +243,7 @@ def main():
                 "elapsed_sec": elapsed,
                 "label_path": label_paths.get("yolo") or next(iter(label_paths.values()), ""),
                 "label_paths": json.dumps(label_paths, ensure_ascii=False),
+                "resolved_formats": json.dumps(resolved_formats, ensure_ascii=False),
                 "visualization_path": vis_path,
             })
             
@@ -264,7 +269,7 @@ def main():
     cost_reduction_pct = ((len(images) - escalation_count) / len(images)) * 100 if images else 0
     evaluation = None
     if args.gt_dir and os.path.isdir(args.gt_dir):
-        if "yolo" not in label_writer.formats:
+        if not yolo_written:
             print("\n[!] Skipping ground-truth evaluation because --gt_dir currently requires YOLO predictions.")
         else:
             evaluation = evaluate_yolo_dirs(args.out_dir, args.gt_dir, args.eval_iou)
