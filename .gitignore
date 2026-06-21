@@ -58,6 +58,8 @@ data/reports/
 data/workflow/
 data/**/run_metrics.csv
 data/**/run_metrics.jsonl
+data/**/run_summary.json
+data/**/user_action_report.json
 data/**/classes.txt
 data/**/coco_annotations.json
 data/**/vision_annotations.jsonl
@@ -91,6 +93,7 @@ temp/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-journal
 *.dmp
 
 # Desktop packaging artifacts

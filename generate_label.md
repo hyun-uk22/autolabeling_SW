@@ -740,7 +740,7 @@ Low VLM 반복 -> Specialist agreement -> 통합 uncertainty -> High VLM 결정
 
 ## 19. Dataset Insight Agent
 
-최종 병합 결과에서 label을 누적한다.
+CLI는 최종 병합 결과를 `add_result()`로 누적하고, LangGraph·Streamlit은 생성·변환의 최종 export 대상 목록을 `analyze(results)`에 전달한다. 두 경로 모두 동일한 `DatasetInsightAgent`를 사용한다.
 
 - classification label
 - bbox label
@@ -751,7 +751,9 @@ Low VLM 반복 -> Specialist agreement -> 통합 uncertainty -> High VLM 결정
 
 클래스별 count와 percentage를 출력한다.
 
-가장 많은 클래스와 가장 적은 클래스 비율이 `3`보다 크면 imbalance warning과 희소 클래스 데이터 수집/증강 제안을 출력한다.
+가장 많은 클래스와 가장 적은 클래스 비율이 설정된 `insight_imbalance_ratio`보다 크면 불균형으로 판정한다. 기본값은 `3.0`이며 Streamlit 생성·변환 탭에서 조정할 수 있다.
+
+구조화 결과는 `empty`, `single_class`, `balanced`, `imbalanced` 상태를 포함한다. 불균형이면 희소 클래스 추가 수집, class-aware oversampling, copy-paste·crop·색상·기하 augmentation을 제안한다. CLI의 기존 `get_report()` 문자열 출력도 같은 분석 결과를 사용한다.
 
 이 분석은 단순 frequency 기반이며 맥락적 불균형이나 이미지별 co-occurrence는 분석하지 않는다.
 
@@ -862,6 +864,12 @@ vis_<원본 이미지 파일명>
 - 단순 cost reduction percentage
 - plugin 목록
 - optional GT evaluation
+- task별 consistency metric
+- 출력 artifact 재검증
+- 클래스 분포와 불균형 제안
+- 검증 이슈별 사용자 우선 조치
+
+LangGraph와 Streamlit 실행은 `run_summary.json`과 함께 `user_action_report.json`을 생성한다. 수동 라벨링 시간과 high-model 회피율은 실제 비용이 아니라 명시적인 추정값으로 `performance`에 기록한다.
 
 ## 24. 시간 및 비용 지표
 

@@ -106,6 +106,66 @@ class StreamlitAppTests(unittest.TestCase):
             execute_workflow.assert_called_once()
             plan = execute_workflow.call_args.args[0]
             self.assertEqual(plan["operations"][0]["prompt"], korean_prompt)
+            self.assertEqual(plan["operations"][0]["insight_imbalance_ratio"], 3.0)
+
+    def test_conversion_report_renders_metrics_actions_insight_and_download(self):
+        from streamlit.testing.v1 import AppTest
+
+        with tempfile.TemporaryDirectory() as workspace:
+            report_path = Path(workspace) / "conversion_report.json"
+            report_path.write_text('{"status": "partial_success"}', encoding="utf-8")
+            output = {
+                "action": "convert",
+                "records_read": 2,
+                "records_converted": 1,
+                "validation": {"failed_records": 1},
+                "export_validation": {"failed_records": 0, "artifact_issues": []},
+                "user_action_report": {
+                    "completion_rate": 50.0,
+                    "summary": {
+                        "clean": 1,
+                        "needs_review": 1,
+                        "artifact_issues": 0,
+                    },
+                    "recommended_actions": ["좌표 범위를 검토하세요."],
+                    "detailed_records": [{
+                        "image": "bad.jpg",
+                        "status": "needs_attention",
+                        "total_issues": 1,
+                        "priority_actions": ["좌표를 수정하세요."],
+                    }],
+                },
+                "dataset_insight": {
+                    "distribution": {"car": {"count": 3, "percentage": 100.0}},
+                    "suggestions": [],
+                },
+                "report_path": str(report_path),
+                "artifacts": {},
+            }
+            result = {
+                "status": "completed",
+                "operation_outputs": [output],
+                "errors": [],
+                "history_path": "",
+            }
+            with patch("src.workflow.service.execute_workflow_plan", return_value=result):
+                app = AppTest.from_file("web_app.py")
+                app.session_state["workspace"] = workspace
+                app.run(timeout=30)
+                next(button for button in app.button if button.label == "변환 실행").click()
+                app.run(timeout=30)
+
+            self.assertEqual(len(app.exception), 0)
+            metric_labels = [metric.label for metric in app.metric]
+            self.assertIn("읽은 레코드", metric_labels)
+            self.assertIn("완료율", metric_labels)
+            self.assertGreaterEqual(len(app.dataframe), 2)
+            self.assertGreaterEqual(len(app.get("download_button")), 1)
+
+            app.run(timeout=30)
+            self.assertEqual(len(app.exception), 0)
+            self.assertIn("읽은 레코드", [metric.label for metric in app.metric])
+            self.assertGreaterEqual(len(app.get("download_button")), 1)
 
 
 if __name__ == "__main__":

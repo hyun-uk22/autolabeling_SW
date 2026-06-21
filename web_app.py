@@ -1,4 +1,5 @@
 import html
+import json
 import uuid
 from pathlib import Path
 
@@ -175,19 +176,129 @@ def execute_plan(plan, auto_approve=False):
         )
 
 
-def run_plan(plan, auto_approve=False):
-    try:
-        result = execute_plan(plan, auto_approve=auto_approve)
-        if result.get("status") == "completed":
-            st.success("작업이 완료되었습니다.")
-        else:
-            st.warning(f"작업 상태: {result.get('status', 'unknown')}")
+def _download_report_files(output, report_index, key_prefix):
+    paths = {}
+    for key in ("report_path", "summary_path", "user_action_report_path"):
+        if output.get(key):
+            paths[key] = output[key]
+    paths.update(output.get("artifacts", {}))
+    available = [
+        (name, Path(path))
+        for name, path in paths.items()
+        if path and Path(path).is_file()
+    ]
+    if not available:
+        return
+    st.markdown("**결과 파일**")
+    columns = st.columns(min(3, len(available)))
+    for file_index, (name, path) in enumerate(available):
+        with columns[file_index % len(columns)]:
+            st.download_button(
+                f"{name} 다운로드",
+                data=path.read_bytes(),
+                file_name=path.name,
+                key=f"{key_prefix}-download-{report_index}-{file_index}-{name}",
+                width="stretch",
+            )
+
+
+def render_workflow_report(result, key_prefix="report"):
+    outputs = result.get("operation_outputs", [])
+    for index, output in enumerate(outputs):
+        action = output.get("action", "unknown")
+        action_label = {"generate": "라벨 생성", "convert": "형식 변환", "evaluate": "평가"}.get(
+            action,
+            action,
+        )
+        st.markdown(f"### {action_label} 결과 리포트")
+        if action == "generate":
+            performance = output.get("performance", {})
+            columns = st.columns(4)
+            columns[0].metric("처리 이미지", output.get("images", 0))
+            columns[1].metric("생성 라벨", output.get("total_labels", 0))
+            columns[2].metric("평균 처리 시간", f"{performance.get('avg_elapsed_sec', 0.0):.2f}초")
+            columns[3].metric("Escalation 비율", f"{performance.get('escalation_rate', 0.0) * 100:.1f}%")
+            if performance.get("estimation_notice"):
+                st.caption(performance["estimation_notice"])
+        elif action == "convert":
+            validation = output.get("validation", {})
+            columns = st.columns(4)
+            columns[0].metric("읽은 레코드", output.get("records_read", 0))
+            columns[1].metric("변환 완료", output.get("records_converted", 0))
+            columns[2].metric("검증 이슈", validation.get("failed_records", 0))
+            columns[3].metric(
+                "출력 이슈",
+                output.get("export_validation", {}).get("failed_records", 0),
+            )
+        elif action == "evaluate":
+            rows = output.get("rows", [])
+            st.metric("평가 실행", len(rows))
+            if rows:
+                st.dataframe(rows, width="stretch")
+
+        user_report = output.get("user_action_report", {})
+        if user_report:
+            summary = user_report.get("summary", {})
+            columns = st.columns(4)
+            columns[0].metric("완료율", f"{user_report.get('completion_rate', 0.0):.1f}%")
+            columns[1].metric("정상", summary.get("clean", 0))
+            columns[2].metric("검토 필요", summary.get("needs_review", 0))
+            columns[3].metric("Artifact 이슈", summary.get("artifact_issues", 0))
+            for action_text in user_report.get("recommended_actions", []):
+                st.info(action_text)
+            detailed = user_report.get("detailed_records", [])
+            if detailed:
+                st.markdown("**검토가 필요한 데이터**")
+                st.dataframe([
+                    {
+                        "파일": record.get("image", ""),
+                        "상태": record.get("status", ""),
+                        "이슈 수": record.get("total_issues", 0),
+                        "우선 조치": " / ".join(record.get("priority_actions", [])),
+                    }
+                    for record in detailed
+                ], width="stretch")
+
+        insight = output.get("dataset_insight", {})
+        distribution = insight.get("distribution", {})
+        if distribution:
+            st.markdown("**Dataset Insight**")
+            st.dataframe([
+                {
+                    "클래스": label,
+                    "개수": values.get("count", 0),
+                    "비율(%)": round(values.get("percentage", 0.0), 2),
+                }
+                for label, values in distribution.items()
+            ], width="stretch")
+            for suggestion in insight.get("suggestions", []):
+                st.warning(suggestion)
+
+        _download_report_files(output, index, key_prefix)
+
+
+def render_manual_result(result, result_key):
+    if result.get("status") == "completed":
+        st.success("작업이 완료되었습니다.")
+    else:
+        st.warning(f"작업 상태: {result.get('status', 'unknown')}")
+    render_workflow_report(result, key_prefix=f"manual-{result_key}")
+    with st.expander(f"{result_key} 원본 workflow 결과"):
         st.json({
             "status": result.get("status"),
             "outputs": result.get("operation_outputs", []),
             "errors": result.get("errors", []),
             "history_path": result.get("history_path", ""),
         })
+
+
+def run_plan(plan, auto_approve=False, result_key="workflow"):
+    try:
+        result = execute_plan(plan, auto_approve=auto_approve)
+        if "manual_results" not in st.session_state:
+            st.session_state.manual_results = {}
+        st.session_state.manual_results[result_key] = result
+        render_manual_result(result, result_key)
     except Exception as exc:
         st.error(f"작업 실패: {exc}")
 
@@ -222,6 +333,8 @@ def render_conversation(workspace):
         }]
     if "pending_proposal" not in st.session_state:
         st.session_state.pending_proposal = None
+    if "last_chat_result" not in st.session_state:
+        st.session_state.last_chat_result = None
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
@@ -238,6 +351,7 @@ def render_conversation(workspace):
             try:
                 result = execute_plan(pending_proposal["plan"], auto_approve=True)
                 response = describe_result(result, workspace)
+                st.session_state.last_chat_result = result
             except Exception as exc:
                 response = f"작업 실행 중 오류가 발생했습니다: {exc}"
             st.session_state.chat_messages.append({"role": "assistant", "content": response})
@@ -262,6 +376,9 @@ def render_conversation(workspace):
             response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
         st.session_state.chat_messages.append({"role": "assistant", "content": response})
         st.rerun()
+
+    if st.session_state.last_chat_result:
+        render_workflow_report(st.session_state.last_chat_result, key_prefix="chat")
 
 
 st.markdown(
@@ -341,6 +458,14 @@ with convert_tab:
             source_format = st.selectbox("입력 포맷", SOURCE_OPTIONS)
             target_formats = st.multiselect("출력 포맷", FORMAT_OPTIONS, default=["yolo"])
             duplicate_iou = st.slider("중복 IoU", 0.01, 1.0, 0.85, 0.01)
+            convert_insight_ratio = st.slider(
+                "불균형 비율 기준",
+                1.1,
+                10.0,
+                3.0,
+                0.1,
+                key="convert_insight_ratio",
+            )
             strict = st.checkbox("검증 이슈가 있는 레코드 제외")
         convert_submit = st.form_submit_button("변환 실행", type="primary", icon=":material/sync_alt:")
     if convert_submit:
@@ -357,9 +482,12 @@ with convert_tab:
                     "source_format": source_format,
                     "formats": target_formats,
                     "duplicate_iou": duplicate_iou,
+                    "insight_imbalance_ratio": convert_insight_ratio,
                     "strict": strict,
                 }],
-            })
+            }, result_key="convert")
+    elif st.session_state.get("manual_results", {}).get("convert"):
+        render_manual_result(st.session_state.manual_results["convert"], "convert")
 
 with generate_tab:
     st.markdown('<div class="panel-title">자동 라벨 생성</div>', unsafe_allow_html=True)
@@ -376,6 +504,14 @@ with generate_tab:
             task_type = st.selectbox("태스크", TASK_OPTIONS)
             generation_formats = st.multiselect("출력 포맷", FORMAT_OPTIONS, default=["yolo"], key="generation_formats")
             threshold = st.slider("신뢰도 기준", 0.0, 1.0, 0.75, 0.01)
+            generation_insight_ratio = st.slider(
+                "불균형 비율 기준",
+                1.1,
+                10.0,
+                3.0,
+                0.1,
+                key="generation_insight_ratio",
+            )
             inference_count = st.number_input("초안 추론 횟수", 1, 10, 3)
         prompt = st.text_area(
             "프롬프트",
@@ -402,12 +538,15 @@ with generate_tab:
                     "vis_dir": resolve_workspace_path(workspace, visualization_output),
                     "formats": generation_formats,
                     "threshold": threshold,
+                    "insight_imbalance_ratio": generation_insight_ratio,
                     "inference_count": int(inference_count),
                     "prompt": prompt,
                     "plugin_config": resolve_workspace_path(workspace, plugin_config) if plugin_config else None,
                     "require_approval": True,
                 }],
-            }, auto_approve=True)
+            }, auto_approve=True, result_key="generate")
+    elif st.session_state.get("manual_results", {}).get("generate"):
+        render_manual_result(st.session_state.manual_results["generate"], "generate")
 
 with evaluate_tab:
     st.markdown('<div class="panel-title">실험 결과 평가</div>', unsafe_allow_html=True)
@@ -438,7 +577,9 @@ with evaluate_tab:
                         for name, path in runs.items()
                     },
                 }],
-            })
+            }, result_key="evaluate")
+    elif st.session_state.get("manual_results", {}).get("evaluate"):
+        render_manual_result(st.session_state.manual_results["evaluate"], "evaluate")
 
 with settings_tab:
     st.markdown('<div class="panel-title">사용자 설정</div>', unsafe_allow_html=True)

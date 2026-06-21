@@ -15,7 +15,9 @@
 - consistency가 임계값보다 낮을 때 고용량 모델로 재추론
 - 실행별 처리 시간, 객체 수, confidence, uncertainty 기록
 - 선택적으로 ground truth YOLO 라벨과 precision/recall 평가
-- 전체 라벨 분포를 요약하고 클래스 불균형을 간단히 리포트
+- 생성·변환 결과의 클래스 분포, 불균형과 증강 제안을 구조화된 리포트로 저장
+- 검증 이슈를 심각도·우선 조치로 변환하고 출력 artifact를 재검증
+- Streamlit KPI 카드, 문제 파일 표, Dataset Insight와 결과 파일 다운로드
 
 ## 프로젝트 구조
 
@@ -43,7 +45,7 @@
     ├── agents/
     │   ├── labeling_agent.py       # 저용량 모델 반복 추론
     │   ├── verification_agent.py   # consistency 검증 및 에스컬레이션
-    │   └── insight_agent.py        # 라벨 분포 리포트
+    │   └── insight_agent.py        # 생성·변환 결과의 분포·불균형·증강 제안 Agent
     ├── core/
     │   ├── llm_client.py           # Bedrock Claude, OpenAI, Anthropic Vision LLM 호출
     │   ├── models.py               # DetectionResult, BoundingBox 모델
@@ -54,6 +56,10 @@
     │   ├── registry.py             # built-in/custom plugin 등록 및 설정 로드
     │   ├── orchestrator.py         # 태스크 필터링, 결과 병합, cross-model 점수
     │   └── builtin.py              # DINO/SAM/pose/OCR/tracking/classification adapter
+    ├── reporting/
+    │   ├── issue_reporter.py       # 검증 이슈 분류와 사용자 조치 리포트
+    │   ├── artifact_auditor.py     # YOLO/VOC/COCO/Vision JSON 출력 재검증
+    │   └── performance.py          # 생성 성능·추정 효율 KPI
     ├── workflow/
     │   ├── models.py               # Typed WorkflowPlan과 checkpoint state
     │   ├── planner.py              # 자연어 요청을 구조화된 plan으로 변환

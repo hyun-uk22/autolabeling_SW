@@ -413,6 +413,7 @@ python convert_labels.py `
 ### 5.9 Conversion Report
 
 모든 실행은 `<out_dir>/conversion_report.json`을 생성한다.
+LangGraph와 Streamlit 변환은 같은 디렉터리에 `<out_dir>/user_action_report.json`도 생성한다.
 
 구조:
 
@@ -465,6 +466,16 @@ python convert_labels.py `
 ```
 
 `source_format`에는 CLI 입력값을 기록한다. 실제 발견된 포맷과 파일별 처리 여부는 `input_summary`에서 확인한다. `records_before_merge`와 `records_after_merge`를 비교하면 이미지별 통합 정도를 알 수 있고, 누락 후보는 `failed_files`와 `skipped_files`로 확인할 수 있다.
+
+LangGraph·Streamlit의 `conversion_report.json`에는 기존 필드에 다음 항목을 추가로 기록한다.
+
+- `report_version`: 리포트 확장 스키마 버전
+- `export_validation`: 이미지별 출력 파일과 dataset artifact 재검증 결과
+- `user_action_report`: critical/high/medium 분류, 완료율, 우선 조치와 문제 파일
+- `dataset_insight`: `DatasetInsightAgent`가 최종 변환 대상에서 계산한 클래스 분포, 설정 가능한 불균형 기준과 희소 클래스 수집·oversampling·augmentation 제안
+- `exports`: 이미지별 출력 경로와 audit issue
+
+기존 `input_summary`, `validation`, `records`, `artifacts` 필드는 유지된다.
 
 ## 6. 포맷별 변환 예시
 

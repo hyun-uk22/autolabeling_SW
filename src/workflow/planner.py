@@ -32,6 +32,7 @@ Return JSON only with this shape:
       "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json",
       "threshold": 0.75,
       "eval_iou": 0.5,
+      "insight_imbalance_ratio": 3.0,
       "inference_count": 3,
       "draft_temperature": 0.7,
       "require_approval": true,

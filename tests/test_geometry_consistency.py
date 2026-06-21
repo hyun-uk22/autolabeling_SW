@@ -141,6 +141,12 @@ class GeometryConsistencyTests(unittest.TestCase):
             }])
 
             self.assertEqual(summary["consistency_metric"], "polygon_mask_iou")
+            self.assertEqual(summary["report_version"], "2.0")
+            self.assertEqual(summary["user_action_report"]["status"], "success")
+            self.assertEqual(summary["dataset_insight"]["distribution"]["object"]["count"], 1)
+            self.assertEqual(summary["dataset_insight"]["agent"], "DatasetInsightAgent")
+            self.assertIn("estimated_time_saved_pct", summary["performance"])
+            self.assertTrue((output_dir / "user_action_report.json").is_file())
             saved_summary = json.loads((output_dir / "run_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(saved_summary["consistency_metric"], "polygon_mask_iou")
             with (output_dir / "run_metrics.csv").open(encoding="utf-8", newline="") as handle:

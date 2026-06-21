@@ -1,0 +1,108 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from src.core.models import BoundingBox, DetectionResult
+from src.agents.insight_agent import DatasetInsightAgent
+from src.reporting import (
+    ArtifactAuditor,
+    build_generation_performance,
+    build_user_action_report,
+)
+from src.reporting.issue_reporter import categorize_issue
+from src.workflow.models import OperationPlan
+from src.workflow.runtime import WorkflowRuntime
+
+
+class ReportingTests(unittest.TestCase):
+    def test_prefixed_validator_and_export_issues_are_categorized(self):
+        missing_label = categorize_issue("box[0]:missing_label")
+        empty_coco = categorize_issue("coco:no_annotations:D:/output.json")
+
+        self.assertEqual(missing_label["code"], "missing_label")
+        self.assertEqual(missing_label["severity"], "high")
+        self.assertEqual(empty_coco["code"], "no_annotations")
+        self.assertEqual(empty_coco["category"], "output_format")
+
+    def test_completion_rate_uses_all_processed_records(self):
+        report = build_user_action_report(
+            [
+                {"image": "clean.jpg", "issues": []},
+                {"image": "bad.jpg", "issues": ["box[0]:missing_label"]},
+            ],
+            total_records=2,
+        )
+
+        self.assertEqual(report["status"], "partial_success")
+        self.assertEqual(report["summary"]["clean"], 1)
+        self.assertEqual(report["summary"]["needs_review"], 1)
+        self.assertEqual(report["completion_rate"], 50.0)
+
+    def test_artifact_auditor_checks_generated_label_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            empty_yolo = root / "empty.txt"
+            empty_yolo.write_text("", encoding="utf-8")
+            coco = root / "coco.json"
+            coco.write_text(json.dumps({
+                "images": [{"id": 1}],
+                "annotations": [],
+                "categories": [],
+            }), encoding="utf-8")
+            auditor = ArtifactAuditor()
+
+            self.assertIn("empty_output_file", auditor.audit_record({"yolo": str(empty_yolo)})[0])
+            self.assertIn("no_annotations", auditor.audit_artifacts({"coco": str(coco)})[0])
+
+    def test_dataset_insight_reports_distribution_and_imbalance(self):
+        results = [
+            DetectionResult(boxes=[BoundingBox(
+                label="car", xmin=0.1, ymin=0.1, xmax=0.2, ymax=0.2,
+            )])
+            for _ in range(4)
+        ]
+        results.append(DetectionResult(boxes=[BoundingBox(
+            label="person", xmin=0.1, ymin=0.1, xmax=0.2, ymax=0.2,
+        )]))
+
+        insight = DatasetInsightAgent().analyze(results)
+
+        self.assertEqual(insight["total_labels"], 5)
+        self.assertEqual(insight["distribution"]["car"]["count"], 4)
+        self.assertTrue(insight["imbalance"]["detected"])
+        self.assertTrue(insight["suggestions"])
+        self.assertEqual(insight["agent"], "DatasetInsightAgent")
+
+        relaxed = DatasetInsightAgent(imbalance_ratio_threshold=5.0).analyze(results)
+        self.assertEqual(relaxed["status"], "balanced")
+        self.assertFalse(relaxed["imbalance"]["detected"])
+
+        operation = OperationPlan(action="convert", insight_imbalance_ratio=5.0)
+        runtime_insight = WorkflowRuntime.analyze_dataset(operation, results)
+        self.assertEqual(runtime_insight["status"], "balanced")
+
+    def test_dataset_insight_agent_keeps_cli_accumulator_compatibility(self):
+        agent = DatasetInsightAgent()
+        agent.add_result(DetectionResult(boxes=[BoundingBox(
+            label="car", xmin=0.1, ymin=0.1, xmax=0.2, ymax=0.2,
+        )]))
+
+        insight = agent.analyze()
+
+        self.assertEqual(insight["distribution"]["car"]["count"], 1)
+        self.assertIn("car", agent.get_report())
+        agent.reset()
+        self.assertEqual(agent.analyze()["status"], "empty")
+
+    def test_performance_report_marks_estimated_values(self):
+        performance = build_generation_performance(2, 10.0, 6, 1, 1)
+
+        self.assertEqual(performance["avg_elapsed_sec"], 5.0)
+        self.assertEqual(performance["estimated_manual_time_sec"], 90.0)
+        self.assertEqual(performance["escalation_rate"], 0.5)
+        self.assertIn("추정치", performance["estimation_notice"])
+
+
+if __name__ == "__main__":
+    unittest.main()

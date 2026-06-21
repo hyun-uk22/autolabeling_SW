@@ -57,6 +57,12 @@ def main():
     parser.add_argument("--gt_dir", type=str, default=None, help="Optional directory with ground-truth YOLO labels for precision/recall evaluation")
     parser.add_argument("--eval_iou", type=float, default=0.5, help="IoU threshold for optional ground-truth evaluation")
     parser.add_argument(
+        "--insight_imbalance_ratio",
+        type=float,
+        default=3.0,
+        help="Class ratio above which DatasetInsightAgent reports imbalance",
+    )
+    parser.add_argument(
         "--label_formats",
         type=str,
         default="yolo",
@@ -150,7 +156,7 @@ def main():
         inference_count=args.inference_count,
         draft_temperature=args.draft_temperature,
     )
-    insighter = DatasetInsightAgent()
+    insighter = DatasetInsightAgent(args.insight_imbalance_ratio)
 
     images = sorted(f for f in os.listdir(args.img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg')))
     if not images:
@@ -269,6 +275,7 @@ def main():
         else:
             evaluation = evaluate_yolo_dirs(args.out_dir, args.gt_dir, args.eval_iou)
 
+    dataset_insight = insighter.analyze()
     run_summary = {
         "images": len(images),
         "task_type": args.task_type,
@@ -288,6 +295,7 @@ def main():
         "cost_reduction_pct": cost_reduction_pct,
         "plugins": plugin_orchestrator.names if plugin_orchestrator else [],
         "evaluation": evaluation,
+        "dataset_insight": dataset_insight,
     }
     summary_path = os.path.join(args.out_dir, "run_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:

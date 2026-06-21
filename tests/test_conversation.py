@@ -95,6 +95,11 @@ class ConversationWorkflowTests(unittest.TestCase):
             output = result["operation_outputs"][0]
             self.assertEqual(output["resolved_source_format"], "yolo")
             self.assertEqual(output["records_converted"], 1)
+            self.assertEqual(output["report_version"], "2.0")
+            self.assertEqual(output["user_action_report"]["status"], "success")
+            self.assertEqual(output["dataset_insight"]["distribution"]["car"]["count"], 1)
+            self.assertEqual(output["dataset_insight"]["agent"], "DatasetInsightAgent")
+            self.assertTrue((root / "data" / "converted" / "user_action_report.json").is_file())
             coco_path = root / "data" / "converted" / "coco_annotations.json"
             self.assertTrue(coco_path.is_file())
             coco = json.loads(coco_path.read_text(encoding="utf-8"))

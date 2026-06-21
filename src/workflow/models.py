@@ -26,6 +26,7 @@ class OperationPlan(BaseModel):
     duplicate_iou: float = Field(default=0.85, gt=0.0, le=1.0)
     threshold: float = 0.75
     eval_iou: float = 0.5
+    insight_imbalance_ratio: float = Field(default=3.0, gt=1.0)
     inference_count: int = 3
     draft_temperature: float = 0.7
     low_model: Optional[str] = None
