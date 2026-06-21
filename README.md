@@ -7,6 +7,7 @@
 - classification, object detection, segmentation, pose estimation, OCR, tracking 라벨링
 - YOLO, COCO, Pascal VOC 등 표준 라벨 혼합 입력의 파일별 감지·병합·변환
 - LangGraph 기반 generate/convert/evaluate 복합 workflow, 승인, checkpoint, 재개
+- 규칙 기반 우선 해석과 구조화된 LLM Intent Router fallback, 비실행 Chat Node
 - Streamlit localhost UI와 Windows PySide6 설치형 앱
 - LLM 출력 JSON을 내부 `DetectionResult` 구조로 정규화
 - YOLO, Pascal VOC XML, COCO JSON, 범용 Vision JSONL, 사용자 정의 템플릿 라벨 파일 생성

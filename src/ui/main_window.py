@@ -406,6 +406,8 @@ class SettingsPage(QWidget):
         "LOW_MODEL": "Low Model",
         "HIGH_MODEL": "High Model",
         "PLANNER_MODEL": "Planner Model",
+        "INTENT_ROUTER_MODEL": "Intent Router Model",
+        "CHAT_MODEL": "Chat Model",
     }
 
     def __init__(self, parent=None):

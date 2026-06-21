@@ -17,6 +17,8 @@ ENV_FIELDS = (
     "LOW_MODEL",
     "HIGH_MODEL",
     "PLANNER_MODEL",
+    "INTENT_ROUTER_MODEL",
+    "CHAT_MODEL",
 )
 
 SECRET_FIELDS = {
@@ -81,4 +83,3 @@ def save_user_settings(values: Dict[str, str], path: Optional[Path] = None) -> P
         else:
             os.environ.pop(key, None)
     return env_path
-

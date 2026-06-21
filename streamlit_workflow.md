@@ -58,6 +58,26 @@ Workspace 적용 후 UI는 다음 5개 탭으로 구성된다.
 
 한국어 또는 영어 자연어 요청을 구조화된 `WorkflowPlan`으로 변환한다. 현재 지원 operation은 형식 변환, 라벨 생성, 실험 평가이다.
 
+대화 입력은 다음 순서로 처리한다.
+
+```text
+규칙 기반 parser
+  -> 성공: 기존 workspace 탐색과 WorkflowPlan 생성
+  -> 의도/출력 포맷 해석 실패: LLM Intent Router
+       -> 작업 의도: 허용된 파라미터만 기존 계획 생성기에 전달
+       -> 일반 질문: 비실행 Chat Node 응답
+       -> unknown 또는 confidence < 0.65: 구체적인 요청을 다시 확인
+```
+
+LLM Intent Router는 작업을 직접 실행하지 않는다. `convert_labels`, `generate_labels`,
+`evaluate_labels` 등의 제한된 intent와 포맷, task, threshold 같은 구조화된 값만 반환한다.
+실제 경로 탐색, Pydantic 계획 검증, 승인 및 실행은 기존 workflow가 담당한다. 규칙으로 이미
+해석 가능한 요청에는 LLM을 호출하지 않는다.
+
+`INTENT_ROUTER_MODEL`과 `CHAT_MODEL`을 별도로 설정할 수 있다. 생략하면 각각
+`PLANNER_MODEL`, `LOW_MODEL` 순으로 fallback한다. 사용할 모델이 전혀 설정되지 않았거나
+LLM 호출에 실패하면 기존 규칙 parser의 오류를 사용자에게 표시하며 임의 계획을 실행하지 않는다.
+
 예시:
 
 ```text
@@ -76,6 +96,7 @@ Workspace 적용 후 UI는 다음 5개 탭으로 구성된다.
 - `.git`, `.venv`, build, dist, logs, 기존 converted·reports·workflow 결과는 자동 입력 탐색에서 제외한다.
 - 명시적인 `data/external_labels` 같은 workspace 상대 경로가 있으면 해당 경로를 우선한다.
 - workspace 밖의 경로는 대화형 자동 실행에서 허용하지 않는다.
+- LLM이 추출한 상대 경로도 같은 workspace 경계 검사를 통과해야 한다.
 
 ### 4.3 자연어에서 추출하는 값
 
@@ -301,6 +322,7 @@ Streamlit은 위젯 조작마다 스크립트를 다시 실행한다. 장기 ope
 | --- | --- |
 | `web_app.py` | Streamlit 화면, 폼 검증, 계획 실행과 결과 표시 |
 | `src/workflow/conversation.py` | workspace 탐색, 자연어 계획 생성, 대화 요약 |
+| `src/workflow/conversation_router.py` | 규칙 실패 시 LLM 의도 분류, 신뢰도 확인, 일반 대화 Chat Node 분기 |
 | `src/workflow/service.py` | UI에서 공통 LangGraph를 호출하는 진입점 |
 | `src/workflow/graph.py` | plan 검증과 operation 상태 전이 |
 | `src/workflow/runtime.py` | 생성, 변환, 평가의 실제 처리와 리포트 저장 |

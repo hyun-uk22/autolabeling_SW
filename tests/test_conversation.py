@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from src.workflow.conversation import build_conversation_plan, describe_plan, discover_workspace
+from src.workflow.conversation_router import ChatNode, IntentRouter, handle_conversation
 from src.workflow.service import execute_workflow_plan
 
 
@@ -51,6 +52,124 @@ class ConversationWorkflowTests(unittest.TestCase):
             description = describe_plan(proposal, root)
             self.assertIn("data/labeled", description)
             self.assertIn("`coco`", description)
+
+    def test_rule_parser_runs_before_llm_intent_router(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            calls = []
+            router = IntentRouter(caller=lambda request: calls.append(request))
+
+            routed = handle_conversation(
+                "현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘",
+                str(root),
+                intent_router=router,
+            )
+
+            self.assertEqual(routed["kind"], "plan")
+            self.assertEqual(routed["route_source"], "rules")
+            self.assertEqual(calls, [])
+
+    def test_llm_router_fills_unsupported_conversion_expression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            router = IntentRouter(caller=lambda request: {
+                "intent": "convert_labels",
+                "confidence": 0.93,
+                "parameters": {"target_formats": ["coco"], "source_format": "yolo"},
+                "missing_parameters": [],
+            })
+
+            routed = handle_conversation(
+                "보관된 annotation을 코코 규격에 맞게 재구성해줘",
+                str(root),
+                intent_router=router,
+            )
+
+            operation = routed["proposal"]["plan"]["operations"][0]
+            self.assertEqual(routed["route_source"], "llm")
+            self.assertEqual(operation["action"], "convert")
+            self.assertEqual(operation["formats"], ["coco"])
+            self.assertEqual(operation["source_format"], "auto")
+
+    def test_general_chat_is_handled_without_an_execution_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            router = IntentRouter(caller=lambda request: {
+                "intent": "general_chat",
+                "confidence": 0.98,
+                "parameters": {},
+                "missing_parameters": [],
+            })
+            chat = ChatNode(caller=lambda request: "COCO와 YOLO의 차이를 설명한 답변")
+
+            routed = handle_conversation(
+                "COCO와 YOLO는 어떤 차이가 있어?",
+                directory,
+                intent_router=router,
+                chat_node=chat,
+            )
+
+            self.assertEqual(routed["kind"], "chat")
+            self.assertNotIn("proposal", routed)
+            self.assertIn("차이", routed["response"])
+
+    def test_low_confidence_route_requests_clarification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            router = IntentRouter(caller=lambda request: {
+                "intent": "convert_labels",
+                "confidence": 0.4,
+                "parameters": {"target_formats": ["coco"]},
+                "missing_parameters": [],
+            })
+
+            routed = handle_conversation("이거 적당히 처리해줘", directory, intent_router=router)
+
+            self.assertEqual(routed["kind"], "clarification")
+            self.assertIn("구체적으로", routed["response"])
+
+    def test_missing_router_parameters_do_not_create_a_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            router = IntentRouter(caller=lambda request: {
+                "intent": "convert_labels",
+                "confidence": 0.95,
+                "parameters": {},
+                "missing_parameters": ["target_formats"],
+            })
+
+            routed = handle_conversation("annotation 규격을 다시 맞춰줘", directory, intent_router=router)
+
+            self.assertEqual(routed["kind"], "clarification")
+            self.assertIn("target_formats", routed["response"])
+
+    def test_router_provider_failure_is_reported_as_a_conversation_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def fail(_request):
+                raise RuntimeError("provider unavailable")
+
+            with self.assertRaisesRegex(ValueError, "Intent Router 호출에 실패"):
+                handle_conversation(
+                    "annotation 규격을 다시 맞춰줘",
+                    directory,
+                    intent_router=IntentRouter(caller=fail),
+                )
+
+    def test_llm_router_cannot_select_a_path_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            router = IntentRouter(caller=lambda request: {
+                "intent": "convert_labels",
+                "confidence": 0.99,
+                "parameters": {
+                    "target_formats": ["coco"],
+                    "source_path": "../outside/labels",
+                },
+                "missing_parameters": [],
+            })
+
+            with self.assertRaisesRegex(ValueError, "Workspace 밖"):
+                handle_conversation("annotation을 새 규격으로 맞춰줘", str(root), intent_router=router)
 
     def test_generated_outputs_and_config_json_are_not_selected_as_inputs(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -20,10 +20,10 @@ from src.core.workspace import (
 )
 from src.workflow.service import execute_workflow_plan
 from src.workflow.conversation import (
-    build_conversation_plan,
     describe_plan,
     describe_result,
 )
+from src.workflow.conversation_router import handle_conversation
 
 
 st.set_page_config(page_title="AutoLabel", page_icon=":material/dataset:", layout="wide")
@@ -369,9 +369,13 @@ def render_conversation(workspace):
     if chat_request:
         st.session_state.chat_messages.append({"role": "user", "content": chat_request})
         try:
-            proposal = build_conversation_plan(chat_request, workspace)
-            response = describe_plan(proposal, workspace)
-            st.session_state.pending_proposal = proposal
+            routed = handle_conversation(chat_request, workspace)
+            if routed["kind"] == "plan":
+                proposal = routed["proposal"]
+                response = describe_plan(proposal, workspace)
+                st.session_state.pending_proposal = proposal
+            else:
+                response = routed["response"]
         except (OSError, ValueError) as exc:
             response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
         st.session_state.chat_messages.append({"role": "assistant", "content": response})
@@ -595,6 +599,8 @@ with settings_tab:
         "LOW_MODEL": "Low Model",
         "HIGH_MODEL": "High Model",
         "PLANNER_MODEL": "Planner Model",
+        "INTENT_ROUTER_MODEL": "Intent Router Model",
+        "CHAT_MODEL": "Chat Model",
     }
     with st.form("settings_form"):
         workspace_value = st.text_input("Workspace 경로", value=workspace, key="setting_workspace")

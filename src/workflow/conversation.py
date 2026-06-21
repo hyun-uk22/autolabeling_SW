@@ -318,17 +318,22 @@ def _select_label_candidate(
     return selected[0]
 
 
-def build_conversation_plan(request: str, workspace: str | Path) -> Dict[str, Any]:
+def build_conversation_plan(
+    request: str,
+    workspace: str | Path,
+    intent_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     root = Path(workspace).expanduser().resolve()
     inventory = discover_workspace(root)
-    action = _action(request)
+    overrides = intent_overrides or {}
+    action = overrides.get("action") or _action(request)
     warnings = []
 
     if inventory["truncated"]:
         warnings.append("파일 수가 탐색 한도를 초과해 일부만 확인했습니다.")
 
     if action == "convert":
-        formats = _target_formats(request)
+        formats = overrides.get("target_formats") or _target_formats(request)
         if not formats:
             raise ValueError("변환할 출력 포맷을 확인하지 못했습니다. 예: MS COCO 형식으로 바꿔줘")
         candidates = inventory["label_candidates"]
@@ -337,15 +342,18 @@ def build_conversation_plan(request: str, workspace: str | Path) -> Dict[str, An
         images = inventory["image_directories"]
         if not images:
             raise ValueError("Workspace에서 라벨과 연결할 이미지 디렉터리를 찾지 못했습니다.")
-        requested_source_format = _source_format(request)
-        explicit_path = _explicit_workspace_path(request, root)
+        requested_source_format = overrides.get("source_format") or _source_format(request)
+        source_path = overrides.get("source_path")
+        explicit_path = _explicit_workspace_path(source_path, root) if source_path else _explicit_workspace_path(request, root)
         selected = _select_label_candidate(
             candidates,
             root,
             explicit_path,
             requested_source_format,
         )
-        duplicate_iou = _numeric_option(request, "iou")
+        duplicate_iou = overrides.get("duplicate_iou")
+        if duplicate_iou is None:
+            duplicate_iou = _numeric_option(request, "iou")
         if len(candidates) > 1:
             warnings.append(
                 f"라벨 후보 {len(candidates)}개 중 {selected['relative_path']}을 우선 선택했습니다."
@@ -358,7 +366,7 @@ def build_conversation_plan(request: str, workspace: str | Path) -> Dict[str, An
             formats=formats,
             source_format="auto",
             duplicate_iou=duplicate_iou if duplicate_iou is not None else 0.85,
-            strict=_contains_any(request.lower(), ("strict", "엄격")),
+            strict=bool(overrides.get("strict")) or _contains_any(request.lower(), ("strict", "엄격")),
             require_approval=False,
         )
         summary = (
@@ -369,9 +377,11 @@ def build_conversation_plan(request: str, workspace: str | Path) -> Dict[str, An
         images = inventory["image_directories"]
         if not images:
             raise ValueError("Workspace에서 라벨링할 이미지를 찾지 못했습니다.")
-        task_type = _task_type(request)
-        formats = _target_formats(request) or (["yolo"] if task_type == "object_detection" else ["vision_json"])
-        threshold = _numeric_option(request, "threshold|신뢰도")
+        task_type = overrides.get("task_type") or _task_type(request)
+        formats = overrides.get("target_formats") or _target_formats(request) or (["yolo"] if task_type == "object_detection" else ["vision_json"])
+        threshold = overrides.get("threshold")
+        if threshold is None:
+            threshold = _numeric_option(request, "threshold|신뢰도")
         plugin_config = (root / "configs" / "plugins.json").resolve()
         operation = OperationPlan(
             action="generate",
