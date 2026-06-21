@@ -1,11 +1,9 @@
 import argparse
-import json
 import os
+import sys
 
-from src.agents.conversion_agent import ConversionQualityAgent
-from src.utils.format_converter import LabelExportWriter
-from src.utils.label_importer import find_image_path, import_labels
-from src.utils.label_validator import summarize_validation
+from src.workflow.models import OperationPlan
+from src.workflow.runtime import WorkflowRuntime
 
 
 def main():
@@ -24,81 +22,70 @@ def main():
         default="yolo",
         help="Comma-separated target formats: yolo, pascal_voc, coco, vision_json, custom, all",
     )
-    parser.add_argument("--classes", default=None, help="Optional classes.txt for YOLO input")
+    parser.add_argument("--classes", "--classes_path", dest="classes", default=None, help="Optional classes.txt for YOLO input")
     parser.add_argument("--custom_label_template", default=None, help="Template path for custom output")
     parser.add_argument("--custom_label_extension", default=".json", help="Extension for custom output")
+    parser.add_argument(
+        "--duplicate_iou",
+        type=float,
+        default=0.85,
+        help="IoU threshold for merging duplicate labels from mixed input formats",
+    )
     parser.add_argument("--strict", action="store_true", help="Skip records with validation issues")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Approve excluding records with validation issues without an interactive prompt.",
+    )
     args = parser.parse_args()
+    if not 0.0 < args.duplicate_iou <= 1.0:
+        parser.error("--duplicate_iou must be greater than 0 and at most 1")
 
-    records = import_labels(
-        args.input,
-        args.img_dir,
+    operation = OperationPlan(
+        action="convert",
+        input_path=args.input,
+        img_dir=args.img_dir,
+        out_dir=args.out_dir,
         source_format=args.source_format,
-        classes_path=args.classes,
-    )
-    writer = LabelExportWriter(
-        args.out_dir,
         formats=args.target_formats,
-        custom_template_path=args.custom_label_template,
-        custom_extension=args.custom_label_extension,
+        classes_path=args.classes,
+        custom_label_template=args.custom_label_template,
+        custom_label_extension=args.custom_label_extension,
+        duplicate_iou=args.duplicate_iou,
+        strict=args.strict,
+        require_approval=False,
     )
-    conversion_agent = ConversionQualityAgent()
+    runtime = WorkflowRuntime()
+    loaded = runtime.load_conversion(operation, args.source_format)
+    records = loaded["records"]
+    validations = runtime.validate_conversion(operation, records)
+    issue_records = [record for record in validations if record.get("issues")]
+    if issue_records and not args.yes:
+        print("Validation issues were found:")
+        for record in issue_records:
+            print(f" - {record['image']}: {', '.join(record['issues'])}")
+        print("These records will be excluded from conversion.")
+        try:
+            answer = input("Continue excluding problematic records? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in {"y", "yes"}:
+            print("Conversion cancelled. No output was exported.")
+            sys.exit(2)
+    repaired = runtime.repair_conversion(records)
+    report = runtime.export_conversion(
+        operation,
+        repaired,
+        validations,
+        loaded["resolved_source_format"],
+        loaded["input_summary"],
+    )
 
-    validation_records = []
-    export_records = []
-    converted = 0
-    for image_name, result in records:
-        image_path = find_image_path(args.img_dir, image_name)
-        repaired_result = conversion_agent.repair_detection_result(result)
-        issues = conversion_agent.validate_input(repaired_result, image_path)
-        blocking_issues = conversion_agent.blocking_input_issues(issues, strict=args.strict)
-        validation_records.append({
-            "image": image_name,
-            "issues": issues,
-            "blocking_issues": blocking_issues,
-        })
-        if blocking_issues or (args.strict and issues):
-            continue
-        resolved_formats = conversion_agent.resolve_export_formats(repaired_result, writer.formats)
-        label_paths = writer.save(repaired_result, image_path, formats=resolved_formats)
-        export_issues = conversion_agent.audit_record_exports(label_paths)
-        export_records.append({
-            "image": image_name,
-            "paths": label_paths,
-            "issues": export_issues,
-            "recovery": conversion_agent.summarize_recovery(writer.formats, resolved_formats, export_issues),
-        })
-        if export_issues:
-            continue
-        converted += 1
-
-    artifacts = writer.finalize()
-    artifact_issues = conversion_agent.audit_final_artifacts(artifacts)
-    validation_summary = summarize_validation(validation_records)
-    report = {
-        "input": args.input,
-        "source_format": args.source_format,
-        "target_formats": writer.formats,
-        "records_read": len(records),
-        "records_converted": converted,
-        "validation": validation_summary,
-        "export_validation": {
-            "failed_records": sum(bool(record["issues"]) for record in export_records),
-            "artifact_issues": artifact_issues,
-        },
-        "artifacts": artifacts,
-        "records": validation_records,
-        "exports": export_records,
-    }
-
-    os.makedirs(args.out_dir, exist_ok=True)
-    report_path = os.path.join(args.out_dir, "conversion_report.json")
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-
-    print(f"Converted {converted}/{len(records)} records")
-    print(f"Validation failed records: {validation_summary['failed_records']}")
-    print(f"Report: {os.path.abspath(report_path)}")
+    print(f"Converted {report['records_converted']}/{report['records_read']} records")
+    print(f"Validation failed records: {report['validation']['failed_records']}")
+    print(f"Export failed records: {report['export_validation']['failed_records']}")
+    print(f"Report: {os.path.abspath(report['report_path'])}")
+    print(f"User action report: {os.path.abspath(report['user_action_report_path'])}")
 
 
 if __name__ == "__main__":

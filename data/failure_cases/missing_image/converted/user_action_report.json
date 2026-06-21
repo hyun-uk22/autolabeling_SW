@@ -1,0 +1,53 @@
+{
+  "report_version": "2.0",
+  "status": "needs_review",
+  "summary": {
+    "total_records": 1,
+    "clean": 0,
+    "needs_review": 1,
+    "blocked": 1,
+    "needs_attention": 0,
+    "warning": 0,
+    "artifact_issues": 0
+  },
+  "completion_rate": 0.0,
+  "top_issues": [
+    {
+      "issue_type": "missing_image",
+      "count": 1,
+      "user_action": "이미지 경로를 확인하거나 파일을 복원하세요."
+    }
+  ],
+  "recommended_actions": [
+    "누락되거나 손상된 이미지 파일을 먼저 복구하세요."
+  ],
+  "artifact_issues": [],
+  "detailed_records": [
+    {
+      "image": "missing_sample.jpg",
+      "status": "blocked",
+      "total_issues": 1,
+      "issues_by_severity": {
+        "critical": 1
+      },
+      "issues_by_category": {
+        "file_system": 1
+      },
+      "priority_actions": [
+        "이미지 파일 `data\\failure_cases\\missing_image\\images\\missing_sample.jpg`을 복원하거나 라벨 파일의 이미지 이름이 실제 파일명과 일치하도록 수정하세요."
+      ],
+      "detailed_issues": [
+        {
+          "code": "missing_image",
+          "severity": "critical",
+          "category": "file_system",
+          "message": "이미지 파일을 찾을 수 없습니다",
+          "user_action": "이미지 경로를 확인하거나 파일을 복원하세요.",
+          "original_issue": "missing_image:data\\failure_cases\\missing_image\\images\\missing_sample.jpg",
+          "affected_path": "data\\failure_cases\\missing_image\\images\\missing_sample.jpg",
+          "fix_instruction": "이미지 파일 `data\\failure_cases\\missing_image\\images\\missing_sample.jpg`을 복원하거나 라벨 파일의 이미지 이름이 실제 파일명과 일치하도록 수정하세요."
+        }
+      ]
+    }
+  ]
+}

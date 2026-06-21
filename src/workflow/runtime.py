@@ -6,19 +6,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
-from ..agents.conversion_agent import ConversionQualityAgent
-from ..agents.issue_reporter import generate_user_report
 from ..agents.labeling_agent import LabelingAgent
+from ..agents.insight_agent import DatasetInsightAgent
 from ..core.llm_client import VisionLLMClient
 from ..core.model_config import required_api_keys, resolve_model_names, validate_cascade_setup
 from ..core.models import DetectionResult
 from ..plugins.orchestrator import TaskPluginOrchestrator, merge_results
 from ..plugins.registry import create_default_registry
+from ..reporting import (
+    ArtifactAuditor,
+    build_generation_performance,
+    build_user_action_report,
+)
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
 from ..utils.format_converter import LabelExportWriter
-from ..utils.geometry import compute_result_consistency, get_consistency_score
-from ..utils.label_importer import find_image_path, import_labels
-from ..utils.label_validator import summarize_validation
+from ..utils.geometry import compute_result_consistency, consistency_metric_name, get_consistency_score
+from ..utils.label_importer import find_image_path, import_labels_with_report
+from ..utils.label_validator import summarize_validation, validate_result
 from ..utils.result_metrics import count_result_labels, mean_result_confidence, uncertainty_score
 from ..utils.visualize import visualize_boxes
 from .models import OperationPlan, WorkflowPlan
@@ -37,10 +41,14 @@ class WorkflowRuntime:
         self.high_client = None
         self.labeling_agent = None
         self.plugin_orchestrator = None
-        self.conversion_agent = ConversionQualityAgent()
 
     def plan(self, request: str, supplied_plan: Optional[dict] = None) -> WorkflowPlan:
         return self.planner.plan(request, supplied_plan)
+
+    @staticmethod
+    def analyze_dataset(operation: OperationPlan, results: List[DetectionResult]) -> Dict[str, Any]:
+        agent = DatasetInsightAgent(operation.insight_imbalance_ratio)
+        return agent.analyze(results)
 
     def prepare_generation(self, operation: OperationPlan) -> Dict[str, Any]:
         os.makedirs(operation.img_dir, exist_ok=True)
@@ -195,20 +203,27 @@ class WorkflowRuntime:
             custom_template_path=operation.custom_label_template,
             custom_extension=operation.custom_label_extension,
         )
+        auditor = ArtifactAuditor()
         metric_rows = []
-        yolo_written = False
+        export_records = []
+        exported_results = []
         for record in records:
-            result = self.conversion_agent.repair_detection_result(DetectionResult.model_validate(record["result"]))
+            result = DetectionResult.model_validate(record["result"])
+            exported_results.append(result)
             image_path = os.path.join(operation.img_dir, record["image"])
-            resolved_formats = self.conversion_agent.resolve_export_formats(result, formats, operation.task_type)
-            label_paths = writer.save(result, image_path, formats=resolved_formats)
-            yolo_written = yolo_written or "yolo" in resolved_formats
+            label_paths = writer.save(result, image_path)
+            export_records.append({
+                "image": record["image"],
+                "paths": label_paths,
+                "issues": auditor.audit_record(label_paths),
+            })
             vis_path = visualize_boxes(image_path, result, operation.vis_dir)
             metric_rows.append({
                 "image": record["image"],
                 "status": record["status"],
                 "source_model": result.source_model,
                 "task_type": result.task_type,
+                "consistency_metric": consistency_metric_name(result.task_type),
                 "objects": count_result_labels(result),
                 "boxes": len(result.boxes),
                 "segments": len(result.segments),
@@ -227,10 +242,10 @@ class WorkflowRuntime:
                 "elapsed_sec": record.get("elapsed_sec", 0.0),
                 "label_path": label_paths.get("yolo") or next(iter(label_paths.values()), ""),
                 "label_paths": json.dumps(label_paths, ensure_ascii=False),
-                "resolved_formats": json.dumps(resolved_formats, ensure_ascii=False),
                 "visualization_path": vis_path,
             })
         artifacts = writer.finalize()
+        artifact_issues = auditor.audit_artifacts(artifacts)
         metrics_csv = os.path.join(operation.out_dir, "run_metrics.csv")
         metrics_jsonl = os.path.join(operation.out_dir, "run_metrics.jsonl")
         if metric_rows:
@@ -242,49 +257,96 @@ class WorkflowRuntime:
                 for row in metric_rows:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         evaluation = None
-        if operation.gt_dir and os.path.isdir(operation.gt_dir) and yolo_written:
+        if operation.gt_dir and os.path.isdir(operation.gt_dir) and "yolo" in formats:
             evaluation = evaluate_yolo_dirs(operation.out_dir, operation.gt_dir, operation.eval_iou)
+        validation_records = [
+            {"image": record["image"], "issues": record.get("issues", [])}
+            for record in records
+        ]
+        user_action_report = build_user_action_report(
+            validation_records,
+            export_records,
+            artifact_issues,
+            total_records=len(records),
+        )
+        total_elapsed = sum(row["elapsed_sec"] for row in metric_rows)
+        low_attempts = sum(row["low_api_attempts"] for row in metric_rows)
+        high_attempts = sum(row["high_api_attempts"] for row in metric_rows)
+        escalation_count = sum(1 for row in metric_rows if row["status"] == "Escalated")
+        plugins = sorted({
+            plugin_record.get("plugin", "")
+            for record in records
+            for plugin_record in record.get("plugin_records", [])
+            if plugin_record.get("plugin")
+        })
         summary = {
+            "report_version": "2.0",
             "action": "generate",
             "images": len(records),
             "task_type": operation.task_type,
+            "consistency_metric": consistency_metric_name(operation.task_type),
             "formats": formats,
             "total_labels": sum(row["objects"] for row in metric_rows),
-            "total_elapsed_sec": sum(row["elapsed_sec"] for row in metric_rows),
-            "low_api_attempts": sum(row["low_api_attempts"] for row in metric_rows),
-            "high_api_attempts": sum(row["high_api_attempts"] for row in metric_rows),
-            "escalation_count": sum(1 for row in metric_rows if row["status"] == "Escalated"),
+            "total_elapsed_sec": total_elapsed,
+            "low_api_attempts": low_attempts,
+            "high_api_attempts": high_attempts,
+            "escalation_count": escalation_count,
+            "plugins": plugins,
             "evaluation": evaluation,
+            "performance": build_generation_performance(
+                len(records), total_elapsed, low_attempts, high_attempts, escalation_count,
+            ),
+            "dataset_insight": self.analyze_dataset(operation, exported_results),
+            "export_validation": {
+                "failed_records": sum(bool(record["issues"]) for record in export_records),
+                "artifact_issues": artifact_issues,
+                "records": export_records,
+            },
+            "user_action_report": user_action_report,
             "artifacts": artifacts,
         }
         summary_path = os.path.join(operation.out_dir, "run_summary.json")
+        user_action_path = os.path.join(operation.out_dir, "user_action_report.json")
+        summary["summary_path"] = summary_path
+        summary["user_action_report_path"] = user_action_path
+        with open(user_action_path, "w", encoding="utf-8") as f:
+            json.dump(user_action_report, f, ensure_ascii=False, indent=2)
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
-        summary["summary_path"] = summary_path
         return summary
 
-    def load_conversion(self, operation: OperationPlan, source_format: str) -> List[Dict[str, Any]]:
-        records = import_labels(
+    def load_conversion(self, operation: OperationPlan, source_format: str) -> Dict[str, Any]:
+        batch = import_labels_with_report(
             operation.input_path,
             operation.img_dir,
             source_format=source_format,
             classes_path=operation.classes_path,
+            duplicate_iou=operation.duplicate_iou,
         )
-        return [{"image": image, "result": result.model_dump()} for image, result in records]
+        detected_formats = list(batch.report.get("formats", {}))
+        resolved_source_format = source_format
+        if source_format == "auto":
+            resolved_source_format = detected_formats[0] if len(detected_formats) == 1 else "mixed"
+        return {
+            "records": [
+                {"image": image, "result": result.model_dump()}
+                for image, result in batch.records
+            ],
+            "input_summary": batch.report,
+            "resolved_source_format": resolved_source_format,
+        }
 
     def validate_conversion(self, operation: OperationPlan, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         validations = []
         for record in records:
             image_path = find_image_path(operation.img_dir, record["image"])
             result = DetectionResult.model_validate(record["result"])
-            issues = self.conversion_agent.validate_input(result, image_path)
+            sources = result.plugin_metadata.get("conversion_sources", {}) if result.plugin_metadata else {}
             validations.append({
                 "image": record["image"],
-                "issues": issues,
-                "blocking_issues": self.conversion_agent.blocking_input_issues(
-                    issues,
-                    strict=operation.strict,
-                ),
+                "image_path": image_path,
+                "input_paths": sources.get("paths", []),
+                "issues": validate_result(result, image_path),
             })
         return validations
 
@@ -300,6 +362,7 @@ class WorkflowRuntime:
         records: List[Dict[str, Any]],
         validations: List[Dict[str, Any]],
         source_format: str,
+        input_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         validation_map = {item["image"]: item["issues"] for item in validations}
         writer = LabelExportWriter(
@@ -308,40 +371,47 @@ class WorkflowRuntime:
             custom_template_path=operation.custom_label_template,
             custom_extension=operation.custom_label_extension,
         )
+        auditor = ArtifactAuditor()
         converted = 0
         export_records = []
+        exported_results = []
         for record in records:
             issues = validation_map.get(record["image"], [])
-            blocking_issues = self.conversion_agent.blocking_input_issues(
-                issues,
-                strict=operation.strict,
+            blocking = any(
+                issue.startswith("missing_image:")
+                or issue.startswith("image_open_failed:")
+                or issue == "invalid_image_size"
+                or issue == "empty_result"
+                for issue in issues
             )
-            if blocking_issues:
+            if blocking or (operation.strict and issues):
                 continue
             image_path = find_image_path(operation.img_dir, record["image"])
-            result = self.conversion_agent.repair_detection_result(DetectionResult.model_validate(record["result"]))
-            resolved_formats = self.conversion_agent.resolve_export_formats(result, writer.formats)
-            label_paths = writer.save(result, image_path, formats=resolved_formats)
-            export_issues = self.conversion_agent.audit_record_exports(label_paths)
+            result = DetectionResult.model_validate(record["result"])
+            paths = writer.save(result, image_path)
+            export_issues = auditor.audit_record(paths)
             export_records.append({
                 "image": record["image"],
-                "paths": label_paths,
+                "paths": paths,
                 "issues": export_issues,
-                "recovery": self.conversion_agent.summarize_recovery(writer.formats, resolved_formats, export_issues),
             })
-            if export_issues:
-                continue
-            converted += 1
+            exported_results.append(result)
+            if not export_issues:
+                converted += 1
         artifacts = writer.finalize()
-        artifact_issues = self.conversion_agent.audit_final_artifacts(artifacts)
-
-        # 사용자 액션 리포트 생성
-        user_report = generate_user_report(validations, export_records)
-
+        artifact_issues = auditor.audit_artifacts(artifacts)
+        user_action_report = build_user_action_report(
+            validations,
+            export_records,
+            artifact_issues,
+            total_records=len(records),
+        )
         report = {
+            "report_version": "2.0",
             "action": "convert",
             "input": operation.input_path,
             "resolved_source_format": source_format,
+            "input_summary": input_summary or {},
             "target_formats": writer.formats,
             "records_read": len(records),
             "records_converted": converted,
@@ -350,22 +420,20 @@ class WorkflowRuntime:
                 "failed_records": sum(bool(record["issues"]) for record in export_records),
                 "artifact_issues": artifact_issues,
             },
-            "user_action_report": user_report,  # 사용자 액션 리포트 추가
+            "user_action_report": user_action_report,
+            "dataset_insight": self.analyze_dataset(operation, exported_results),
             "records": validations,
             "exports": export_records,
             "artifacts": artifacts,
         }
         report_path = os.path.join(operation.out_dir, "conversion_report.json")
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-
-        # 별도의 사용자 액션 리포트 파일 생성
         user_action_path = os.path.join(operation.out_dir, "user_action_report.json")
-        with open(user_action_path, "w", encoding="utf-8") as f:
-            json.dump(user_report, f, ensure_ascii=False, indent=2)
-
         report["report_path"] = report_path
         report["user_action_report_path"] = user_action_path
+        with open(user_action_path, "w", encoding="utf-8") as f:
+            json.dump(user_action_report, f, ensure_ascii=False, indent=2)
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
         return report
 
     def conversion_schema_candidates(self, operation: OperationPlan) -> List[str]:

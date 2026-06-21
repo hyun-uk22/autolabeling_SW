@@ -1,0 +1,1 @@
+﻿{"image_name":"segment_sample.jpg","task_type":"segmentation","segments":[{"label":"object","polygon":[{"x":0.25,"y":0.25},{"x":0.72,"y":0.33},{"x":0.59,"y":0.79},{"x":0.19,"y":0.67}],"confidence":0.9}]}

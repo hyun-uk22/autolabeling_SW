@@ -1,0 +1,53 @@
+{
+  "report_version": "2.0",
+  "status": "needs_review",
+  "summary": {
+    "total_records": 1,
+    "clean": 0,
+    "needs_review": 1,
+    "blocked": 1,
+    "needs_attention": 0,
+    "warning": 0,
+    "artifact_issues": 0
+  },
+  "completion_rate": 0.0,
+  "top_issues": [
+    {
+      "issue_type": "empty_result",
+      "count": 1,
+      "user_action": "원본 데이터 확인 후 다시 라벨링하세요."
+    }
+  ],
+  "recommended_actions": [
+    "비어 있거나 유효 라벨이 없는 입력 데이터를 먼저 확인하세요."
+  ],
+  "artifact_issues": [],
+  "detailed_records": [
+    {
+      "image": "empty_label_sample.jpg",
+      "status": "blocked",
+      "total_issues": 1,
+      "issues_by_severity": {
+        "critical": 1
+      },
+      "issues_by_category": {
+        "input_data": 1
+      },
+      "priority_actions": [
+        "라벨 파일 `C:\\Users\\yoonseo\\Documents\\sw2026-autolabeling\\autolabeling_SW\\data\\failure_cases\\empty_yolo\\labels\\empty_label_sample.txt`에 객체 라벨 행 또는 annotation을 추가하거나, 해당 샘플을 제외하고 다시 변환하세요."
+      ],
+      "detailed_issues": [
+        {
+          "code": "empty_result",
+          "severity": "critical",
+          "category": "input_data",
+          "message": "라벨 데이터가 비어 있습니다",
+          "user_action": "원본 데이터 확인 후 다시 라벨링하세요.",
+          "original_issue": "empty_result",
+          "affected_path": "C:\\Users\\yoonseo\\Documents\\sw2026-autolabeling\\autolabeling_SW\\data\\failure_cases\\empty_yolo\\labels\\empty_label_sample.txt",
+          "fix_instruction": "라벨 파일 `C:\\Users\\yoonseo\\Documents\\sw2026-autolabeling\\autolabeling_SW\\data\\failure_cases\\empty_yolo\\labels\\empty_label_sample.txt`에 객체 라벨 행 또는 annotation을 추가하거나, 해당 샘플을 제외하고 다시 변환하세요."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "report_version": "2.0",
+  "status": "needs_review",
+  "summary": {
+    "total_records": 1,
+    "clean": 0,
+    "needs_review": 1,
+    "blocked": 1,
+    "needs_attention": 0,
+    "warning": 0,
+    "artifact_issues": 0
+  },
+  "completion_rate": 0.0,
+  "top_issues": [
+    {
+      "issue_type": "coordinate_out_of_range",
+      "count": 1,
+      "user_action": "픽셀 좌표와 정규화 좌표 설정을 확인하세요."
+    },
+    {
+      "issue_type": "empty_output_file",
+      "count": 1,
+      "user_action": "입력 라벨과 선택한 출력 포맷의 호환성을 확인하세요."
+    }
+  ],
+  "recommended_actions": [
+    "좌표 범위와 클래스 라벨을 검토한 뒤 다시 실행하세요.",
+    "선택한 task와 출력 포맷의 호환성 및 생성 artifact를 확인하세요."
+  ],
+  "artifact_issues": [],
+  "detailed_records": [
+    {
+      "image": "bad_coord_sample.jpg",
+      "status": "blocked",
+      "total_issues": 2,
+      "issues_by_severity": {
+        "high": 1,
+        "critical": 1
+      },
+      "issues_by_category": {
+        "label_quality": 1,
+        "output_format": 1
+      },
+      "priority_actions": [
+        "라벨 파일 `C:\\Users\\yoonseo\\Documents\\sw2026-autolabeling\\autolabeling_SW\\data\\failure_cases\\bad_yolo_coordinates\\labels\\bad_coord_sample.txt`의 좌표를 0~1 정규화 YOLO 좌표로 수정하세요. 픽셀 좌표라면 이미지 width/height로 나눠 정규화하세요.",
+        "출력 파일 `data\\failure_cases\\bad_yolo_coordinates\\converted\\bad_coord_sample.txt`이 비어 있습니다. task와 출력 포맷 호환성을 확인하고, segmentation/pose/OCR이면 Vision JSON 또는 COCO 등 표현 가능한 포맷으로 다시 변환하세요."
+      ],
+      "detailed_issues": [
+        {
+          "code": "coordinate_out_of_range",
+          "severity": "high",
+          "category": "label_quality",
+          "message": "좌표가 0~1 범위를 벗어났습니다",
+          "user_action": "픽셀 좌표와 정규화 좌표 설정을 확인하세요.",
+          "original_issue": "box[0]:coordinate_out_of_range",
+          "affected_path": "C:\\Users\\yoonseo\\Documents\\sw2026-autolabeling\\autolabeling_SW\\data\\failure_cases\\bad_yolo_coordinates\\labels\\bad_coord_sample.txt",
+          "fix_instruction": "라벨 파일 `C:\\Users\\yoonseo\\Documents\\sw2026-autolabeling\\autolabeling_SW\\data\\failure_cases\\bad_yolo_coordinates\\labels\\bad_coord_sample.txt`의 좌표를 0~1 정규화 YOLO 좌표로 수정하세요. 픽셀 좌표라면 이미지 width/height로 나눠 정규화하세요."
+        },
+        {
+          "code": "empty_output_file",
+          "severity": "critical",
+          "category": "output_format",
+          "message": "출력 파일이 비어 있습니다",
+          "user_action": "입력 라벨과 선택한 출력 포맷의 호환성을 확인하세요.",
+          "original_issue": "yolo:empty_output_file:data\\failure_cases\\bad_yolo_coordinates\\converted\\bad_coord_sample.txt",
+          "affected_path": "data\\failure_cases\\bad_yolo_coordinates\\converted\\bad_coord_sample.txt",
+          "fix_instruction": "출력 파일 `data\\failure_cases\\bad_yolo_coordinates\\converted\\bad_coord_sample.txt`이 비어 있습니다. task와 출력 포맷 호환성을 확인하고, segmentation/pose/OCR이면 Vision JSON 또는 COCO 등 표현 가능한 포맷으로 다시 변환하세요."
+        }
+      ]
+    }
+  ]
+}
