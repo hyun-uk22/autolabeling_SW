@@ -682,7 +682,7 @@ score가 없으면 seed와 plugin 결과의 agreement를 score로 사용한다.
 ### 18.5 결과 병합
 
 - classification: label 기준, confidence가 높은 값 사용
-- bbox: 같은 label이고 IoU `0.5` 이상이면 plugin 좌표로 교체하고 confidence 평균
+- bbox: 같은 label이고 설정된 `merge_iou` 이상이면 plugin 좌표로 교체하고 confidence 평균
 - segment: label과 근사 centroid 기준
 - pose: label과 근사 keypoint centroid 기준
 - OCR: text와 근사 위치 기준
@@ -693,6 +693,8 @@ plugin마다 다음 값이 기록된다.
 - `plugin_scores`
 - `plugin_metadata`
 - `plugin_records`
+
+bbox 병합 후에는 같은 label 기준 NMS를 적용한다. 기본값은 `merge_iou=0.35`, `nms_iou=0.60`, `min_confidence=0.20`이며 `plugins.json`에서 plugin별로 조정할 수 있다.
 
 ### 18.6 Plugin 이후 신뢰도 갱신
 

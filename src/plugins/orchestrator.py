@@ -14,8 +14,10 @@ def _box_iou(left, right) -> float:
     )
 
 
-def _merge_boxes(target, incoming, match_iou: float = 0.5):
+def _merge_boxes(target, incoming, match_iou: float = 0.35, min_confidence: float = 0.0):
     for candidate in incoming:
+        if candidate.confidence < min_confidence:
+            continue
         best_index = -1
         best_iou = 0.0
         for index, current in enumerate(target):
@@ -33,6 +35,19 @@ def _merge_boxes(target, incoming, match_iou: float = 0.5):
             target.append(candidate)
 
 
+def _dedupe_boxes(boxes, nms_iou: float = 0.6):
+    kept = []
+    for candidate in sorted(boxes, key=lambda item: item.confidence, reverse=True):
+        duplicate = False
+        for current in kept:
+            if current.label == candidate.label and _box_iou(current, candidate) >= nms_iou:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(candidate)
+    boxes[:] = kept
+
+
 def _merge_by_key(target, incoming, key):
     indexes = {key(item): index for index, item in enumerate(target)}
     for item in incoming:
@@ -46,10 +61,18 @@ def _merge_by_key(target, incoming, key):
             target.append(item)
 
 
-def merge_results(base: DetectionResult, incoming: DetectionResult) -> DetectionResult:
+def merge_results(
+    base: DetectionResult,
+    incoming: DetectionResult,
+    match_iou: float = 0.35,
+    nms_iou: float = 0.6,
+    min_confidence: float = 0.0,
+) -> DetectionResult:
     result = deepcopy(base)
     _merge_by_key(result.classifications, incoming.classifications, lambda item: item.label)
-    _merge_boxes(result.boxes, incoming.boxes)
+    result.boxes = [box for box in result.boxes if box.confidence >= min_confidence]
+    _merge_boxes(result.boxes, incoming.boxes, match_iou=match_iou, min_confidence=min_confidence)
+    _dedupe_boxes(result.boxes, nms_iou=nms_iou)
     _merge_by_key(
         result.segments,
         incoming.segments,
@@ -109,12 +132,21 @@ class TaskPluginOrchestrator:
             if not plugin.supports(task_type):
                 continue
             try:
+                match_iou = float(plugin.config.get("merge_iou", 0.35))
+                nms_iou = float(plugin.config.get("nms_iou", 0.6))
+                min_confidence = float(plugin.config.get("min_confidence", 0.0))
                 output = plugin.refine(image_path, prompt, result)
                 agreement = compute_result_consistency(result, output.result)
                 score = output.score if output.score is not None else agreement
                 weight = float(plugin.config.get("weight", 1.0))
                 weighted_scores.append((score, weight))
-                result = merge_results(result, output.result)
+                result = merge_results(
+                    result,
+                    output.result,
+                    match_iou=match_iou,
+                    nms_iou=nms_iou,
+                    min_confidence=min_confidence,
+                )
                 result.plugin_scores[plugin.plugin_name] = score
                 result.plugin_metadata[plugin.plugin_name] = output.metadata
                 records.append({"plugin": plugin.plugin_name, "status": "ok", "score": score, "agreement": agreement})

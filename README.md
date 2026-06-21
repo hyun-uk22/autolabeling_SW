@@ -525,6 +525,7 @@ python main.py ^
 - 모델 checkpoint/model id
 - CPU/GPU 장치
 - Grounding DINO box/text threshold
+- bbox 병합 IoU, NMS IoU, 최소 confidence
 - 후보 class 목록
 - plugin별 consistency weight
 - OCR 언어
@@ -532,7 +533,7 @@ python main.py ^
 
 전문 모델은 라벨 생성 태스크 시작 시점의 plugin prepare 단계에서 import와 weight 로드/다운로드를 먼저 시도합니다. `requirements-specialists.txt`를 설치하지 않았거나 checkpoint 다운로드에 실패하면 기본값에서는 해당 오류를 `plugin_prepare_records`와 `plugin_records`에 기록하고 VLM 결과 기반 파이프라인을 계속합니다. `--plugin_fail_fast`를 지정하면 즉시 중단합니다.
 
-plugin 결과는 기존 VLM 결과와 병합되고 다음 정보가 저장됩니다.
+plugin 결과는 기존 VLM 결과와 병합되고 다음 정보가 저장됩니다. object detection bbox는 같은 label 기준으로 병합한 뒤 NMS를 한 번 더 적용해 VLM과 specialist model이 같은 객체를 약간 다른 위치로 예측했을 때 중복 박스가 남는 상황을 줄입니다.
 
 - `plugin_scores`: 전문 모델 confidence 또는 VLM 결과와의 agreement
 - `plugin_metadata`: 사용 모델과 plugin별 실행 정보

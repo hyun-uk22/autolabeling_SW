@@ -26,8 +26,11 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "config": {
             "model": "IDEA-Research/grounding-dino-tiny",
             "device": "cpu",
-            "box_threshold": 0.35,
-            "text_threshold": 0.25,
+            "box_threshold": 0.45,
+            "text_threshold": 0.30,
+            "merge_iou": 0.35,
+            "nms_iou": 0.60,
+            "min_confidence": 0.20,
         },
     },
     {
