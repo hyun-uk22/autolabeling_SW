@@ -2,6 +2,24 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 from ..core.models import DetectionResult
 
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def normalized_box_to_pixels(box, width: int, height: int) -> tuple[int, int, int, int]:
+    x1 = round(_clamp(box.xmin, 0.0, 1.0) * width)
+    y1 = round(_clamp(box.ymin, 0.0, 1.0) * height)
+    x2 = round(_clamp(box.xmax, 0.0, 1.0) * width)
+    y2 = round(_clamp(box.ymax, 0.0, 1.0) * height)
+    return (
+        max(0, min(width, min(x1, x2))),
+        max(0, min(height, min(y1, y2))),
+        max(0, min(width, max(x1, x2))),
+        max(0, min(height, max(y1, y2))),
+    )
+
+
 def visualize_boxes(image_path: str, result: DetectionResult, output_dir: str):
     """
     Draws bounding boxes on the image and saves it for paper visualization.
@@ -28,11 +46,7 @@ def visualize_boxes(image_path: str, result: DetectionResult, output_dir: str):
     if not result.source_model: color = "blue"
 
     for box in result.boxes:
-        # Convert normalized coordinates to absolute pixels
-        x1 = box.xmin * width
-        y1 = box.ymin * height
-        x2 = box.xmax * width
-        y2 = box.ymax * height
+        x1, y1, x2, y2 = normalized_box_to_pixels(box, width, height)
         
         # Draw box
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
@@ -45,8 +59,10 @@ def visualize_boxes(image_path: str, result: DetectionResult, output_dir: str):
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
         
-        draw.rectangle([x1, y1 - text_h - 4, x1 + text_w + 4, y1], fill=color)
-        draw.text((x1 + 2, y1 - text_h - 2), text, fill="white", font=font)
+        label_y1 = max(0, y1 - text_h - 4)
+        label_y2 = max(text_h + 2, y1) if label_y1 == 0 else y1
+        draw.rectangle([x1, label_y1, min(width, x1 + text_w + 4), label_y2], fill=color)
+        draw.text((x1 + 2, label_y1 + 2), text, fill="white", font=font)
 
     for segment in result.segments:
         points = [(point.x * width, point.y * height) for point in segment.polygon]
@@ -70,18 +86,12 @@ def visualize_boxes(image_path: str, result: DetectionResult, output_dir: str):
             draw.text(visible_points[0], f"{pose.label} ({pose.confidence:.2f})", fill="cyan", font=font)
 
     for text_region in result.texts:
-        x1 = text_region.xmin * width
-        y1 = text_region.ymin * height
-        x2 = text_region.xmax * width
-        y2 = text_region.ymax * height
+        x1, y1, x2, y2 = normalized_box_to_pixels(text_region, width, height)
         draw.rectangle([x1, y1, x2, y2], outline="orange", width=3)
         draw.text((x1, y1), text_region.text, fill="orange", font=font)
 
     for track in result.tracks:
-        x1 = track.xmin * width
-        y1 = track.ymin * height
-        x2 = track.xmax * width
-        y2 = track.ymax * height
+        x1, y1, x2, y2 = normalized_box_to_pixels(track, width, height)
         draw.rectangle([x1, y1, x2, y2], outline="magenta", width=3)
         draw.text((x1, y1), f"{track.track_id}:{track.label}", fill="magenta", font=font)
         
