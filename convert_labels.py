@@ -5,6 +5,7 @@ import os
 from src.utils.format_converter import LabelExportWriter
 from src.utils.label_importer import find_image_path, import_labels_with_report
 from src.utils.label_validator import summarize_validation, validate_result
+from src.reporting import build_conversion_preflight, build_user_action_report
 
 
 def main():
@@ -23,7 +24,7 @@ def main():
         default="yolo",
         help="Comma-separated target formats: yolo, pascal_voc, coco, vision_json, custom, all",
     )
-    parser.add_argument("--classes", default=None, help="Optional classes.txt for YOLO input")
+    parser.add_argument("--classes", default=None, help="Optional YOLO data.yaml/classes.txt for class mapping")
     parser.add_argument("--custom_label_template", default=None, help="Template path for custom output")
     parser.add_argument("--custom_label_extension", default=".json", help="Extension for custom output")
     parser.add_argument(
@@ -50,6 +51,7 @@ def main():
         formats=args.target_formats,
         custom_template_path=args.custom_label_template,
         custom_extension=args.custom_label_extension,
+        initial_class_list=import_batch.report.get("class_list"),
     )
 
     validation_records = []
@@ -71,6 +73,20 @@ def main():
 
     artifacts = writer.finalize()
     validation_summary = summarize_validation(validation_records)
+    preflight = build_conversion_preflight(import_batch.report, writer.formats, validation_records)
+    user_action_report = build_user_action_report(
+        validation_records,
+        total_records=len(records),
+    )
+    preflight_actions = [
+        notice["user_action"]
+        for notice in preflight.get("notices", [])
+        if notice.get("severity") in {"critical", "warning"}
+    ]
+    if preflight_actions:
+        user_action_report["recommended_actions"] = list(dict.fromkeys(
+            preflight_actions + user_action_report.get("recommended_actions", [])
+        ))
     report = {
         "input": args.input,
         "source_format": args.source_format,
@@ -78,19 +94,29 @@ def main():
         "target_formats": writer.formats,
         "records_read": len(records),
         "records_converted": converted,
+        "preflight": preflight,
         "validation": validation_summary,
+        "user_action_report": user_action_report,
         "artifacts": artifacts,
         "records": validation_records,
     }
 
     os.makedirs(args.out_dir, exist_ok=True)
     report_path = os.path.join(args.out_dir, "conversion_report.json")
+    user_action_path = os.path.join(args.out_dir, "user_action_report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+    with open(user_action_path, "w", encoding="utf-8") as f:
+        json.dump(user_action_report, f, ensure_ascii=False, indent=2)
 
     print(f"Converted {converted}/{len(records)} records")
     print(f"Validation failed records: {validation_summary['failed_records']}")
+    if preflight.get("notices"):
+        print("Preflight notices:")
+        for notice in preflight["notices"]:
+            print(f" - [{notice['severity']}] {notice['message']} -> {notice['user_action']}")
     print(f"Report: {os.path.abspath(report_path)}")
+    print(f"User action report: {os.path.abspath(user_action_path)}")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@
 
 | 출력 형식 | 산출물 | 주요 용도 |
 | --- | --- | --- |
-| `yolo` | 이미지별 `.txt`, `classes.txt` | YOLO object detection 학습 |
+| `yolo` | 이미지별 `.txt`, `classes.txt`, `data.yaml` | YOLO object detection 학습 |
 | `pascal_voc` | 이미지별 `.xml` | Pascal VOC object detection |
 | `coco` | `coco_annotations.json` | COCO bbox/polygon segmentation |
 | `vision_json` | `vision_annotations.jsonl` | 프로젝트 전체 태스크 공통 표현 |
@@ -98,7 +98,7 @@ python convert_labels.py \
   --out_dir <변환 결과 디렉터리> \
   [--source_format auto] \
   [--target_formats yolo] \
-  [--classes classes.txt] \
+  [--classes data.yaml|classes.txt] \
   [--custom_label_template template.txt] \
   [--custom_label_extension .json] \
   [--duplicate_iou 0.85] \
@@ -125,7 +125,7 @@ CLI 옵션:
 | `--out_dir` | 예 | 없음 | 출력 라벨과 report 저장 디렉터리 |
 | `--source_format` | 아니오 | `auto` | 입력 포맷을 명시하거나 자동 추론 |
 | `--target_formats` | 아니오 | `yolo` | 쉼표로 구분한 출력 포맷 목록 |
-| `--classes` | 아니오 | 없음 | YOLO class id를 이름으로 복원할 `classes.txt` |
+| `--classes` | 아니오 | 없음 | YOLO class id를 이름으로 복원할 `data.yaml`, `dataset.yaml` 또는 `classes.txt` |
 | `--custom_label_template` | 아니오 | 없음 | custom 출력 템플릿 경로 |
 | `--custom_label_extension` | 아니오 | `.json` | custom 출력 파일 확장자 |
 | `--duplicate_iou` | 아니오 | `0.85` | 혼합 입력에서 같은 클래스 공간 라벨을 중복으로 판단할 IoU 기준 |
@@ -149,7 +149,7 @@ CLI 옵션:
 | Vision JSONL | `.jsonl` 첫 레코드에 `image_name` 또는 `task_type` 존재 |
 | CSV | 이미지 이름 컬럼과 `xmin`, `ymin`, `xmax`, `ymax` 컬럼 존재 |
 
-`classes.txt`는 라벨 소스가 아니라 YOLO class mapping으로 취급한다. 알려지지 않은 JSON/XML/TXT/JSONL/CSV schema는 임의로 해석하지 않고 `input_summary.skipped_files`에 이유와 함께 기록한다.
+YOLO `data.yaml`, `dataset.yaml`, `*.yaml`, `*.yml`, `classes.txt`는 라벨 소스가 아니라 class mapping으로 취급한다. 알려지지 않은 JSON/XML/TXT/JSONL/CSV schema는 임의로 해석하지 않고 `input_summary.skipped_files`에 이유와 함께 기록한다.
 
 단일 파일 입력:
 
@@ -309,7 +309,7 @@ tracking 검사:
 <class_id> <x_center> <y_center> <width> <height>
 ```
 
-class id는 실행 중 class label이 처음 발견된 순서로 부여되며 `classes.txt`에 저장된다. 원본 데이터셋의 class id가 그대로 유지된다고 보장하지 않는다.
+class id는 입력에서 확정한 canonical class list 순서로 부여된다. YOLO 입력에 `data.yaml`, `dataset.yaml`, 기타 YAML, `classes.txt`가 있으면 이 순서가 우선 보존되고, 다른 포맷에서만 발견된 클래스는 뒤에 추가된다.
 
 #### Pascal VOC
 
@@ -405,6 +405,7 @@ python convert_labels.py `
 모든 이미지별 저장이 끝난 뒤 `LabelExportWriter.finalize()`가 dataset 단위 산출물을 생성한다.
 
 - `classes.txt`
+- `data.yaml`
 - `coco_annotations.json`
 - `vision_annotations.jsonl`
 
@@ -413,7 +414,7 @@ python convert_labels.py `
 ### 5.9 Conversion Report
 
 모든 실행은 `<out_dir>/conversion_report.json`을 생성한다.
-LangGraph와 Streamlit 변환은 같은 디렉터리에 `<out_dir>/user_action_report.json`도 생성한다.
+CLI, LangGraph, Streamlit 변환은 같은 디렉터리에 `<out_dir>/user_action_report.json`도 생성한다.
 
 구조:
 
@@ -443,6 +444,10 @@ LangGraph와 Streamlit 변환은 같은 디렉터리에 `<out_dir>/user_action_r
   "target_formats": ["yolo", "coco"],
   "records_read": 100,
   "records_converted": 97,
+  "preflight": {
+    "status": "needs_attention",
+    "notices": []
+  },
   "validation": {
     "total_records": 100,
     "valid_records": 95,
@@ -454,6 +459,7 @@ LangGraph와 Streamlit 변환은 같은 디렉터리에 `<out_dir>/user_action_r
   },
   "artifacts": {
     "classes": "data/converted/classes.txt",
+    "data_yaml": "data/converted/data.yaml",
     "coco": "data/converted/coco_annotations.json"
   },
   "records": [
@@ -467,9 +473,10 @@ LangGraph와 Streamlit 변환은 같은 디렉터리에 `<out_dir>/user_action_r
 
 `source_format`에는 CLI 입력값을 기록한다. 실제 발견된 포맷과 파일별 처리 여부는 `input_summary`에서 확인한다. `records_before_merge`와 `records_after_merge`를 비교하면 이미지별 통합 정도를 알 수 있고, 누락 후보는 `failed_files`와 `skipped_files`로 확인할 수 있다.
 
-LangGraph·Streamlit의 `conversion_report.json`에는 기존 필드에 다음 항목을 추가로 기록한다.
+LangGraph·Streamlit의 `conversion_report.json`에는 기존 필드에 다음 항목을 추가로 기록한다. CLI도 `preflight`와 `user_action_report`를 기록한다.
 
 - `report_version`: 리포트 확장 스키마 버전
+- `preflight`: 변환에 필요한 필수·권장 정보 누락, YOLO class mapping 누락, importer 실패·스킵, 라벨 충돌, 이미지 누락을 심각도별로 정리
 - `export_validation`: 이미지별 출력 파일과 dataset artifact 재검증 결과
 - `user_action_report`: critical/high/medium 분류, 완료율, 우선 조치와 문제 파일
 - `dataset_insight`: `DatasetInsightAgent`가 최종 변환 대상에서 계산한 클래스 분포, 설정 가능한 불균형 기준과 희소 클래스 수집·oversampling·augmentation 제안
@@ -487,7 +494,7 @@ python convert_labels.py `
   --img_dir data/images `
   --out_dir data/converted/coco `
   --source_format yolo `
-  --classes data/yolo_labels/classes.txt `
+  --classes data/yolo_labels/data.yaml `
   --target_formats coco
 ```
 
@@ -549,7 +556,7 @@ python convert_labels.py `
 
 ### 8.1 클래스 ID
 
-YOLO 출력 class id는 importer의 원본 id가 아니라 변환 실행 중 발견된 label 순서로 재구성된다. GT와 prediction을 비교할 때 양쪽 `classes.txt`의 class 순서를 반드시 일치시켜야 한다.
+YOLO 출력 class id는 importer가 만든 canonical class list를 따른다. 우선순위는 명시된 `--classes`의 YAML/TXT, 입력 폴더의 `data.yaml`/`dataset.yaml`, 기타 YAML, `classes.txt`, 마지막으로 라벨에서 발견된 클래스 순서다. GT와 prediction을 비교할 때 양쪽 `data.yaml` 또는 `classes.txt`의 class 순서를 반드시 일치시켜야 한다.
 
 ### 8.2 좌표 반올림
 

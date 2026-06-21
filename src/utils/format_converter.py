@@ -178,6 +178,20 @@ def save_as_yolo(result: DetectionResult, image_name: str, output_dir: str, clas
     return txt_path
 
 
+def save_yolo_data_yaml(output_dir: str, class_list: List[str]) -> str:
+    yaml_path = os.path.join(output_dir, "data.yaml")
+    with open(yaml_path, "w", encoding="utf-8") as f:
+        f.write("path: .\n")
+        f.write("train: images/train\n")
+        f.write("val: images/val\n")
+        f.write(f"nc: {len(class_list)}\n")
+        f.write("names:\n")
+        for index, label in enumerate(class_list):
+            escaped = str(label).replace("\\", "\\\\").replace('"', '\\"')
+            f.write(f'  {index}: "{escaped}"\n')
+    return yaml_path
+
+
 def save_as_pascal_voc(result: DetectionResult, image_path: str, output_dir: str, class_list: list) -> str:
     os.makedirs(output_dir, exist_ok=True)
     width, height = get_image_size(image_path)
@@ -228,6 +242,7 @@ class LabelExportWriter:
         formats: str | Iterable[str] = "yolo",
         custom_template_path: Optional[str] = None,
         custom_extension: str = ".json",
+        initial_class_list: Optional[Iterable[str]] = None,
     ):
         self.output_dir = output_dir
         self.formats = normalize_label_formats(formats)
@@ -236,7 +251,7 @@ class LabelExportWriter:
         if "custom" in self.formats and not custom_template_path:
             raise ValueError("--custom_label_template is required when using the custom label format")
 
-        self.class_list: List[str] = []
+        self.class_list: List[str] = list(dict.fromkeys(str(label) for label in (initial_class_list or []) if str(label)))
         self.custom_template = None
         if custom_template_path:
             with open(custom_template_path, "r", encoding="utf-8") as f:
@@ -273,6 +288,8 @@ class LabelExportWriter:
             with open(classes_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(self.class_list))
             paths["classes"] = classes_path
+            if "yolo" in self.formats:
+                paths["data_yaml"] = save_yolo_data_yaml(self.output_dir, self.class_list)
         if "coco" in self.formats:
             coco_path = os.path.join(self.output_dir, "coco_annotations.json")
             categories = [

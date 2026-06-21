@@ -7,6 +7,7 @@ from src.core.models import BoundingBox, DetectionResult
 from src.agents.insight_agent import DatasetInsightAgent
 from src.reporting import (
     ArtifactAuditor,
+    build_conversion_preflight,
     build_generation_performance,
     build_user_action_report,
 )
@@ -102,6 +103,34 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(performance["estimated_manual_time_sec"], 90.0)
         self.assertEqual(performance["escalation_rate"], 0.5)
         self.assertIn("추정치", performance["estimation_notice"])
+
+    def test_conversion_preflight_reports_missing_yolo_mapping_and_images(self):
+        preflight = build_conversion_preflight(
+            {
+                "sources_discovered": 1,
+                "records_after_merge": 1,
+                "processed_files": [{
+                    "path": "labels/sample.txt",
+                    "format": "yolo",
+                    "records": 1,
+                    "class_mapping": {
+                        "status": "missing",
+                        "searched": ["labels/data.yaml", "labels/classes.txt"],
+                    },
+                }],
+                "failed_files": [],
+                "skipped_files": [],
+                "merge": {"conflicts": []},
+                "class_list": ["3"],
+            },
+            ["yolo"],
+            [{"image": "sample.jpg", "issues": ["missing_image:D:/sample.jpg"]}],
+        )
+
+        self.assertEqual(preflight["status"], "blocked")
+        codes = [notice["code"] for notice in preflight["notices"]]
+        self.assertIn("missing_yolo_class_mapping", codes)
+        self.assertIn("missing_images", codes)
 
 
 if __name__ == "__main__":

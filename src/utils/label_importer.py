@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import ast
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from ..core.models import BoundingBox, DetectionResult, Point, PolygonSegment
 
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+YOLO_DATASET_FILENAMES = ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml")
 SOURCE_PRIORITY = {
     "coco": 60,
     "pascal_voc": 50,
@@ -18,6 +20,14 @@ SOURCE_PRIORITY = {
     "vision_json": 30,
     "csv": 20,
     "generic_json": 10,
+}
+CLASS_LIST_PRIORITY = {
+    "yolo": 100,
+    "coco": 80,
+    "pascal_voc": 70,
+    "vision_json": 60,
+    "csv": 50,
+    "generic_json": 40,
 }
 
 
@@ -72,11 +82,186 @@ def infer_label_format(input_path: str) -> str:
     raise ValueError(f"Cannot infer label format from {input_path}")
 
 
+def _strip_yaml_value(value: str) -> str:
+    value = value.strip().strip(",")
+    if "#" in value:
+        value = value.split("#", 1)[0].strip()
+    if (
+        (value.startswith('"') and value.endswith('"'))
+        or (value.startswith("'") and value.endswith("'"))
+    ):
+        return value[1:-1]
+    return value
+
+
+def _parse_inline_yaml_names(value: str) -> List[str]:
+    value = value.strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except (SyntaxError, ValueError):
+            inner = value.strip("[]")
+            return [_strip_yaml_value(item) for item in inner.split(",") if _strip_yaml_value(item)]
+    if value.startswith("{"):
+        inner = value.strip("{}")
+        entries = []
+        for item in inner.split(","):
+            if ":" not in item:
+                continue
+            key, label = item.split(":", 1)
+            try:
+                index = int(_strip_yaml_value(key))
+            except ValueError:
+                index = len(entries)
+            entries.append((index, _strip_yaml_value(label)))
+        return [label for _, label in sorted(entries) if label]
+    return [_strip_yaml_value(value)]
+
+
+def load_yolo_yaml_classes(yaml_path: Optional[str]) -> List[str]:
+    if not yaml_path or not os.path.exists(yaml_path):
+        return []
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not stripped.startswith("names:"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        inline_value = stripped.split(":", 1)[1].strip()
+        if inline_value:
+            return _parse_inline_yaml_names(inline_value)
+
+        ordered_entries = []
+        list_entries = []
+        for child in lines[index + 1:]:
+            child_stripped = child.strip()
+            if not child_stripped or child_stripped.startswith("#"):
+                continue
+            child_indent = len(child) - len(child.lstrip())
+            if child_indent <= indent:
+                break
+            if child_stripped.startswith("-"):
+                label = _strip_yaml_value(child_stripped[1:])
+                if label:
+                    list_entries.append(label)
+                continue
+            if ":" in child_stripped:
+                key, label = child_stripped.split(":", 1)
+                try:
+                    class_id = int(_strip_yaml_value(key))
+                except ValueError:
+                    class_id = len(ordered_entries)
+                label = _strip_yaml_value(label)
+                if label:
+                    ordered_entries.append((class_id, label))
+        if ordered_entries:
+            return [label for _, label in sorted(ordered_entries)]
+        return list_entries
+    return []
+
+
+def _candidate_yolo_class_paths(source_path: str, classes_path: Optional[str] = None) -> List[str]:
+    if classes_path:
+        return [classes_path]
+    base_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+    candidates = [os.path.join(base_dir, name) for name in YOLO_DATASET_FILENAMES]
+    if os.path.isdir(base_dir):
+        candidates.extend(
+            os.path.join(base_dir, name)
+            for name in sorted(os.listdir(base_dir))
+            if name.lower().endswith((".yaml", ".yml"))
+            and name.lower() not in YOLO_DATASET_FILENAMES
+        )
+    candidates.append(os.path.join(base_dir, "classes.txt"))
+    return candidates
+
+
 def load_classes(classes_path: Optional[str]) -> List[str]:
     if not classes_path or not os.path.exists(classes_path):
         return []
+    if classes_path.lower().endswith((".yaml", ".yml")):
+        return load_yolo_yaml_classes(classes_path)
     with open(classes_path, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
+
+
+def load_yolo_classes(source_path: str, classes_path: Optional[str] = None) -> List[str]:
+    classes, _ = resolve_yolo_class_mapping(source_path, classes_path)
+    return classes
+
+
+def resolve_yolo_class_mapping(source_path: str, classes_path: Optional[str] = None) -> Tuple[List[str], Optional[str]]:
+    for candidate in _candidate_yolo_class_paths(source_path, classes_path):
+        class_list = load_classes(candidate)
+        if class_list:
+            return class_list, os.path.abspath(candidate)
+    return [], None
+
+
+def _append_unique(labels: List[str], values: Iterable[str]) -> None:
+    seen = set(labels)
+    for value in values:
+        label = str(value).strip()
+        if not label or label in seen:
+            continue
+        labels.append(label)
+        seen.add(label)
+
+
+def _labels_from_result(result: DetectionResult) -> List[str]:
+    labels: List[str] = []
+    _append_unique(labels, (item.label for item in result.boxes))
+    _append_unique(labels, (item.label for item in result.segments))
+    _append_unique(labels, (item.label for item in result.classifications))
+    _append_unique(labels, (item.label for item in result.poses))
+    _append_unique(labels, (item.label for item in result.tracks))
+    return labels
+
+
+def _classes_for_source(source: LabelSource, classes_path: Optional[str]) -> List[str]:
+    if source.format == "yolo":
+        return load_yolo_classes(source.path, classes_path)
+    if source.format == "coco":
+        with open(source.path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        categories = sorted(data.get("categories", []), key=lambda item: item.get("id", 0))
+        return [item.get("name", str(item.get("id"))) for item in categories]
+    if source.format == "pascal_voc":
+        labels: List[str] = []
+        files = [source.path]
+        if os.path.isdir(source.path):
+            files = [
+                os.path.join(source.path, name)
+                for name in sorted(os.listdir(source.path))
+                if name.lower().endswith(".xml")
+            ]
+        for path in files:
+            root = ET.parse(path).getroot()
+            _append_unique(labels, (obj.findtext("name") or "object" for obj in root.findall("object")))
+        return labels
+    return []
+
+
+def _source_metadata(source: LabelSource, classes_path: Optional[str]) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    if source.format == "yolo":
+        class_list, mapping_path = resolve_yolo_class_mapping(source.path, classes_path)
+        metadata["class_mapping"] = {
+            "status": "found" if class_list else "missing",
+            "path": mapping_path,
+            "classes": len(class_list),
+            "searched": [
+                os.path.abspath(path)
+                for path in _candidate_yolo_class_paths(source.path, classes_path)
+            ],
+        }
+    return metadata
 
 
 def label_for_class_id(class_id: int, class_list: List[str]) -> str:
@@ -119,8 +304,7 @@ def parse_yolo_file(path: str, image_name: str, class_list: List[str]) -> Tuple[
 
 
 def import_yolo(input_path: str, image_dir: str, classes_path: Optional[str] = None) -> List[Tuple[str, DetectionResult]]:
-    default_classes = os.path.join(input_path if os.path.isdir(input_path) else os.path.dirname(input_path), "classes.txt")
-    class_list = load_classes(classes_path or default_classes)
+    class_list = load_yolo_classes(input_path, classes_path)
     files = []
     if os.path.isdir(input_path):
         files = [
@@ -595,6 +779,7 @@ def import_labels_with_report(
     imported = []
     processed_sources = []
     failed_sources = []
+    class_sources = []
     for source in sources:
         try:
             source_records = _import_with_format(
@@ -603,11 +788,18 @@ def import_labels_with_report(
                 source.format,
                 classes_path=classes_path,
             )
+            source_classes = _classes_for_source(source, classes_path)
+            if not source_classes:
+                for _, result in source_records:
+                    _append_unique(source_classes, _labels_from_result(result))
             processed_sources.append({
                 "path": os.path.abspath(source.path),
                 "format": source.format,
                 "records": len(source_records),
+                "classes": source_classes,
+                **_source_metadata(source, classes_path),
             })
+            class_sources.append((source.format, os.path.abspath(source.path), source_classes))
             imported.extend((image_name, result, source) for image_name, result in source_records)
         except Exception as exc:
             failed_sources.append({
@@ -617,6 +809,14 @@ def import_labels_with_report(
             })
 
     merged, merge_report = merge_label_records(imported, duplicate_iou=duplicate_iou)
+    class_list: List[str] = []
+    for _, _, labels in sorted(
+        class_sources,
+        key=lambda item: (-CLASS_LIST_PRIORITY.get(item[0], 0), item[1].lower()),
+    ):
+        _append_unique(class_list, labels)
+    for _, result in merged:
+        _append_unique(class_list, _labels_from_result(result))
     format_counts = Counter(item["format"] for item in processed_sources)
     report = {
         "mode": "mixed_auto" if source_format == "auto" and os.path.isdir(input_path) else "single_format",
@@ -627,6 +827,7 @@ def import_labels_with_report(
         "formats": dict(sorted(format_counts.items())),
         "records_before_merge": len(imported),
         "records_after_merge": len(merged),
+        "class_list": class_list,
         "processed_files": processed_sources,
         "failed_files": failed_sources,
         "skipped_files": discovery["skipped_files"],

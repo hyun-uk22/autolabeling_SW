@@ -6,24 +6,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
-from ..agents.labeling_agent import LabelingAgent
 from ..agents.insight_agent import DatasetInsightAgent
+from ..agents.verification_agent import HierarchicalVerificationAgent
 from ..core.llm_client import VisionLLMClient
 from ..core.model_config import required_api_keys, resolve_model_names, validate_cascade_setup
 from ..core.models import DetectionResult
-from ..plugins.orchestrator import TaskPluginOrchestrator, merge_results
+from ..plugins.orchestrator import TaskPluginOrchestrator
 from ..plugins.registry import create_default_registry
 from ..reporting import (
     ArtifactAuditor,
+    build_conversion_preflight,
     build_generation_performance,
     build_user_action_report,
 )
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
 from ..utils.format_converter import LabelExportWriter
-from ..utils.geometry import compute_result_consistency, consistency_metric_name, get_consistency_score
+from ..utils.geometry import consistency_metric_name
 from ..utils.label_importer import find_image_path, import_labels_with_report
 from ..utils.label_validator import summarize_validation, validate_result
-from ..utils.result_metrics import count_result_labels, mean_result_confidence, uncertainty_score
+from ..utils.result_metrics import count_result_labels
 from ..utils.visualize import visualize_boxes
 from .models import OperationPlan, WorkflowPlan
 from .planner import WorkflowPlanner
@@ -39,7 +40,7 @@ class WorkflowRuntime:
         self._generation_key = None
         self.low_client = None
         self.high_client = None
-        self.labeling_agent = None
+        self.verification_agent = None
         self.plugin_orchestrator = None
 
     def plan(self, request: str, supplied_plan: Optional[dict] = None) -> WorkflowPlan:
@@ -81,10 +82,12 @@ class WorkflowRuntime:
             return
         self.low_client = VisionLLMClient(low_model)
         self.high_client = VisionLLMClient(high_model)
-        self.labeling_agent = LabelingAgent(
+        self.verification_agent = HierarchicalVerificationAgent(
             self.low_client,
+            self.high_client,
+            threshold=operation.threshold,
             inference_count=operation.inference_count,
-            temperature=operation.draft_temperature,
+            draft_temperature=operation.draft_temperature,
         )
         self.plugin_orchestrator = None
         if operation.plugin_config:
@@ -108,12 +111,11 @@ class WorkflowRuntime:
         self._ensure_generation_for_operation(operation)
         started = time.perf_counter()
         before = self.low_client.api_attempts
-        drafts = self.labeling_agent.label(image_path, operation.prompt, operation.task_type)
-        consistency = float(get_consistency_score(drafts))
-        seed = drafts[0] if drafts else DetectionResult(task_type=operation.task_type)
-        seed.consistency_score = consistency
-        seed.mean_confidence = mean_result_confidence(seed)
-        seed.uncertainty_score = uncertainty_score(consistency, seed.mean_confidence)
+        drafts, seed, consistency = self.verification_agent.generate_draft_labels(
+            image_path,
+            operation.prompt,
+            operation.task_type,
+        )
         return {
             "drafts": [item.model_dump() for item in drafts],
             "result": seed.model_dump(),
@@ -142,19 +144,13 @@ class WorkflowRuntime:
         plugin_records: List[dict],
         issues: List[str],
     ) -> Tuple[bool, str]:
-        reasons = []
-        if (result.consistency_score or 0.0) < operation.threshold:
-            reasons.append(f"consistency {result.consistency_score or 0.0:.3f} < {operation.threshold:.3f}")
-        agreements = [
-            float(record["agreement"])
-            for record in plugin_records
-            if record.get("status") == "ok" and record.get("agreement") is not None
-        ]
-        if agreements and min(agreements) < operation.threshold:
-            reasons.append(f"specialist agreement {min(agreements):.3f} < {operation.threshold:.3f}")
-        if issues:
-            reasons.append(f"validation issues: {', '.join(issues[:3])}")
-        return bool(reasons), "; ".join(reasons)
+        self._ensure_generation_for_operation(operation)
+        return self.verification_agent.needs_escalation(
+            result,
+            threshold=operation.threshold,
+            plugin_records=plugin_records,
+            issues=issues,
+        )
 
     def run_high_verification(
         self,
@@ -165,23 +161,12 @@ class WorkflowRuntime:
         self._ensure_generation_for_operation(operation)
         started = time.perf_counter()
         before = self.high_client.api_attempts
-        high_result = self.high_client.predict(
+        merged, agreement = self.verification_agent.high_verify(
             image_path,
             operation.prompt,
-            temperature=0.0,
-            task_type=operation.task_type,
+            operation.task_type,
+            specialist_result,
         )
-        high_result.source_model = self.high_client.model_name
-        agreement = compute_result_consistency(high_result, specialist_result)
-        merged = merge_results(high_result, specialist_result)
-        merged.plugin_scores.update(specialist_result.plugin_scores)
-        merged.plugin_metadata.update(specialist_result.plugin_metadata)
-        previous = specialist_result.consistency_score if specialist_result.consistency_score is not None else agreement
-        merged.consistency_score = (previous + agreement) / 2
-        merged.mean_confidence = mean_result_confidence(merged)
-        merged.uncertainty_score = uncertainty_score(merged.consistency_score, merged.mean_confidence)
-        if specialist_result.plugin_scores:
-            merged.source_model = f"{self.high_client.model_name}+{'+'.join(specialist_result.plugin_scores)}"
         return {
             "result": merged,
             "agreement": agreement,
@@ -364,6 +349,7 @@ class WorkflowRuntime:
             formats=operation.formats,
             custom_template_path=operation.custom_label_template,
             custom_extension=operation.custom_label_extension,
+            initial_class_list=(input_summary or {}).get("class_list"),
         )
         auditor = ArtifactAuditor()
         converted = 0
@@ -393,12 +379,22 @@ class WorkflowRuntime:
                 converted += 1
         artifacts = writer.finalize()
         artifact_issues = auditor.audit_artifacts(artifacts)
+        preflight = build_conversion_preflight(input_summary or {}, writer.formats, validations)
         user_action_report = build_user_action_report(
             validations,
             export_records,
             artifact_issues,
             total_records=len(records),
         )
+        preflight_actions = [
+            notice["user_action"]
+            for notice in preflight.get("notices", [])
+            if notice.get("severity") in {"critical", "warning"}
+        ]
+        if preflight_actions:
+            user_action_report["recommended_actions"] = list(dict.fromkeys(
+                preflight_actions + user_action_report.get("recommended_actions", [])
+            ))
         report = {
             "report_version": "2.0",
             "action": "convert",
@@ -408,6 +404,7 @@ class WorkflowRuntime:
             "target_formats": writer.formats,
             "records_read": len(records),
             "records_converted": converted,
+            "preflight": preflight,
             "validation": summarize_validation(validations),
             "export_validation": {
                 "failed_records": sum(bool(record["issues"]) for record in export_records),

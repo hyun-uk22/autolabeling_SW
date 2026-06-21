@@ -119,6 +119,15 @@ class StreamlitAppTests(unittest.TestCase):
                 "records_read": 2,
                 "records_converted": 1,
                 "validation": {"failed_records": 1},
+                "preflight": {
+                    "status": "needs_attention",
+                    "notices": [{
+                        "severity": "warning",
+                        "code": "missing_yolo_class_mapping",
+                        "message": "YOLO class mapping 파일을 찾지 못했습니다.",
+                        "user_action": "data.yaml 또는 classes.txt를 지정하세요.",
+                    }],
+                },
                 "export_validation": {"failed_records": 0, "artifact_issues": []},
                 "user_action_report": {
                     "completion_rate": 50.0,
@@ -159,7 +168,8 @@ class StreamlitAppTests(unittest.TestCase):
             metric_labels = [metric.label for metric in app.metric]
             self.assertIn("읽은 레코드", metric_labels)
             self.assertIn("완료율", metric_labels)
-            self.assertGreaterEqual(len(app.dataframe), 2)
+            self.assertGreaterEqual(len(app.dataframe), 3)
+            self.assertTrue(any("변환 전 확인 사항" in item.value for item in app.markdown))
             self.assertGreaterEqual(len(app.get("download_button")), 1)
 
             app.run(timeout=30)

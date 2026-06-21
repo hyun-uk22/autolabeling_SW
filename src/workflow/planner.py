@@ -21,7 +21,7 @@ Return JSON only with this shape:
       "out_dir": "output directory",
       "vis_dir": "visualization directory",
       "formats": ["yolo|pascal_voc|coco|vision_json|custom|all"],
-      "classes_path": "optional YOLO classes.txt",
+      "classes_path": "optional YOLO data.yaml or classes.txt",
       "custom_label_template": "required for custom output",
       "custom_label_extension": ".json",
       "prompt": "labeling instruction",

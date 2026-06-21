@@ -168,7 +168,7 @@ LLM 호출에 실패하면 기존 규칙 parser의 오류를 사용자에게 표
 - `conversion_report.json`
 - `user_action_report.json`
 
-변환 리포트에는 실제 감지된 입력 포맷, 읽은 레코드 수, 변환 성공 수, validation 요약, 출력 artifact 재검증, Dataset Insight, 레코드별 이슈와 artifact 경로가 포함된다. `user_action_report.json`은 문제를 심각도별로 분류하고 우선 조치와 권장 작업을 제공한다.
+변환 리포트에는 실제 감지된 입력 포맷, 읽은 레코드 수, 변환 성공 수, preflight 확인 사항, validation 요약, 출력 artifact 재검증, Dataset Insight, 레코드별 이슈와 artifact 경로가 포함된다. `preflight`는 변환 전후에 부족한 필수 정보와 권장 정보를 `critical`·`warning`·`info`로 분류하며, `user_action_report.json`은 문제를 심각도별로 분류하고 우선 조치와 권장 작업을 제공한다.
 
 ## 6. 라벨 생성
 

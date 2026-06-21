@@ -230,6 +230,18 @@ def render_workflow_report(result, key_prefix="report"):
                 "출력 이슈",
                 output.get("export_validation", {}).get("failed_records", 0),
             )
+            preflight = output.get("preflight", {})
+            if preflight.get("notices"):
+                st.markdown("**변환 전 확인 사항**")
+                st.dataframe([
+                    {
+                        "심각도": notice.get("severity", ""),
+                        "항목": notice.get("code", ""),
+                        "내용": notice.get("message", ""),
+                        "필요 조치": notice.get("user_action", ""),
+                    }
+                    for notice in preflight.get("notices", [])
+                ], width="stretch")
         elif action == "evaluate":
             rows = output.get("rows", [])
             st.metric("평가 실행", len(rows))

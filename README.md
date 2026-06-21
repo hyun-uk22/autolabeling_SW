@@ -249,7 +249,7 @@ python convert_labels.py ^
   --target_formats yolo,pascal_voc,coco,vision_json
 ```
 
-디렉터리를 `auto`로 입력하면 YOLO TXT, Pascal VOC XML, COCO JSON, Vision JSONL, bbox CSV를 파일별로 판별해 한 번에 읽습니다. 같은 이미지의 동일 클래스 공간 라벨은 IoU 기준으로 병합한 뒤 exporter를 한 번만 실행하므로, 포맷별 반복 실행으로 인한 출력 덮어쓰기를 피할 수 있습니다. 판별되지 않은 파일, importer 실패, 중복 제거와 클래스 충돌은 `conversion_report.json`의 `input_summary`에 기록됩니다.
+디렉터리를 `auto`로 입력하면 YOLO TXT, Pascal VOC XML, COCO JSON, Vision JSONL, bbox CSV를 파일별로 판별해 한 번에 읽습니다. 같은 이미지의 동일 클래스 공간 라벨은 IoU 기준으로 병합한 뒤 exporter를 한 번만 실행하므로, 포맷별 반복 실행으로 인한 출력 덮어쓰기를 피할 수 있습니다. 판별되지 않은 파일, importer 실패, 중복 제거와 클래스 충돌은 `conversion_report.json`의 `input_summary`에 기록되고, 부족한 필수·권장 정보는 `preflight`와 `user_action_report.json`에 사용자 조치와 함께 정리됩니다.
 
 여러 실험 결과를 비교해 논문용 정량 리포트를 만드는 예시:
 
@@ -429,6 +429,7 @@ data/labeled/
 ├── 01_dog_bike_car.txt
 ├── 02_eagle.txt
 ├── classes.txt
+├── data.yaml
 ├── run_metrics.csv
 └── run_metrics.jsonl
 ```
@@ -446,7 +447,7 @@ YOLO 라벨 형식:
 1 0.245000 0.670000 0.180000 0.220000
 ```
 
-`classes.txt`에는 실행 중 발견된 클래스명이 class id 순서대로 저장됩니다.
+`classes.txt`와 `data.yaml`에는 실행 중 확정된 클래스명이 class id 순서대로 저장됩니다.
 
 ```text
 person
@@ -584,7 +585,7 @@ class MyDetectorPlugin(VisionTaskPlugin):
 | source_format | 입력 형태 |
 | --- | --- |
 | `auto` | 단일 파일 자동 추론 또는 디렉터리 내 지원 포맷 파일별 자동 판별·통합 |
-| `yolo` | YOLO txt 디렉터리 또는 단일 txt. `classes.txt` 또는 `--classes` 사용 |
+| `yolo` | YOLO txt 디렉터리 또는 단일 txt. `data.yaml`/`dataset.yaml`/`classes.txt` 또는 `--classes` 사용 |
 | `pascal_voc` | Pascal VOC XML 파일 또는 디렉터리 |
 | `coco` | COCO annotations JSON |
 | `vision_json` | 프로젝트 공통 `vision_annotations.jsonl` |
@@ -750,7 +751,7 @@ JSONL 예시:
 9. consistency가 `--threshold`보다 낮으면 고용량 모델을 temperature `0.0`으로 한 번 더 호출하고, 아니면 첫 번째 저용량 초안을 최종 결과로 사용합니다.
 10. 최종 결과를 `DatasetInsightAgent`에 누적하고, `LabelExportWriter`가 선택한 라벨 포맷으로 저장합니다.
 11. 최종 결과를 원본 이미지 위에 그려 시각화 이미지를 저장하고, 이미지별 메트릭을 메모리에 누적합니다.
-12. 모든 이미지 처리가 끝나면 `classes.txt`와 COCO dataset JSON처럼 전체 실행 단위 산출물을 finalize합니다.
+12. 모든 이미지 처리가 끝나면 `classes.txt`, YOLO `data.yaml`, COCO dataset JSON처럼 전체 실행 단위 산출물을 finalize합니다.
 13. `run_metrics.csv`와 `run_metrics.jsonl`을 저장합니다.
 14. `--gt_dir`가 있고 YOLO 출력이 포함된 경우에만 ground truth와 비교해 precision, recall, mean IoU를 출력합니다.
 15. 전체 클래스 분포와 불균형 여부를 콘솔에 출력합니다.
