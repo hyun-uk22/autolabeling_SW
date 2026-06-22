@@ -95,8 +95,8 @@ START
        +-- generate
        |    -> prepare_generate
        |    -> select_image
-       |    -> generate_draft
        |    -> run_specialists
+       |         +-- 결과 없음 또는 vlm_first -> generate_draft
        |    -> decide_high
        |         +-- approval_gate -> high_verify
        |         +-- validate_generated
@@ -123,17 +123,19 @@ START
 ## 6. Generate Workflow
 
 1. 이미지 목록을 정렬한다.
-2. low VLM을 반복 호출해 draft와 self-consistency를 만든다.
-3. task를 지원하는 plugin을 설정 순서대로 실행한다.
-4. plugin agreement와 VLM consistency를 함께 검사한다.
-5. threshold 미만 또는 validation issue가 있으면 high verification 대상으로 지정한다.
-6. high VLM 호출 전 approval interrupt를 발생시킨다.
-7. 승인 시 high 결과와 전문 모델 결과를 병합한다.
-8. validation 실패 시 repair node가 malformed 항목을 제거한다.
-9. 이미지 결과를 checkpoint state와 run record에 추가한다.
-10. 모든 이미지가 끝나면 포맷 export와 metric 저장을 수행한다.
+2. `classes_path`, 프롬프트의 YOLO `names:` 블록, plugin 설정에서 후보 클래스를 구성한다.
+3. 기본 `specialist_first` 전략에서는 task를 지원하는 plugin을 설정 순서대로 먼저 실행한다.
+4. specialist 결과가 있으면 low VLM 호출 없이 validation/export 후보로 사용한다.
+5. specialist 결과가 비어 있거나 operation이 `generation_strategy=vlm_first`이면 low VLM을 반복 호출해 draft와 self-consistency를 만든다.
+6. plugin agreement와 VLM consistency를 함께 검사한다.
+7. threshold 미만 또는 validation issue가 있으면 high verification 대상으로 지정한다.
+8. high VLM 호출 전 approval interrupt를 발생시킨다.
+9. 승인 시 high 결과와 전문 모델 결과를 병합한다.
+10. validation 실패 시 repair node가 malformed 항목을 제거한다.
+11. 이미지 결과를 checkpoint state와 run record에 추가한다.
+12. 모든 이미지가 끝나면 포맷 export와 metric 저장을 수행한다.
 
-이 경로에서는 이전 직접 CLI와 달리 전문 모델 불일치가 high VLM 검증 조건에 포함된다.
+이 경로는 직접 CLI와 같은 generation strategy를 사용한다. 기본값은 `specialist_first`이고, 기존 VLM 우선 실험은 `vlm_first`로 되돌릴 수 있다.
 
 ## 7. Conversion Schema Retry
 

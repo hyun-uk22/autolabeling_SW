@@ -935,7 +935,14 @@ class id가 같고 IoU가 `--eval_iou` 이상인 bbox를 greedy matching한다.
 
 ## 26. 호출량
 
-기본 성공 경로:
+기본 `specialist_first` 성공 경로:
+
+```text
+specialist plugin 1회 이상
+전문 모델 결과가 있으면 VLM API 호출 0회 가능
+```
+
+VLM fallback 또는 `generation_strategy=vlm_first` 경로:
 
 ```text
 low VLM 3회
@@ -981,11 +988,12 @@ consistency 미달 시 high VLM 1회
 
 ## 28. 태스크별 실행 예시
 
-### 28.1 VLM-only Object Detection
+### 28.1 VLM-first Object Detection
 
 ```powershell
 python main.py `
   --task_type object_detection `
+  --generation_strategy vlm_first `
   --label_formats yolo,coco `
   --prompt "Detect people, vehicles, and animals."
 ```
@@ -1102,7 +1110,7 @@ python evaluate_experiments.py `
 
 - 전문 모델 weight는 repository에 포함되지 않음
 - 전문 모델의 실제 추론은 설치 환경과 checkpoint availability에 의존
-- plugin disagreement가 high VLM 재호출을 유발하지 않음
+- plugin agreement는 consistency에 반영되지만 별도의 GT calibration이나 task별 학습 weight는 없음
 - low 반복 결과 중 첫 번째 결과만 최종 초안으로 사용
 - high escalation 후 uncertainty가 high confidence 기준으로 재계산되지 않음
 - segmentation mask IoU는 512 x 512 raster 근사이며 hole/multi-polygon을 별도 표현하지 않음
@@ -1115,13 +1123,13 @@ python evaluate_experiments.py `
 - 자동 라벨 생성 경로에 구조 validation/strict skip 미연결
 - API timeout 미설정
 - 처리 병렬화 없음
-- prompt 결과의 클래스 taxonomy 고정/매핑 기능 없음
+- 클래스 후보는 `--classes_path`, YOLO `names:` 블록, plugin 설정으로 제한할 수 있으나 synonym/계층 taxonomy 관리는 없음
 - 실제 비용 계산에 token/GPU 비용 미반영
 
 ## 31. 권장 개선 방향
 
-1. specialist agreement를 high VLM escalation 전에 계산한다.
-2. plugin/VLM 결과를 GT로 calibration해 태스크별 weight를 학습한다.
+1. plugin/VLM 결과를 GT로 calibration해 태스크별 weight를 학습한다.
+2. 클래스 synonym과 계층 taxonomy를 관리하는 매핑 UI를 추가한다.
 3. Ground Truth 평가에 detection mAP와 segmentation mask IoU/Dice를 추가한다.
 4. Ground Truth 평가에 공식 pose OKS/PCK, OCR CER/WER, tracking MOTA/IDF1을 추가한다.
 5. empty result와 invalid geometry를 `label_validator.py`로 검사한다.

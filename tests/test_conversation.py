@@ -54,6 +54,51 @@ class ConversationWorkflowTests(unittest.TestCase):
             self.assertIn("data/labeled", description)
             self.assertIn("`coco`", description)
 
+    def test_conversion_discovers_common_labels_folder_when_labeled_is_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_dir = root / "images"
+            label_dir = root / "labels"
+            image_dir.mkdir()
+            label_dir.mkdir()
+            Image.new("RGB", (100, 80), "white").save(image_dir / "sample.jpg")
+            (label_dir / "sample.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+            (label_dir / "classes.txt").write_text("car\n", encoding="utf-8")
+
+            proposal = build_conversation_plan(
+                "현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(Path(operation["input_path"]), label_dir)
+            self.assertEqual(Path(operation["img_dir"]), image_dir)
+            self.assertEqual(operation["formats"], ["coco"])
+
+    def test_conversion_links_generated_labeled_folder_to_best_image_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "data" / "labeled"
+            image_dir = root / "data" / "images"
+            other_images = root / "misc" / "images"
+            label_dir.mkdir(parents=True)
+            image_dir.mkdir(parents=True)
+            other_images.mkdir(parents=True)
+            Image.new("RGB", (100, 80), "white").save(image_dir / "sample.jpg")
+            Image.new("RGB", (100, 80), "white").save(other_images / "other.jpg")
+            (label_dir / "sample.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+            (label_dir / "classes.txt").write_text("car\n", encoding="utf-8")
+
+            proposal = build_conversation_plan(
+                "현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(Path(operation["input_path"]), label_dir)
+            self.assertEqual(Path(operation["img_dir"]), image_dir)
+            self.assertTrue(any("이미지 후보" in warning for warning in proposal["warnings"]))
+
     def test_rule_parser_runs_before_llm_intent_router(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

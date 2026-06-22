@@ -1,4 +1,5 @@
 import csv
+import csv
 import json
 import re
 from collections import Counter, defaultdict
@@ -23,6 +24,23 @@ IGNORED_DIRECTORIES = {
     "reports",
     "workflow",
 }
+PREFERRED_LABEL_PATHS = (
+    "data/labeled",
+    "data/labels",
+    "labels",
+    "data/annotations",
+    "annotations",
+    "data/external_labels",
+)
+PREFERRED_IMAGE_PATHS = (
+    "data/raw",
+    "data/images",
+    "images",
+    "image",
+    "data/img",
+    "img",
+    "JPEGImages",
+)
 FORMAT_ALIASES = {
     "coco": ("ms coco", "mscoco", "coco", "코코"),
     "pascal_voc": ("pascal voc", "pascal_voc", "voc", "파스칼"),
@@ -117,8 +135,67 @@ def _label_format(path: Path) -> Optional[str]:
 
 def _candidate_score(candidate: Dict[str, Any]) -> tuple:
     relative = candidate["relative_path"].lower()
-    preferred = int(relative == "data/labeled" or relative.startswith("data/labeled/"))
-    return preferred, candidate["file_count"], -len(relative)
+    preferred_rank = 0
+    for index, prefix in enumerate(PREFERRED_LABEL_PATHS):
+        if relative == prefix.lower() or relative.startswith(prefix.lower() + "/"):
+            preferred_rank = len(PREFERRED_LABEL_PATHS) - index
+            break
+    return preferred_rank, candidate["file_count"], -len(relative)
+
+
+def _image_candidate_score(image: Dict[str, Any], label: Dict[str, Any], root: Path) -> tuple:
+    image_path = Path(image["path"]).resolve()
+    label_path = Path(label["path"]).resolve()
+    image_relative = image["relative_path"].lower()
+    label_relative = label["relative_path"].lower()
+
+    preferred_rank = 0
+    for index, prefix in enumerate(PREFERRED_IMAGE_PATHS):
+        if image_relative == prefix.lower() or image_relative.startswith(prefix.lower() + "/"):
+            preferred_rank = len(PREFERRED_IMAGE_PATHS) - index
+            break
+
+    relation_rank = 0
+    if image_path.parent == label_path.parent:
+        relation_rank = 5
+    elif image_path.parent == label_path.parent.parent:
+        relation_rank = 4
+    elif label_path.parent == image_path.parent:
+        relation_rank = 3
+    else:
+        try:
+            label_parts = label_path.relative_to(root).parts
+            image_parts = image_path.relative_to(root).parts
+        except ValueError:
+            label_parts = ()
+            image_parts = ()
+        if label_parts and image_parts and label_parts[0] == image_parts[0]:
+            relation_rank = 2
+
+    label_tokens = {"label", "labels", "labeled", "annotation", "annotations"}
+    image_tokens = {"image", "images", "raw", "img", "jpegimages"}
+    sibling_rank = 0
+    if label_path.name.lower() in label_tokens and image_path.name.lower() in image_tokens:
+        if label_path.parent == image_path.parent:
+            sibling_rank = 5
+        elif label_path.parent.parent == image_path.parent.parent:
+            sibling_rank = 3
+
+    return sibling_rank, relation_rank, preferred_rank, image["file_count"], -len(image_relative)
+
+
+def _select_image_for_label(
+    images: List[Dict[str, Any]],
+    label: Dict[str, Any],
+    root: Path,
+) -> Dict[str, Any]:
+    if not images:
+        raise ValueError(
+            "Workspace에서 라벨과 연결할 이미지 디렉터리를 찾지 못했습니다. "
+            f"라벨 후보는 `{label['relative_path']}`에서 찾았지만 COCO/VOC 변환에는 원본 이미지 크기가 필요합니다. "
+            "`data/raw`, `data/images`, `images` 중 하나에 원본 이미지를 두거나 프롬프트에 이미지 경로를 함께 지정하세요."
+        )
+    return max(images, key=lambda image: _image_candidate_score(image, label, root))
 
 
 def discover_workspace(workspace: str | Path, max_files: int = 20000) -> Dict[str, Any]:
@@ -388,9 +465,6 @@ def build_conversation_plan(
         candidates = inventory["label_candidates"]
         if not candidates:
             raise ValueError("Workspace에서 변환 가능한 라벨 파일을 찾지 못했습니다.")
-        images = inventory["image_directories"]
-        if not images:
-            raise ValueError("Workspace에서 라벨과 연결할 이미지 디렉터리를 찾지 못했습니다.")
         requested_source_format = overrides.get("source_format") or _source_format(request)
         source_path = overrides.get("source_path")
         explicit_path = _explicit_workspace_path(source_path, root) if source_path else _explicit_workspace_path(request, root)
@@ -400,6 +474,7 @@ def build_conversation_plan(
             explicit_path,
             requested_source_format,
         )
+        selected_images = _select_image_for_label(inventory["image_directories"], selected, root)
         duplicate_iou = overrides.get("duplicate_iou")
         if duplicate_iou is None:
             duplicate_iou = _numeric_option(request, "iou")
@@ -407,10 +482,14 @@ def build_conversation_plan(
             warnings.append(
                 f"라벨 후보 {len(candidates)}개 중 {selected['relative_path']}을 우선 선택했습니다."
             )
+        if len(inventory["image_directories"]) > 1:
+            warnings.append(
+                f"이미지 후보 {len(inventory['image_directories'])}개 중 {selected_images['relative_path']}을 라벨과 연결했습니다."
+            )
         operation = OperationPlan(
             action="convert",
             input_path=selected["path"],
-            img_dir=images[0]["path"],
+            img_dir=selected_images["path"],
             out_dir=str((root / "data" / "converted").resolve()),
             formats=formats,
             source_format="auto",

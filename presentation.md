@@ -4,7 +4,7 @@
 
 컴퓨터 비전 모델 개발에서 데이터 수집과 라벨링은 전체 파이프라인의 주요 병목이다. 기존 자동 라벨링 도구는 단일 모델 또는 고정된 변환 흐름에 의존하는 경우가 많아, 이종 라벨 포맷 처리, 결과 품질 검증, 클래스 불균형 분석, 오류 데이터 수정 안내가 분리되어 수행된다.
 
-본 프로젝트는 이 문제를 해결하기 위해 서로 다른 용량의 Vision LMM을 계층적으로 연결한 Agentic Workflow 기반 자동 라벨링 시스템을 구현했다. 제안 시스템은 저용량 모델의 반복 추론으로 self-consistency를 계산하고, 불확실성이 높은 샘플만 고용량 모델로 에스컬레이션한다. 또한 YOLO, Pascal VOC, COCO, Vision JSON 등 다양한 라벨 포맷을 통합 변환하고, 변환 전 부족 정보와 변환 후 오류 데이터를 사용자 조치 리포트로 제공한다.
+본 프로젝트는 이 문제를 해결하기 위해 태스크별 specialist vision model을 우선 실행하고, 결과가 비어 있거나 불확실할 때 Vision LMM cascade로 fallback하는 Agentic Workflow 기반 자동 라벨링 시스템을 구현했다. 제안 시스템은 YOLO `names:`/`data.yaml` 클래스 후보를 Grounding DINO와 SAM 계열 모델에 전달하고, 필요한 경우 저용량 모델 반복 추론과 고용량 모델 에스컬레이션을 수행한다. 또한 YOLO, Pascal VOC, COCO, Vision JSON 등 다양한 라벨 포맷을 통합 변환하고, 변환 전 부족 정보와 변환 후 오류 데이터를 사용자 조치 리포트로 제공한다.
 
 최종 산출물은 연구용 CLI에 머물지 않고 Streamlit 기반 로컬 웹 UI와 Windows `setup.exe` 설치형 앱으로 배포 가능한 형태를 목표로 한다.
 
@@ -35,9 +35,9 @@ Input Images / Existing Labels
 Intent Router / Workflow Planner
         |
         +--> Label Generation
-        |       Low-capacity VLM repeated inference
-        |       Self-consistency scoring
-        |       High-capacity VLM escalation
+        |       Specialist-first detection/segmentation
+        |       Optional low-capacity VLM fallback
+        |       Optional high-capacity VLM escalation
         |
         +--> Label Format Conversion
         |       YOLO / Pascal VOC / COCO / Vision JSON import
@@ -60,8 +60,8 @@ YOLO / Pascal VOC / COCO / Vision JSON / Visualization / Metrics
 
 | Agent | Role | Output |
 | --- | --- | --- |
-| Labeling Agent | 저용량 Vision LMM으로 반복 라벨 생성 | Draft labels, confidence |
-| Hierarchical Verification Agent | 반복 결과의 consistency를 계산하고 불확실 샘플을 고용량 모델로 에스컬레이션 | Final labels, escalation decision |
+| Labeling Agent | fallback 시 저용량 Vision LMM으로 반복 라벨 생성 | Draft labels, confidence |
+| Hierarchical Verification Agent | specialist 결과와 반복 결과의 consistency를 계산하고 불확실 샘플을 고용량 모델로 에스컬레이션 | Final labels, escalation decision |
 | Dataset Insight Agent | 클래스 분포와 불균형을 분석하고 증강 전략을 제안 | Distribution report, imbalance suggestions |
 
 ### 4.2 Hierarchical Verification
