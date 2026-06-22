@@ -24,7 +24,7 @@ class StreamlitAppTests(unittest.TestCase):
             app.run(timeout=30)
 
             self.assertEqual(len(app.exception), 0)
-            self.assertEqual(len(app.tabs), 5)
+            self.assertEqual(len(app.tabs), 6)
             self.assertEqual(len(app.chat_input), 1)
             self.assertEqual(app.text_input[0].value, "data/labeled")
             self.assertEqual(app.text_input[1].value, "data/raw")
@@ -40,7 +40,7 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(
                 [tab.label for tab in app.tabs],
-                ["대화형 작업", "형식 변환", "라벨 생성", "평가", "설정"],
+                ["대화형 작업", "형식 변환", "라벨 생성", "평가", "결과 리포트", "설정"],
             )
             self.assertEqual(len(app.get("form")), 4)
             self.assertEqual(len(app.chat_input), 1)
@@ -78,6 +78,8 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(app.button[0].label, "계획 실행")
             self.assertIn("data/labeled", app.chat_message[-1].markdown[0].value)
             self.assertIn("coco", app.chat_message[-1].markdown[0].value)
+            self.assertTrue(any("실행 전 확인 사항" in item.value for item in app.markdown))
+            self.assertGreaterEqual(len(app.dataframe), 1)
 
     def test_korean_generation_prompt_is_forwarded_to_workflow(self):
         from streamlit.testing.v1 import AppTest

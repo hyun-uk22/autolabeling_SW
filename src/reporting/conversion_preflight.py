@@ -48,7 +48,7 @@ def build_conversion_preflight(
             "warning",
             "import_failed_files",
             f"{len(failed_files)}개 라벨 파일을 읽지 못했습니다.",
-            "conversion_report.json의 input_summary.failed_files에서 파일별 오류를 확인하세요.",
+            "검증 이슈 상세의 실패 원인을 확인해 라벨 형식이 실제 파일 내용과 맞는지 점검하고, 리포트/metrics 파일은 라벨 입력 폴더에서 분리하세요.",
             count=len(failed_files),
         ))
 

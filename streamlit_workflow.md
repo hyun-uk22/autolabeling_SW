@@ -44,13 +44,14 @@
 
 화면에는 상대 경로를 입력할 수 있으며 operation 실행 직전에 workspace 기준 절대 경로로 변환된다. 마지막 workspace는 `%APPDATA%\AutoLabel\workspace.json`에 저장된다.
 
-Workspace 적용 후 UI는 다음 5개 탭으로 구성된다.
+Workspace 적용 후 UI는 다음 6개 탭으로 구성된다.
 
 1. 대화형 작업
 2. 형식 변환
 3. 라벨 생성
 4. 평가
-5. 설정
+5. 결과 리포트
+6. 설정
 
 ## 4. 대화형 작업
 
@@ -335,7 +336,7 @@ Streamlit에는 평가 row와 artifact 경로가 JSON으로 표시된다.
 
 ## 9. 공통 실행 상태와 리포트 표시
 
-생성·변환 결과는 처리량과 완료율 KPI 카드, 문제 파일과 우선 조치 표, 클래스 분포 표, 불균형 제안으로 표시한다. 평가 결과는 실행별 지표 표로 표시한다. 대화형 작업 탭도 마지막 실행 결과를 같은 리포트 UI로 유지한다.
+생성·변환 결과는 처리량과 완료율 KPI 카드, 문제 파일과 우선 조치 표, 클래스 분포 표, 불균형 제안으로 표시한다. 평가 결과는 실행별 지표 표로 표시한다. 대화형 작업의 마지막 실행 결과는 별도 `결과 리포트` 탭에서 같은 리포트 UI로 확인한다.
 
 리포트는 UI에만 존재하는 임시 데이터가 아니라 각 operation의 출력 디렉터리에 파일로 저장된다. Streamlit 다운로드 버튼으로 summary, conversion report, user action report와 생성 artifact를 받을 수 있으며 전체 workflow JSON은 expander에서 확인한다.
 

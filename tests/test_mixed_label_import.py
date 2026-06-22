@@ -125,6 +125,17 @@ names:
         self.assertEqual(batch.report["processed_files"][0]["class_mapping"]["status"], "missing")
         self.assertIn("classes.txt", "\n".join(batch.report["processed_files"][0]["class_mapping"]["searched"]))
 
+    def test_auto_import_keeps_empty_yolo_label_without_image(self):
+        self._write("missing_image.txt", "")
+
+        batch = import_labels_with_report(self.label_dir, self.image_dir, source_format="auto")
+
+        self.assertEqual(len(batch.records), 1)
+        self.assertEqual(batch.records[0][0], "missing_image.jpg")
+        self.assertEqual(len(batch.records[0][1].boxes), 0)
+        self.assertEqual(batch.report["sources_discovered"], 1)
+        self.assertEqual(batch.report["skipped_files"], [])
+
     def test_unmapped_yolo_numeric_label_uses_matching_named_label_from_other_format(self):
         self._write("yolo/image_a.txt", "3 0.300000 0.300000 0.400000 0.400000\n")
         self._write(

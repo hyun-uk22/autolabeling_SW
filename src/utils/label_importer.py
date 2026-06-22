@@ -588,8 +588,7 @@ def _looks_like_yolo(path: str, image_dir: str) -> bool:
     with open(path, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
     if not lines:
-        image_name = os.path.splitext(os.path.basename(path))[0] + ".jpg"
-        return os.path.exists(find_image_path(image_dir, image_name))
+        return True
     for line in lines:
         parts = line.split()
         if len(parts) != 5:

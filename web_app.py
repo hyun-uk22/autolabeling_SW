@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.core.user_settings import (
     ENV_FIELDS,
@@ -20,6 +21,7 @@ from src.core.workspace import (
     save_workspace,
 )
 from src.reporting import build_conversion_preflight
+from src.reporting.issue_reporter import categorize_issue
 from src.utils.label_importer import find_image_path, import_labels_with_report
 from src.utils.label_validator import summarize_validation, validate_result
 from src.workflow.service import execute_workflow_plan
@@ -28,6 +30,7 @@ from src.workflow.conversation import (
     describe_result,
 )
 from src.workflow.conversation_router import handle_conversation
+from src.workflow.plan_patcher import revise_pending_proposal
 
 
 st.set_page_config(page_title="AutoLabel", page_icon=":material/dataset:", layout="wide")
@@ -171,13 +174,40 @@ SOURCE_OPTIONS = ["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "g
 TASK_OPTIONS = ["object_detection", "classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"]
 
 
+def _plan_actions(plan):
+    return [
+        operation.get("action")
+        for operation in plan.get("operations", [])
+        if operation.get("action")
+    ]
+
+
 def execute_plan(plan, auto_approve=False):
-    with st.spinner("작업 실행 중"):
-        return execute_workflow_plan(
-            plan,
-            auto_approve=auto_approve,
-            thread_id=f"streamlit-{uuid.uuid4()}",
-        )
+    actions = _plan_actions(plan)
+    has_generation = "generate" in actions
+    label = "라벨 생성 실행 중" if has_generation else "작업 실행 중"
+    with st.status(label, expanded=True) as status:
+        st.write("Workflow를 준비하고 있습니다.")
+        if has_generation:
+            st.write(
+                "Specialist vision model을 준비합니다. 최초 실행이거나 캐시가 비어 있으면 "
+                "Grounding DINO/SAM 계열 가중치 다운로드 때문에 시간이 오래 걸릴 수 있습니다."
+            )
+        elif "convert" in actions:
+            st.write("라벨 파일을 읽고 변환/검증을 진행합니다.")
+        elif "evaluate" in actions:
+            st.write("평가 대상과 리포트 출력을 준비합니다.")
+        try:
+            result = execute_workflow_plan(
+                plan,
+                auto_approve=auto_approve,
+                thread_id=f"streamlit-{uuid.uuid4()}",
+            )
+        except Exception:
+            status.update(label="작업 실패", state="error", expanded=True)
+            raise
+        status.update(label="작업 완료", state="complete", expanded=False)
+        return result
 
 
 def _download_report_files(output, report_index, key_prefix):
@@ -378,8 +408,11 @@ def build_convert_preflight_preview(
     validations = []
     for image_name, result in batch.records:
         image_path = find_image_path(image_dir, image_name)
+        conversion_sources = result.plugin_metadata.get("conversion_sources", {})
         validations.append({
             "image": image_name,
+            "image_path": image_path,
+            "label_paths": conversion_sources.get("paths", []),
             "issues": validate_result(result, image_path),
         })
     return {
@@ -412,17 +445,113 @@ def render_convert_preflight_preview(preview):
         ], width="stretch")
     else:
         st.success("변환 전에 확인된 필수 누락 정보가 없습니다.")
-    detailed = [
-        {
-            "파일": record.get("image", ""),
-            "이슈": " / ".join(record.get("issues", [])),
-        }
-        for record in preview.get("records", [])
-        if record.get("issues")
-    ]
+    detailed = preflight_detail_rows(preview)
     if detailed:
         with st.expander("검증 이슈 상세"):
             st.dataframe(detailed, width="stretch")
+
+
+def preflight_detail_rows(preview):
+    summary = preview.get("input_summary", {})
+    grouped = {}
+
+    def add_detail(file_name, issue_code, label_path):
+        key = label_path or file_name
+        if key not in grouped:
+            grouped[key] = {
+                "파일": file_name,
+                "항목": [],
+                "라벨 파일 경로": label_path,
+                "원인": [],
+            }
+        row = grouped[key]
+        if file_name and file_name not in str(row["파일"]).split("\n"):
+            row["파일"] = "\n".join([str(row["파일"]), file_name]) if row["파일"] else file_name
+        if issue_code and issue_code not in row["항목"]:
+            row["항목"].append(issue_code)
+
+    for item in summary.get("failed_files", []):
+        path = item.get("path", "")
+        add_detail(Path(path).name, "import_failed_files", path)
+        if item.get("error") and item["error"] not in grouped[path]["원인"]:
+            grouped[path]["원인"].append(item["error"])
+    for item in summary.get("skipped_files", []):
+        path = item.get("path", "")
+        add_detail(Path(path).name, "skipped_unrecognized_files", path)
+        if item.get("reason") and item["reason"] not in grouped[path]["원인"]:
+            grouped[path]["원인"].append(item["reason"])
+    for record in preview.get("records", []):
+        label_paths = record.get("label_paths", [])
+        for issue in record.get("issues", []):
+            detail = categorize_issue(issue)
+            if label_paths:
+                for label_path in label_paths:
+                    add_detail(record.get("image", ""), detail.get("code", ""), label_path)
+            else:
+                add_detail(record.get("image", ""), detail.get("code", ""), "")
+    return [
+        {
+            "파일": row["파일"],
+            "항목": "\n".join(row["항목"]),
+            "라벨 파일 경로": row["라벨 파일 경로"],
+            "원인": "\n".join(row["원인"]),
+        }
+        for row in grouped.values()
+    ]
+
+
+def build_chat_preflight_preview(proposal):
+    operation = (proposal.get("plan", {}).get("operations") or [{}])[0]
+    if operation.get("action") != "convert":
+        return None
+    return build_convert_preflight_preview(
+        operation.get("input_path"),
+        operation.get("img_dir"),
+        operation.get("source_format", "auto"),
+        operation.get("formats", []),
+        classes_path=operation.get("classes_path"),
+        duplicate_iou=operation.get("duplicate_iou", 0.85),
+    )
+
+
+def render_chat_preflight_for_proposal(proposal):
+    try:
+        return build_chat_preflight_preview(proposal)
+    except Exception as exc:
+        return {
+            "preflight": {
+                "status": "blocked",
+                "notices": [{
+                    "severity": "warning",
+                    "code": "preflight_failed",
+                    "message": f"실행 전 점검을 생성하지 못했습니다: {exc}",
+                    "user_action": "입력 라벨 경로, 이미지 경로, source format을 확인하세요.",
+                }],
+            },
+            "validation": {"failed_records": 0},
+            "input_summary": {"sources_discovered": 0, "records_after_merge": 0},
+            "records": [],
+        }
+
+
+def describe_plan_revision(revision, workspace):
+    if revision.get("kind") == "cancel":
+        return f"현재 실행 계획을 취소했습니다. {revision.get('reason', '')}".strip()
+    if revision.get("kind") == "new_plan":
+        return (
+            "현재 실행 계획과 다른 새 작업 요청으로 판단했습니다. "
+            "기존 계획을 취소한 뒤 새 요청을 다시 입력해 주세요."
+        )
+    if revision.get("kind") == "clarify":
+        return f"계획 수정 요청을 명확히 해 주세요. {revision.get('reason', '')}".strip()
+    lines = ["**실행 계획을 수정했습니다.**"]
+    if revision.get("reason"):
+        lines.append(f"- 수정 근거: {revision['reason']}")
+    for change in revision.get("changes", []):
+        lines.append(f"- 변경: {change}")
+    lines.append("")
+    lines.append(describe_plan(revision["proposal"], workspace))
+    return "\n".join(lines)
 
 
 def first_pass_chat_proposal(proposal):
@@ -472,6 +601,26 @@ def render_selective_rerun_controls(first_pass_plan, key_prefix, on_complete):
         st.rerun()
 
 
+def complete_chat_rerun(result, workspace):
+    response = "선택 재추론을 완료했습니다.\n\n" + describe_result(result, workspace)
+    st.session_state.last_chat_result = result
+    st.session_state.chat_messages.append({"role": "assistant", "content": response})
+
+
+def render_result_report(workspace):
+    st.markdown('<div class="panel-title">결과 리포트</div>', unsafe_allow_html=True)
+    result = st.session_state.get("last_chat_result")
+    if not result:
+        st.info("아직 대화형 작업 결과가 없습니다.")
+        return
+    render_workflow_report(result, key_prefix="chat")
+    render_selective_rerun_controls(
+        st.session_state.get("last_chat_first_pass_plan"),
+        "chat",
+        lambda rerun_result: complete_chat_rerun(rerun_result, workspace),
+    )
+
+
 def render_conversation(workspace):
     st.markdown('<div class="panel-title">대화형 작업</div>', unsafe_allow_html=True)
     st.caption("원하는 데이터 작업을 자연어로 입력하세요. Workspace를 탐색한 뒤 실행 계획을 먼저 보여드립니다.")
@@ -489,13 +638,21 @@ def render_conversation(workspace):
         st.session_state.last_chat_result = None
     if "last_chat_first_pass_plan" not in st.session_state:
         st.session_state.last_chat_first_pass_plan = None
+    if "pending_preflight_preview" not in st.session_state:
+        st.session_state.pending_preflight_preview = None
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    if st.session_state.last_chat_result:
+        st.info("최근 대화형 작업 결과는 `결과 리포트` 탭에서 확인하세요.")
+
     pending_proposal = st.session_state.pending_proposal
     if pending_proposal:
+        pending_preflight = st.session_state.get("pending_preflight_preview")
+        if pending_preflight:
+            render_convert_preflight_preview(pending_preflight)
         approve_column, cancel_column, _ = st.columns([1, 1, 4])
         with approve_column:
             execute_chat_plan = st.button("계획 실행", type="primary", use_container_width=True)
@@ -511,49 +668,72 @@ def render_conversation(workspace):
                     if has_generate_operation(pending_proposal["plan"])
                     else None
                 )
+                st.session_state.open_result_report = True
             except Exception as exc:
                 response = f"작업 실행 중 오류가 발생했습니다: {exc}"
             st.session_state.chat_messages.append({"role": "assistant", "content": response})
             st.session_state.pending_proposal = None
+            st.session_state.pending_preflight_preview = None
             st.rerun()
         if cancel_chat_plan:
             st.session_state.chat_messages.append({"role": "assistant", "content": "작업을 취소했습니다."})
             st.session_state.pending_proposal = None
+            st.session_state.pending_preflight_preview = None
             st.rerun()
 
-    chat_request = st.chat_input(
-        "예: 현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘",
-        disabled=bool(st.session_state.pending_proposal),
+    chat_placeholder = (
+        "현재 실행 계획을 어떻게 수정할까요? 예: 출력 위치를 data/converted_test로 바꿔줘"
+        if st.session_state.pending_proposal
+        else "예: 현재 데이터셋의 라벨링 형식을 MS COCO 형식으로 바꿔줘"
     )
+    chat_request = st.chat_input(chat_placeholder)
     if chat_request:
         st.session_state.chat_messages.append({"role": "user", "content": chat_request})
         st.session_state.last_chat_result = None
         st.session_state.last_chat_first_pass_plan = None
+        st.session_state.pending_preflight_preview = None
         try:
-            routed = handle_conversation(chat_request, workspace)
-            if routed["kind"] == "plan":
-                proposal = first_pass_chat_proposal(routed["proposal"])
-                response = describe_plan(proposal, workspace)
-                st.session_state.pending_proposal = proposal
+            if st.session_state.pending_proposal:
+                with st.status("실행 계획 수정 중", expanded=True) as status:
+                    st.write("기존 실행 계획과 수정 요청을 LLM patcher에 전달합니다.")
+                    try:
+                        revision = revise_pending_proposal(
+                            chat_request,
+                            st.session_state.pending_proposal,
+                            workspace,
+                        )
+                    except Exception:
+                        status.update(label="실행 계획 수정 실패", state="error", expanded=True)
+                        raise
+                    status.update(label="수정안 생성 완료", state="complete", expanded=False)
+                response = describe_plan_revision(revision, workspace)
+                if revision["kind"] == "patch":
+                    proposal = revision["proposal"]
+                    st.session_state.pending_proposal = proposal
+                    st.session_state.pending_preflight_preview = render_chat_preflight_for_proposal(proposal)
+                elif revision["kind"] in {"cancel", "new_plan"}:
+                    st.session_state.pending_proposal = None
+                    st.session_state.pending_preflight_preview = None
             else:
-                response = routed["response"]
-        except (OSError, ValueError) as exc:
+                with st.status("요청 분석 중", expanded=True) as status:
+                    st.write("Workspace를 탐색하고 요청 의도를 분석합니다.")
+                    try:
+                        routed = handle_conversation(chat_request, workspace)
+                    except Exception:
+                        status.update(label="요청 분석 실패", state="error", expanded=True)
+                        raise
+                    status.update(label="실행 계획 생성 완료", state="complete", expanded=False)
+                if routed["kind"] == "plan":
+                    proposal = first_pass_chat_proposal(routed["proposal"])
+                    response = describe_plan(proposal, workspace)
+                    st.session_state.pending_proposal = proposal
+                    st.session_state.pending_preflight_preview = render_chat_preflight_for_proposal(proposal)
+                else:
+                    response = routed["response"]
+        except (OSError, RuntimeError, ValueError) as exc:
             response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
         st.session_state.chat_messages.append({"role": "assistant", "content": response})
         st.rerun()
-
-    if st.session_state.last_chat_result:
-        render_workflow_report(st.session_state.last_chat_result, key_prefix="chat")
-        def complete_chat_rerun(result):
-            response = "선택 재추론을 완료했습니다.\n\n" + describe_result(result, workspace)
-            st.session_state.last_chat_result = result
-            st.session_state.chat_messages.append({"role": "assistant", "content": response})
-
-        render_selective_rerun_controls(
-            st.session_state.last_chat_first_pass_plan,
-            "chat",
-            complete_chat_rerun,
-        )
 
 
 st.markdown(
@@ -612,12 +792,27 @@ if "workspace" not in st.session_state:
 
 workspace = st.session_state.workspace
 st.markdown(f'<div class="workspace-path">{html.escape(workspace)}</div>', unsafe_allow_html=True)
-chat_tab, convert_tab, generate_tab, evaluate_tab, settings_tab = st.tabs(
-    ["대화형 작업", "형식 변환", "라벨 생성", "평가", "설정"]
+chat_tab, convert_tab, generate_tab, evaluate_tab, result_tab, settings_tab = st.tabs(
+    ["대화형 작업", "형식 변환", "라벨 생성", "평가", "결과 리포트", "설정"]
 )
+
+if st.session_state.pop("open_result_report", False):
+    components.html(
+        """
+        <script>
+        const labels = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
+        const target = labels.find((el) => el.textContent.includes('결과 리포트'));
+        if (target) target.click();
+        </script>
+        """,
+        height=0,
+    )
 
 with chat_tab:
     render_conversation(workspace)
+
+with result_tab:
+    render_result_report(workspace)
 
 with convert_tab:
     st.markdown('<div class="panel-title">라벨 형식 변환</div>', unsafe_allow_html=True)

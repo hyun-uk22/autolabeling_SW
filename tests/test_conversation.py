@@ -8,6 +8,7 @@ from PIL import Image
 from src.workflow.conversation import build_conversation_plan, describe_plan, discover_workspace
 from src.workflow import conversation_router as conversation_router_module
 from src.workflow.conversation_router import ChatNode, IntentRouter, handle_conversation
+from src.workflow.plan_patcher import revise_pending_proposal
 from src.workflow.service import execute_workflow_plan
 
 
@@ -473,6 +474,60 @@ path: {test_images}
             self.assertEqual(routed["route_source"], "llm")
             self.assertEqual(operation["specialist_consistency_runs"], 0)
             self.assertEqual(operation["specialist_advisor_mode"], "none")
+
+    def test_llm_plan_patch_updates_allowed_fields_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            proposal = build_conversation_plan("현재 데이터셋을 COCO로 바꿔줘", root)
+
+            revision = revise_pending_proposal(
+                "출력 위치를 data/converted_test로 바꾸고 strict 모드로 해줘",
+                proposal,
+                root,
+                caller=lambda _: {
+                    "mode": "patch",
+                    "reason": "사용자가 출력 위치와 strict 모드를 수정했습니다.",
+                    "updates": {
+                        "out_dir": "data/converted_test",
+                        "strict": True,
+                    },
+                },
+            )
+
+            operation = revision["proposal"]["plan"]["operations"][0]
+            self.assertEqual(revision["kind"], "patch")
+            self.assertTrue(operation["strict"])
+            self.assertEqual(Path(operation["out_dir"]), (root / "data" / "converted_test").resolve())
+            self.assertTrue(any("out_dir" in change for change in revision["changes"]))
+
+    def test_llm_plan_patch_rejects_action_change_and_external_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            proposal = build_conversation_plan("현재 데이터셋을 COCO로 바꿔줘", root)
+
+            with self.assertRaises(ValueError):
+                revise_pending_proposal(
+                    "라벨 생성으로 바꿔줘",
+                    proposal,
+                    root,
+                    caller=lambda _: {
+                        "mode": "patch",
+                        "updates": {"action": "generate"},
+                    },
+                )
+
+            with self.assertRaises(ValueError):
+                revise_pending_proposal(
+                    "출력 위치를 외부 폴더로 바꿔줘",
+                    proposal,
+                    root,
+                    caller=lambda _: {
+                        "mode": "patch",
+                        "updates": {"out_dir": "D:/outside"},
+                    },
+                )
 
 
 if __name__ == "__main__":
