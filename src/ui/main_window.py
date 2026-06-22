@@ -313,9 +313,6 @@ class GeneratePage(OperationPage):
         self.visual_dir.setText(WORKSPACE_DEFAULTS["visualized"])
         self.task_type = QComboBox()
         self.task_type.addItems(["object_detection", "classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"])
-        self.generation_mode = QComboBox()
-        self.generation_mode.addItem("VLM + 비전 모델", "vlm_plugin")
-        self.generation_mode.addItem("비전 모델만", "specialist_only")
         self.formats = FormatSelector()
         self.threshold = QDoubleSpinBox()
         self.threshold.setRange(0.0, 1.0)
@@ -326,6 +323,7 @@ class GeneratePage(OperationPage):
         self.inference_count.setValue(3)
         self.plugin_config = PathField("file", "JSON (*.json)", base_dir=workspace, relative=True)
         self.plugin_config.setText(WORKSPACE_DEFAULTS["plugin_config"])
+        self.classes_path = PathField("file", "Class Mapping (*.yaml *.yml *.txt)", base_dir=workspace, relative=True)
         self.prompt = QPlainTextEdit()
         self.prompt.setMinimumHeight(90)
         self.prompt.setPlainText("Detect and classify all prominent objects in this image. Output strictly as JSON.")
@@ -333,11 +331,11 @@ class GeneratePage(OperationPage):
         self.form.addRow("라벨 출력", self.output_dir)
         self.form.addRow("시각화 출력", self.visual_dir)
         self.form.addRow("태스크", self.task_type)
-        self.form.addRow("생성 모드", self.generation_mode)
         self.form.addRow("출력 포맷", self.formats)
         self.form.addRow("신뢰도 기준", self.threshold)
         self.form.addRow("초안 추론 횟수", self.inference_count)
         self.form.addRow("Plugin 설정", self.plugin_config)
+        self.form.addRow("클래스 매핑", self.classes_path)
         self.form.addRow("프롬프트", self.prompt)
 
     def build_plan(self):
@@ -347,7 +345,6 @@ class GeneratePage(OperationPage):
         operation = {
             "action": "generate",
             "task_type": self.task_type.currentText(),
-            "generation_mode": self.generation_mode.currentData(),
             "img_dir": resolve_workspace_path(self.workspace, _require_path(self.image_dir, "이미지 디렉터리")),
             "out_dir": resolve_workspace_path(self.workspace, _require_path(self.output_dir, "라벨 출력")),
             "vis_dir": resolve_workspace_path(self.workspace, _require_path(self.visual_dir, "시각화 출력")),
@@ -355,6 +352,8 @@ class GeneratePage(OperationPage):
             "threshold": self.threshold.value(),
             "inference_count": self.inference_count.value(),
             "prompt": self.prompt.toPlainText().strip(),
+            "generation_strategy": "specialist_first",
+            "classes_path": resolve_workspace_path(self.workspace, self.classes_path.text()) if self.classes_path.text() else None,
             "plugin_config": resolve_workspace_path(self.workspace, self.plugin_config.text()) if self.plugin_config.text() else None,
             "require_approval": True,
         }

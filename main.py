@@ -7,6 +7,7 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 
 from src.core.llm_client import VisionLLMClient
+from src.core.models import DetectionResult
 from src.agents.verification_agent import HierarchicalVerificationAgent
 from src.agents.insight_agent import DatasetInsightAgent
 from src.utils.format_converter import LabelExportWriter, normalize_label_formats
@@ -21,8 +22,8 @@ from src.core.model_config import (
     resolve_model_names,
     validate_cascade_setup,
 )
-from src.core.models import DetectionResult
 from src.utils.result_metrics import count_result_labels
+from src.utils.label_importer import extract_class_names_from_text, load_classes
 
 load_dotenv()
 
@@ -43,6 +44,19 @@ def main():
     parser.add_argument("--vis_dir", type=str, default="data/visualized", help="Output directory for visualizations")
     parser.add_argument("--prompt", type=str, default="Detect and classify all prominent objects in this image. Output strictly as JSON.", help="Labeling prompt")
     parser.add_argument(
+        "--generation_strategy",
+        type=str,
+        default="specialist_first",
+        choices=["specialist_first", "vlm_first"],
+        help="Run specialist vision models before VLM fallback, or use the previous VLM-first cascade.",
+    )
+    parser.add_argument(
+        "--classes_path",
+        type=str,
+        default=None,
+        help="Optional classes.txt or YOLO data.yaml used to restrict Grounding DINO candidate labels.",
+    )
+    parser.add_argument(
         "--task_type",
         type=str,
         default="object_detection",
@@ -50,13 +64,6 @@ def main():
         help="Vision labeling task: classification, object_detection, segmentation, pose_estimation, ocr, tracking, or all",
     )
     parser.add_argument("--threshold", type=float, default=0.75, help="Consistency threshold for high-level model escalation")
-    parser.add_argument(
-        "--generation_mode",
-        type=str,
-        default="vlm_plugin",
-        choices=["vlm_plugin", "specialist_only"],
-        help="Use vlm_plugin for the normal VLM+specialist workflow or specialist_only to skip VLM calls for benchmarking.",
-    )
     parser.add_argument("--low_model", type=str, default=None, help="Low-capacity draft model. Overrides LOW_MODEL env.")
     parser.add_argument("--high_model", type=str, default=None, help="High-capacity verification model. Overrides HIGH_MODEL env.")
     parser.add_argument("--inference_count", type=int, default=3, help="Repeated low-model inferences per image for consistency scoring")
@@ -105,20 +112,18 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.vis_dir, exist_ok=True)
 
-    low_model_name = high_model_name = None
-    if args.generation_mode != "specialist_only":
-        low_model_name, high_model_name = resolve_model_names(args.low_model, args.high_model)
-        cascade_valid, cascade_messages = validate_cascade_setup(
-            low_model_name,
-            high_model_name,
-            args.allow_same_model,
-        )
-        for message in cascade_messages:
-            print(f"[!] {'WARNING' if cascade_valid else 'ERROR'}: {message}")
-        if not cascade_valid:
-            print(f"    Example LOW_MODEL=bedrock:{DEFAULT_BEDROCK_LOW_MODEL_ID}")
-            print(f"    Example HIGH_MODEL=bedrock:{DEFAULT_BEDROCK_HIGH_MODEL_ID}")
-            return
+    low_model_name, high_model_name = resolve_model_names(args.low_model, args.high_model)
+    cascade_valid, cascade_messages = validate_cascade_setup(
+        low_model_name,
+        high_model_name,
+        args.allow_same_model,
+    )
+    for message in cascade_messages:
+        print(f"[!] {'WARNING' if cascade_valid else 'ERROR'}: {message}")
+    if not cascade_valid:
+        print(f"    Example LOW_MODEL=bedrock:{DEFAULT_BEDROCK_LOW_MODEL_ID}")
+        print(f"    Example HIGH_MODEL=bedrock:{DEFAULT_BEDROCK_HIGH_MODEL_ID}")
+        return
 
     try:
         requested_formats = args.label_formats
@@ -136,28 +141,27 @@ def main():
         return
 
     try:
-        plugins = load_generation_plugins(args.plugin_config, args.generation_mode)
+        candidate_labels = load_classes(args.classes_path) or extract_class_names_from_text(args.prompt)
+        plugins = load_generation_plugins(args.plugin_config, candidate_labels=candidate_labels)
         plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=args.plugin_fail_fast)
     except Exception as e:
         print(f"[!] ERROR: Invalid plugin setup: {e}")
         return
     
-    low_client = high_client = verifier = None
-    if args.generation_mode != "specialist_only":
+    low_client = None
+    high_client = None
+    verifier = None
+
+    def ensure_verifier():
+        nonlocal low_client, high_client, verifier
+        if verifier is not None:
+            return verifier
         required_keys = required_api_keys(low_model_name, high_model_name)
         missing_keys = [key for key in required_keys if not os.getenv(key)]
         if missing_keys:
-            print(f"[!] ERROR: Missing API key(s): {', '.join(missing_keys)}")
-            print("[!] Please add them to .env and run the script again.")
-            return
-
-        try:
-            low_client = VisionLLMClient(low_model_name)
-            high_client = VisionLLMClient(high_model_name)
-        except Exception as e:
-            print(f"Error initializing API clients: {e}")
-            return
-            
+            raise RuntimeError(f"Missing API key(s): {', '.join(missing_keys)}")
+        low_client = VisionLLMClient(low_model_name)
+        high_client = VisionLLMClient(high_model_name)
         verifier = HierarchicalVerificationAgent(
             low_client,
             high_client,
@@ -165,6 +169,14 @@ def main():
             inference_count=args.inference_count,
             draft_temperature=args.draft_temperature,
         )
+        return verifier
+
+    if args.generation_strategy == "vlm_first":
+        try:
+            ensure_verifier()
+        except Exception as e:
+            print(f"Error initializing API clients: {e}")
+            return
     insighter = DatasetInsightAgent(args.insight_imbalance_ratio)
 
     images = sorted(f for f in os.listdir(args.img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg')))
@@ -176,17 +188,16 @@ def main():
         images = sorted(f for f in os.listdir(args.img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg')))
 
     print(f"\n🚀 Starting Agentic Auto-Labeling Experiment ({len(images)} images)")
-    print(f"   - Generation Mode: {args.generation_mode}")
-    print(f"   - Low-Level (Draft): {low_model_name or 'disabled'}")
-    print(f"   - High-Level (Verify): {high_model_name or 'disabled'}")
+    print(f"   - Low-Level (Draft): {low_model_name}")
+    print(f"   - High-Level (Verify): {high_model_name}")
     print(f"   - Draft Repeats: {args.inference_count} at temperature {args.draft_temperature}")
     print(f"   - Task Type: {args.task_type}")
-    if verifier:
-        print(f"   - Uncertainty Threshold: {verifier.threshold} (Escalate if Consistency < {verifier.threshold})")
-    else:
-        print("   - Uncertainty Threshold: disabled (specialist_only)")
+    print(f"   - Generation Strategy: {args.generation_strategy}")
+    print(f"   - Uncertainty Threshold: {args.threshold} (Escalate if Consistency < {args.threshold})")
     print(f"   - Label Formats: {', '.join(label_writer.formats)}")
     print(f"   - Specialist Plugins: {', '.join(plugin_orchestrator.names) or 'none'}")
+    if candidate_labels:
+        print(f"   - Candidate Classes: {len(candidate_labels)} labels")
     try:
         plugin_prepare_records = plugin_orchestrator.prepare(args.task_type)
     except Exception as e:
@@ -217,42 +228,73 @@ def main():
         high_attempts_before = high_client.api_attempts if high_client else 0
         try:
             # Core Agentic Workflow
-            if args.generation_mode == "specialist_only":
-                result = DetectionResult(task_type=args.task_type)
-                result.source_model = "specialist_only"
-                low_attempts_before = 0
-                high_attempts_before = 0
+            plugin_records = []
+            if args.generation_strategy == "specialist_first":
+                seed = DetectionResult(task_type=args.task_type)
+                result, plugin_records = plugin_orchestrator.process(
+                    img_path,
+                    args.prompt,
+                    args.task_type,
+                    seed,
+                )
+                if count_result_labels(result) > 0:
+                    status = "SpecialistFirst"
+                else:
+                    active_verifier = ensure_verifier()
+                    _drafts, result, _consistency = active_verifier.generate_draft_labels(
+                        img_path,
+                        args.prompt,
+                        task_type=args.task_type,
+                    )
+                    result, plugin_records = plugin_orchestrator.process(
+                        img_path,
+                        args.prompt,
+                        args.task_type,
+                        result,
+                    )
+                    needs_high, reason = active_verifier.needs_escalation(
+                        result,
+                        plugin_records=plugin_records,
+                    )
+                    if needs_high:
+                        print(f"\n[*] Escalating to High-Level Model: {reason}")
+                        result, _agreement = active_verifier.high_verify(
+                            img_path,
+                            args.prompt,
+                            args.task_type,
+                            result,
+                        )
+                        status = "Escalated"
+                    else:
+                        status = "Consistent"
             else:
-                _drafts, result, _consistency = verifier.generate_draft_labels(
+                active_verifier = ensure_verifier()
+                _drafts, result, _consistency = active_verifier.generate_draft_labels(
                     img_path,
                     args.prompt,
                     task_type=args.task_type,
                 )
-            plugin_records = []
-            result, plugin_records = plugin_orchestrator.process(
-                img_path,
-                args.prompt,
-                args.task_type,
-                result,
-            )
-            needs_high = False
-            reason = "specialist_only mode disables high VLM verification"
-            if args.generation_mode != "specialist_only":
-                needs_high, reason = verifier.needs_escalation(
-                    result,
-                    plugin_records=plugin_records,
-                )
-            if needs_high:
-                print(f"\n[*] Escalating to High-Level Model: {reason}")
-                result, _agreement = verifier.high_verify(
+                result, plugin_records = plugin_orchestrator.process(
                     img_path,
                     args.prompt,
                     args.task_type,
                     result,
                 )
-                status = "Escalated"
-            else:
-                status = "Consistent"
+                needs_high, reason = active_verifier.needs_escalation(
+                    result,
+                    plugin_records=plugin_records,
+                )
+                if needs_high:
+                    print(f"\n[*] Escalating to High-Level Model: {reason}")
+                    result, _agreement = active_verifier.high_verify(
+                        img_path,
+                        args.prompt,
+                        args.task_type,
+                        result,
+                    )
+                    status = "Escalated"
+                else:
+                    status = "Consistent"
             insighter.add_result(result)
             
             # Save Labels & Visualizations
@@ -290,8 +332,8 @@ def main():
                 "uncertainty_score": result.uncertainty_score,
                 "plugin_scores": json.dumps(result.plugin_scores, ensure_ascii=False),
                 "plugin_records": json.dumps(plugin_records, ensure_ascii=False),
-                "low_api_attempts": (low_client.api_attempts - low_attempts_before) if low_client else 0,
-                "high_api_attempts": (high_client.api_attempts - high_attempts_before) if high_client else 0,
+                "low_api_attempts": (low_client.api_attempts if low_client else 0) - low_attempts_before,
+                "high_api_attempts": (high_client.api_attempts if high_client else 0) - high_attempts_before,
                 "elapsed_sec": elapsed,
                 "label_path": label_paths.get("yolo") or next(iter(label_paths.values()), ""),
                 "label_paths": json.dumps(label_paths, ensure_ascii=False),
@@ -317,7 +359,7 @@ def main():
     # Calculate Paper Metrics
     total_manual_time = len(images) * manual_time_per_image
     time_saved_pct = ((total_manual_time - total_auto_time) / total_manual_time) * 100 if total_manual_time > 0 else 0
-    cost_reduction_pct = ((len(images) - escalation_count) / len(images)) * 100 if images and args.generation_mode != "specialist_only" else 0
+    cost_reduction_pct = ((len(images) - escalation_count) / len(images)) * 100 if images else 0
     evaluation = None
     if args.gt_dir and os.path.isdir(args.gt_dir):
         if "yolo" not in label_writer.formats:
@@ -338,7 +380,8 @@ def main():
         "time_saved_pct": time_saved_pct,
         "low_model": low_model_name,
         "high_model": high_model_name,
-        "generation_mode": args.generation_mode,
+        "generation_strategy": args.generation_strategy,
+        "candidate_labels": candidate_labels,
         "low_api_attempts": low_client.api_attempts if low_client else 0,
         "high_api_attempts": high_client.api_attempts if high_client else 0,
         "escalation_count": escalation_count,

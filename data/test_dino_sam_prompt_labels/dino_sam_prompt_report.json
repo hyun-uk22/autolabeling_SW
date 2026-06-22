@@ -1,0 +1,131 @@
+{
+  "candidate_labels": [
+    "person",
+    "giraffe",
+    "book",
+    "bicycle",
+    "car",
+    "umbrella",
+    "bird",
+    "dining table",
+    "cup",
+    "donut",
+    "baseball glove",
+    "airplane",
+    "kite",
+    "broccoli",
+    "bus",
+    "stop sign",
+    "bottle",
+    "wine glass",
+    "fork",
+    "pizza",
+    "bowl",
+    "handbag",
+    "train",
+    "traffic light",
+    "sheep",
+    "truck",
+    "parking meter",
+    "boat",
+    "refrigerator",
+    "oven",
+    "bed",
+    "chair",
+    "dog",
+    "remote",
+    "tv",
+    "mouse",
+    "keyboard",
+    "motorcycle",
+    "surfboard",
+    "knife",
+    "spoon",
+    "banana",
+    "sink",
+    "toilet",
+    "clock",
+    "fire hydrant",
+    "tennis racket",
+    "microwave",
+    "sandwich",
+    "orange",
+    "carrot",
+    "teddy bear",
+    "zebra",
+    "vase",
+    "hot dog",
+    "skis",
+    "elephant",
+    "skateboard",
+    "cow",
+    "cell phone",
+    "baseball bat",
+    "suitcase",
+    "tie",
+    "cake",
+    "frisbee",
+    "apple",
+    "bench",
+    "horse",
+    "potted plant",
+    "cat"
+  ],
+  "results": [
+    {
+      "image": "KakaoTalk_20260622_132019465.jpg",
+      "width": 457,
+      "height": 640,
+      "boxes": 5,
+      "segments": 5,
+      "labels": [
+        "wine glass",
+        "knife",
+        "cup",
+        "spoon",
+        "bowl"
+      ],
+      "scores": [
+        0.842,
+        0.7092,
+        0.6435,
+        0.5882,
+        0.4622
+      ],
+      "sam_status": "ok",
+      "visualization": "data\\test_dino_sam_prompt_visualized\\vis_KakaoTalk_20260622_132019465.jpg"
+    },
+    {
+      "image": "KakaoTalk_20260622_132019465_01.jpg",
+      "width": 500,
+      "height": 396,
+      "boxes": 1,
+      "segments": 1,
+      "labels": [
+        "apple"
+      ],
+      "scores": [
+        0.5964
+      ],
+      "sam_status": "ok",
+      "visualization": "data\\test_dino_sam_prompt_visualized\\vis_KakaoTalk_20260622_132019465_01.jpg"
+    },
+    {
+      "image": "KakaoTalk_20260622_132019465_02.jpg",
+      "width": 424,
+      "height": 640,
+      "boxes": 2,
+      "segments": 2,
+      "labels": [
+        "refrigerator",
+        "oven"
+      ],
+      "scores": [
+        0.7745,
+        0.4951
+      ],
+      "sam_status": "ok",
+      "visualization": "data\\test_dino_sam_prompt_visualized\\vis_KakaoTalk_20260622_132019465_02.jpg"
+    }
+  ]
+}

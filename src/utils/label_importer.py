@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import ast
+import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
@@ -120,6 +121,13 @@ def _parse_inline_yaml_names(value: str) -> List[str]:
                 index = len(entries)
             entries.append((index, _strip_yaml_value(label)))
         return [label for _, label in sorted(entries) if label]
+    inline_pairs = re.findall(r"(?:^|\s)(\d+)\s*:\s*(.*?)(?=\s+\d+\s*:|\s+path\s*:|$)", value)
+    if inline_pairs:
+        return [
+            _strip_yaml_value(label)
+            for _, label in sorted(((int(index), label) for index, label in inline_pairs))
+            if _strip_yaml_value(label)
+        ]
     return [_strip_yaml_value(value)]
 
 
@@ -163,6 +171,45 @@ def load_yolo_yaml_classes(yaml_path: Optional[str]) -> List[str]:
                     ordered_entries.append((class_id, label))
         if ordered_entries:
             return [label for _, label in sorted(ordered_entries)]
+        return list_entries
+    return []
+
+
+def extract_class_names_from_text(text: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    lines = str(text).splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("names:"):
+            continue
+        inline_value = stripped.split(":", 1)[1].strip()
+        if inline_value:
+            return _parse_inline_yaml_names(inline_value)
+
+        entries = []
+        list_entries = []
+        for child in lines[index + 1:]:
+            child_stripped = child.strip()
+            if not child_stripped:
+                continue
+            if child_stripped.startswith(("- ", "-")):
+                label = _strip_yaml_value(child_stripped[1:])
+                if label:
+                    list_entries.append(label)
+                continue
+            if ":" not in child_stripped:
+                break
+            key, label = child_stripped.split(":", 1)
+            try:
+                class_id = int(_strip_yaml_value(key))
+            except ValueError:
+                break
+            label = _strip_yaml_value(label)
+            if label:
+                entries.append((class_id, label))
+        if entries:
+            return [label for _, label in sorted(entries)]
         return list_entries
     return []
 

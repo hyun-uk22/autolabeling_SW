@@ -96,7 +96,8 @@ def visualize_boxes(image_path: str, result: DetectionResult, output_dir: str):
         draw.text((x1, y1), f"{track.track_id}:{track.label}", fill="magenta", font=font)
         
     # Draw Model Source info at top left
-    info_text = f"Model: {result.source_model} | Uncert: {result.uncertainty_score:.2f}"
+    uncertainty = f"{result.uncertainty_score:.2f}" if result.uncertainty_score is not None else "n/a"
+    info_text = f"Model: {result.source_model} | Uncert: {uncertainty}"
     draw.rectangle([0, 0, width, max(30, int(height*0.04))], fill="black")
     draw.text((10, 5), info_text, fill="white", font=font)
 

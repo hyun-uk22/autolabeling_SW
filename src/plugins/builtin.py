@@ -28,6 +28,56 @@ def _mean(values) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _value_at(values, index: int, default=None):
+    if values is None:
+        return default
+    if hasattr(values, "detach"):
+        values = values.detach().cpu()
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    try:
+        return values[index]
+    except (IndexError, TypeError):
+        return default
+
+
+def _mask_to_polygons(mask, width: int, height: int) -> List[List[Point]]:
+    if hasattr(mask, "detach"):
+        mask = mask.detach().cpu().numpy()
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        ys, xs = mask.nonzero()
+        if len(xs) == 0 or len(ys) == 0:
+            return []
+        x1, x2 = float(xs.min()) / width, float(xs.max()) / width
+        y1, y2 = float(ys.min()) / height, float(ys.max()) / height
+        return [[Point(x=x1, y=y1), Point(x=x2, y=y1), Point(x=x2, y=y2), Point(x=x1, y=y2)]]
+
+    mask_array = np.asarray(mask)
+    if mask_array.ndim > 2:
+        mask_array = np.squeeze(mask_array)
+    mask_array = (mask_array > 0).astype("uint8") * 255
+    contours, _ = cv2.findContours(mask_array, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    polygons: List[List[Point]] = []
+    for contour in contours:
+        if len(contour) < 3:
+            continue
+        epsilon = 0.002 * cv2.arcLength(contour, True)
+        approximated = cv2.approxPolyDP(contour, epsilon, True)
+        points = [
+            Point(
+                x=max(0.0, min(1.0, float(point[0][0]) / width)),
+                y=max(0.0, min(1.0, float(point[0][1]) / height)),
+            )
+            for point in approximated
+        ]
+        if len(points) >= 3:
+            polygons.append(points)
+    return polygons
+
+
 class TransformersClassificationPlugin(VisionTaskPlugin):
     plugin_name = "classification"
     supported_tasks = {"classification"}
@@ -102,13 +152,24 @@ class GroundingDINOPlugin(VisionTaskPlugin):
         inputs = {key: value.to(self.config.get("device", "cpu")) for key, value in inputs.items()}
         with self._torch.no_grad():
             outputs = self._model(**inputs)
-        processed = self._processor.post_process_grounded_object_detection(
-            outputs,
-            inputs["input_ids"],
-            box_threshold=float(self.config.get("box_threshold", 0.35)),
-            text_threshold=float(self.config.get("text_threshold", 0.25)),
-            target_sizes=[image.size[::-1]],
-        )[0]
+        box_threshold = float(self.config.get("box_threshold", 0.35))
+        text_threshold = float(self.config.get("text_threshold", 0.25))
+        try:
+            processed = self._processor.post_process_grounded_object_detection(
+                outputs,
+                inputs["input_ids"],
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=[image.size[::-1]],
+            )[0]
+        except TypeError:
+            processed = self._processor.post_process_grounded_object_detection(
+                outputs,
+                inputs["input_ids"],
+                threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=[image.size[::-1]],
+            )[0]
         width, height = image.size
         result = DetectionResult(task_type="object_detection")
         detected_labels = processed.get("text_labels")
@@ -135,26 +196,132 @@ class GroundingDINOPlugin(VisionTaskPlugin):
 
 class SAMPlugin(VisionTaskPlugin):
     plugin_name = "sam"
-    supported_tasks = {"segmentation"}
+    supported_tasks = {"object_detection", "segmentation"}
 
     def __init__(self, config=None):
         super().__init__(config)
         self._model = None
+        self._processor = None
+
+    @property
+    def backend(self) -> str:
+        return self.config.get("backend", "ultralytics_sam2")
 
     def _load(self):
-        if self._model is None:
+        if self._model is not None:
+            return
+        backend = self.backend
+        if backend == "official_sam3":
+            try:
+                from transformers import Sam3Model, Sam3Processor
+            except ImportError as exc:
+                raise RuntimeError("Install requirements-specialists.txt to use the SAM3 plugin") from exc
+            model_name = self.config.get("model", "facebook/sam3")
+            try:
+                self._processor = Sam3Processor.from_pretrained(model_name)
+                self._model = Sam3Model.from_pretrained(model_name)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Cannot load SAM3 model '{model_name}'. "
+                    "Request access to https://huggingface.co/facebook/sam3, run `hf auth login`, "
+                    "or set plugins.json sam.config.model to a local downloaded SAM3 directory."
+                ) from exc
+            self._model.to(self.config.get("device", "cpu"))
+            self._model.eval()
+            try:
+                import torch
+            except ImportError as exc:
+                raise RuntimeError("Install requirements-specialists.txt to use the SAM3 plugin") from exc
+            self._torch = torch
+            return
+        if backend == "ultralytics_sam2":
             try:
                 from ultralytics import SAM
             except ImportError as exc:
-                raise RuntimeError("Install requirements-specialists.txt to use the SAM plugin") from exc
+                raise RuntimeError("Install requirements-specialists.txt to use the SAM2 plugin") from exc
             self._model = SAM(self.config.get("model", "sam2_b.pt"))
+            return
+        raise ValueError(f"Unsupported SAM backend: {backend}")
 
-    def refine(self, image_path, prompt, seed_result):
+    def _segment_label(self, image, label: str, width: int, height: int) -> DetectionResult:
+        inputs = self._processor(images=image, text=label, return_tensors="pt")
+        target_sizes = inputs.get("original_sizes")
+        if hasattr(inputs, "to"):
+            inputs = inputs.to(self.config.get("device", "cpu"))
+        else:
+            inputs = {
+                key: value.to(self.config.get("device", "cpu")) if hasattr(value, "to") else value
+                for key, value in inputs.items()
+            }
+        if target_sizes is None:
+            target_sizes = [[height, width]]
+        elif hasattr(target_sizes, "tolist"):
+            target_sizes = target_sizes.tolist()
+        with self._torch.no_grad():
+            outputs = self._model(**inputs)
+        processed = self._processor.post_process_instance_segmentation(
+            outputs,
+            threshold=float(self.config.get("threshold", 0.5)),
+            mask_threshold=float(self.config.get("mask_threshold", 0.5)),
+            target_sizes=target_sizes,
+        )[0]
+
+        result = DetectionResult(task_type="segmentation")
+        masks = processed.get("masks", [])
+        boxes = processed.get("boxes", [])
+        scores = processed.get("scores", [])
+        max_instances = int(self.config.get("max_instances_per_label", 0))
+        for index, mask in enumerate(masks):
+            if max_instances and index >= max_instances:
+                break
+            box_values = _value_at(boxes, index)
+            score = float(_value_at(scores, index, 1.0))
+            if box_values is not None and len(box_values) == 4:
+                x1, y1, x2, y2 = [float(value) for value in box_values]
+                result.boxes.append(
+                    BoundingBox(
+                        label=label,
+                        xmin=max(0.0, min(1.0, x1 / width)),
+                        ymin=max(0.0, min(1.0, y1 / height)),
+                        xmax=max(0.0, min(1.0, x2 / width)),
+                        ymax=max(0.0, min(1.0, y2 / height)),
+                        confidence=score,
+                    )
+                )
+            for polygon in _mask_to_polygons(mask, width, height):
+                result.segments.append(PolygonSegment(label=label, polygon=polygon, confidence=score))
+        return result
+
+    def _refine_sam3(self, image_path, prompt, seed_result):
+        self._load()
+        labels = list(configured_labels(self.config, seed_result))
+        if not labels:
+            raise ValueError("SAM3 requires config.labels, classes_path, prompt names block, or seed labels")
+        labels = labels[: int(self.config.get("max_labels", 0)) or None]
+        image = Image.open(image_path).convert("RGB")
+        width, height = image.size
+        result = DetectionResult(task_type="segmentation")
+        for label in labels:
+            label_result = self._segment_label(image, label, width, height)
+            result.boxes.extend(label_result.boxes)
+            result.segments.extend(label_result.segments)
+        return PluginOutput(
+            result=result,
+            score=_mean(segment.confidence for segment in result.segments),
+            metadata={
+                "model": self.config.get("model", "facebook/sam3"),
+                "labels": labels,
+                "masks": len(result.segments),
+                "loader": "transformers",
+            },
+        )
+
+    def _refine_sam2(self, image_path, prompt, seed_result):
         self._load()
         width, height = Image.open(image_path).size
         boxes = seed_result.boxes
         if not boxes:
-            raise ValueError("SAM requires seed bounding boxes; run Grounding DINO before SAM")
+            raise ValueError("SAM2 requires seed bounding boxes; run Grounding DINO before SAM2")
         pixel_boxes = [[box.xmin * width, box.ymin * height, box.xmax * width, box.ymax * height] for box in boxes]
         predictions = self._model.predict(
             image_path,
@@ -178,8 +345,17 @@ class SAMPlugin(VisionTaskPlugin):
         return PluginOutput(
             result=result,
             score=_mean(segment.confidence for segment in result.segments),
-            metadata={"model": self.config.get("model", "sam2_b.pt"), "masks": len(result.segments)},
+            metadata={
+                "model": self.config.get("model", "sam2_b.pt"),
+                "masks": len(result.segments),
+                "backend": "ultralytics_sam2",
+            },
         )
+
+    def refine(self, image_path, prompt, seed_result):
+        if self.backend == "official_sam3":
+            return self._refine_sam3(image_path, prompt, seed_result)
+        return self._refine_sam2(image_path, prompt, seed_result)
 
 
 class UltralyticsPosePlugin(VisionTaskPlugin):

@@ -493,8 +493,6 @@ data/labeled/
 
 라벨 생성은 기본적으로 VLM cascade와 태스크별 전문 모델 plugin을 함께 사용합니다. `--plugin_config`를 지정하지 않아도 기본 plugin chain이 생성되며, `configs/plugins.json` 또는 `--plugin_config`는 모델 checkpoint, 장치, threshold, weight 같은 세부 설정을 덮어쓰는 용도로 사용합니다. 빈 `plugins.json`이 있어도 기본 chain은 비활성화되지 않습니다.
 
-성능 비교나 디버깅을 위해 VLM을 완전히 제외하고 specialist model만 실행하려면 `--generation_mode specialist_only`를 사용합니다. 이 모드는 low/high VLM API 호출과 high verification을 건너뜁니다. 기본 동작으로 되돌리려면 옵션을 제거하거나 `--generation_mode vlm_plugin`을 지정하면 됩니다. Streamlit과 데스크톱 앱에서는 생성 모드를 `비전 모델만` 또는 `VLM + 비전 모델`로 선택할 수 있습니다.
-
 전문 모델 의존성 설치:
 
 ```bash

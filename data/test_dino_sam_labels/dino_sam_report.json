@@ -1,0 +1,70 @@
+{
+  "summary": [
+    {
+      "image": "KakaoTalk_20260622_132019465.jpg",
+      "boxes": 2,
+      "segments": 2,
+      "sam_status": "ok",
+      "elapsed_sec": 4.977,
+      "label_paths": {
+        "coco": "data\\test_dino_sam_labels\\coco_annotations.json",
+        "vision_json": "data\\test_dino_sam_labels\\vision_annotations.jsonl"
+      },
+      "visualization_path": "data\\test_dino_sam_visualized\\vis_KakaoTalk_20260622_132019465.jpg",
+      "labels": [
+        "car cup",
+        "car cup"
+      ]
+    },
+    {
+      "image": "KakaoTalk_20260622_132019465_01.jpg",
+      "boxes": 0,
+      "segments": 0,
+      "sam_status": "skipped_no_boxes",
+      "elapsed_sec": 3.14,
+      "label_paths": {
+        "coco": "data\\test_dino_sam_labels\\coco_annotations.json",
+        "vision_json": "data\\test_dino_sam_labels\\vision_annotations.jsonl"
+      },
+      "visualization_path": "data\\test_dino_sam_visualized\\vis_KakaoTalk_20260622_132019465_01.jpg",
+      "labels": []
+    },
+    {
+      "image": "KakaoTalk_20260622_132019465_02.jpg",
+      "boxes": 0,
+      "segments": 0,
+      "sam_status": "skipped_no_boxes",
+      "elapsed_sec": 4.374,
+      "label_paths": {
+        "coco": "data\\test_dino_sam_labels\\coco_annotations.json",
+        "vision_json": "data\\test_dino_sam_labels\\vision_annotations.jsonl"
+      },
+      "visualization_path": "data\\test_dino_sam_visualized\\vis_KakaoTalk_20260622_132019465_02.jpg",
+      "labels": []
+    }
+  ],
+  "artifacts": {
+    "classes": "data\\test_dino_sam_labels\\classes.txt",
+    "coco": "data\\test_dino_sam_labels\\coco_annotations.json",
+    "vision_json": "data\\test_dino_sam_labels\\vision_annotations.jsonl"
+  },
+  "candidate_labels": [
+    "person",
+    "car",
+    "truck",
+    "bus",
+    "bicycle",
+    "motorcycle",
+    "dog",
+    "cat",
+    "animal",
+    "bag",
+    "box",
+    "bottle",
+    "cup",
+    "chair",
+    "table",
+    "phone",
+    "object"
+  ]
+}

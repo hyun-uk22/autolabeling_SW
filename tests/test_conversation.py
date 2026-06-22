@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from src.workflow.conversation import build_conversation_plan, describe_plan, discover_workspace
+from src.workflow import conversation_router as conversation_router_module
 from src.workflow.conversation_router import ChatNode, IntentRouter, handle_conversation
 from src.workflow.service import execute_workflow_plan
 
@@ -92,6 +93,36 @@ class ConversationWorkflowTests(unittest.TestCase):
             self.assertEqual(operation["action"], "convert")
             self.assertEqual(operation["formats"], ["coco"])
             self.assertEqual(operation["source_format"], "auto")
+
+    def test_llm_router_recovers_from_stale_conversation_plan_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            router = IntentRouter(caller=lambda request: {
+                "intent": "convert_labels",
+                "confidence": 0.93,
+                "parameters": {"target_formats": ["coco"], "source_format": "yolo"},
+                "missing_parameters": [],
+            })
+            current_builder = conversation_router_module.conversation_module.build_conversation_plan
+
+            def stale_builder(request, workspace):
+                return current_builder(request, workspace)
+
+            conversation_router_module.conversation_module.build_conversation_plan = stale_builder
+            try:
+                routed = handle_conversation(
+                    "보관된 annotation을 코코 규격에 맞게 재구성해줘",
+                    str(root),
+                    intent_router=router,
+                )
+            finally:
+                conversation_router_module.conversation_module.build_conversation_plan = current_builder
+
+            operation = routed["proposal"]["plan"]["operations"][0]
+            self.assertEqual(routed["route_source"], "llm")
+            self.assertEqual(operation["action"], "convert")
+            self.assertEqual(operation["formats"], ["coco"])
 
     def test_general_chat_is_handled_without_an_execution_plan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -313,6 +344,45 @@ class ConversationWorkflowTests(unittest.TestCase):
             unsupported = "변환된 라벨들이 원본 이미지랑 잘 맞는지 평가를 돌려볼래?"
             with self.assertRaisesRegex(ValueError, "공간 정합성 검증"):
                 build_conversation_plan(unsupported, root)
+
+    def test_names_block_detection_prompt_uses_path_as_image_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            test_images = root / "test_images"
+            test_images.mkdir()
+            Image.new("RGB", (100, 80), "white").save(test_images / "sample.jpg")
+            prompt = f"""names:
+  0: person
+  1: giraffe
+  2: dining table
+  3: cup
+path: {test_images}
+
+위 클래스 객체만 검출해줘"""
+
+            proposal = build_conversation_plan(prompt, root)
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["action"], "generate")
+            self.assertEqual(operation["task_type"], "object_detection")
+            self.assertEqual(Path(operation["img_dir"]), test_images)
+            self.assertEqual(operation["formats"], ["yolo"])
+            self.assertIn("names:", operation["prompt"])
+
+    def test_generate_prompt_can_use_explicit_image_path_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as workspace_dir, tempfile.TemporaryDirectory() as image_dir:
+            root = Path(workspace_dir)
+            images = Path(image_dir)
+            Image.new("RGB", (100, 80), "white").save(images / "sample.jpg")
+            prompt = f"names: 0: person 1: giraffe 2: dining table 3: cup path: {images}\n\n위 클래스 객체만 검출해줘"
+
+            proposal = build_conversation_plan(prompt, root)
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["action"], "generate")
+            self.assertEqual(Path(operation["img_dir"]), images)
+            self.assertEqual(operation["formats"], ["yolo"])
 
 
 if __name__ == "__main__":

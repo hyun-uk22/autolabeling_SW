@@ -6,7 +6,7 @@ import unittest
 from PIL import Image
 
 from src.utils.format_converter import LabelExportWriter
-from src.utils.label_importer import import_labels, import_labels_with_report
+from src.utils.label_importer import extract_class_names_from_text, import_labels, import_labels_with_report
 
 
 class MixedLabelImportTests(unittest.TestCase):
@@ -190,6 +190,29 @@ names:
         )
 
         self.assertEqual(records[0][1].boxes[0].label, "Lion")
+
+    def test_extract_class_names_from_prompt_yaml_names_block(self):
+        prompt = """Detect only these classes.
+names:
+  0: person
+  1: giraffe
+  2: dining table
+  3: cup
+path: d:\\datasets\\yolo
+"""
+
+        self.assertEqual(
+            extract_class_names_from_text(prompt),
+            ["person", "giraffe", "dining table", "cup"],
+        )
+
+    def test_extract_class_names_from_inline_prompt_yaml_names_block(self):
+        prompt = "names: 0: person 1: giraffe 2: dining table 3: cup path: D:\\dataset\\images"
+
+        self.assertEqual(
+            extract_class_names_from_text(prompt),
+            ["person", "giraffe", "dining table", "cup"],
+        )
 
     def test_mixed_input_preserves_yolo_class_ids_on_yolo_export(self):
         Image.new("RGB", (100, 100), "white").save(os.path.join(self.image_dir, "image_c.jpg"))

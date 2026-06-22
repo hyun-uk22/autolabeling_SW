@@ -27,9 +27,10 @@
     {
       "name": "sam",
       "enabled": true,
-      "tasks": ["segmentation"],
+      "tasks": ["object_detection", "segmentation"],
       "weight": 1.0,
       "config": {
+        "backend": "ultralytics_sam2",
         "model": "sam2_b.pt",
         "device": "cpu"
       }

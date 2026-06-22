@@ -236,7 +236,7 @@ def _action(request: str) -> str:
         return "evaluate"
     if _contains_any(lowered, ("변환", "바꿔", "바꾸", "변경", "통일", "convert", "format")):
         return "convert"
-    if _contains_any(lowered, ("생성", "라벨링", "라벨링해", "만들어", "generate", "label image")):
+    if _contains_any(lowered, ("생성", "라벨링", "라벨링해", "만들어", "검출", "탐지", "generate", "detect", "label image")):
         return "generate"
     raise ValueError("요청에서 작업 종류를 확인하지 못했습니다. 변환, 라벨 생성 또는 평가 작업을 명시해 주세요.")
 
@@ -271,22 +271,71 @@ def _discover_runs(root: Path) -> Dict[str, str]:
     return runs
 
 
-def _explicit_workspace_path(request: str, root: Path) -> Optional[Path]:
-    path_pattern = r"(?<![\w.])([\w.-]+(?:[\\/][\w.-]+)+)"
-    for raw in re.findall(path_pattern, request):
-        candidate = Path(raw.replace("\\", "/"))
+def _explicit_workspace_path(request: str, root: Path, allow_external: bool = False) -> Optional[Path]:
+    raw_paths = []
+    raw_paths.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(r"(?im)^\s*path\s*:\s*(.+?)\s*$", request)
+    )
+    raw_paths.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(r"(?<![\w.])([A-Za-z]:[\\/][^\r\n]+)", request)
+    )
+    raw_paths.extend(re.findall(r"(?<![\w.])([\w.-]+(?:[\\/][\w.-]+)+)", request))
+
+    for raw in raw_paths:
+        candidate = Path(raw)
         if candidate.is_absolute():
             resolved = candidate.resolve()
         else:
             resolved = (root / candidate).resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise ValueError("Workspace 밖의 경로는 대화형 자동 실행에서 사용할 수 없습니다.") from exc
+        if not allow_external:
+            try:
+                resolved.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("Workspace 밖의 경로는 대화형 자동 실행에서 사용할 수 없습니다.") from exc
         if not resolved.exists():
             raise ValueError(f"요청에 지정된 경로가 존재하지 않습니다: {_relative(resolved, root)}")
         return resolved
     return None
+
+
+def _image_directory_from_path(path: Path, root: Path) -> Dict[str, Any]:
+    directory = path if path.is_dir() else path.parent
+    if not directory.is_dir():
+        raise ValueError(f"지정한 이미지 경로가 디렉터리가 아닙니다: {_relative(directory, root)}")
+    image_files = [
+        item
+        for item in directory.iterdir()
+        if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
+    ]
+    if not image_files:
+        raise ValueError(f"지정한 경로에서 라벨링할 이미지를 찾지 못했습니다: {_relative(directory, root)}")
+    return {
+        "path": str(directory),
+        "relative_path": _relative(directory, root),
+        "file_count": len(image_files),
+    }
+
+
+def _select_image_directory(
+    images: List[Dict[str, Any]],
+    root: Path,
+    explicit_path: Optional[Path],
+) -> Dict[str, Any]:
+    selected = images
+    if explicit_path:
+        matching = [
+            image
+            for image in selected
+            if Path(image["path"]).resolve() == explicit_path
+            or Path(image["path"]).resolve() in explicit_path.parents
+            or explicit_path in Path(image["path"]).resolve().parents
+        ]
+        if not matching:
+            raise ValueError(f"지정한 경로에서 라벨링할 이미지를 찾지 못했습니다: {_relative(explicit_path, root)}")
+        selected = matching
+    return selected[0]
 
 
 def _numeric_option(request: str, name: str) -> Optional[float]:
@@ -374,9 +423,22 @@ def build_conversation_plan(
             f"{', '.join(formats)} 형식으로 변환"
         )
     elif action == "generate":
+        source_path = overrides.get("source_path")
+        explicit_path = (
+            _explicit_workspace_path(source_path, root, allow_external=True)
+            if source_path
+            else _explicit_workspace_path(request, root, allow_external=True)
+        )
         images = inventory["image_directories"]
-        if not images:
-            raise ValueError("Workspace에서 라벨링할 이미지를 찾지 못했습니다.")
+        if explicit_path:
+            selected_images = _image_directory_from_path(explicit_path, root)
+        else:
+            if not images:
+                raise ValueError(
+                    "Workspace에서 라벨링할 이미지를 찾지 못했습니다. "
+                    "이미지를 workspace의 data/raw에 넣거나 프롬프트에 `path: 이미지_폴더`를 지정하세요."
+                )
+            selected_images = _select_image_directory(images, root, explicit_path)
         task_type = overrides.get("task_type") or _task_type(request)
         formats = overrides.get("target_formats") or _target_formats(request) or (["yolo"] if task_type == "object_detection" else ["vision_json"])
         threshold = overrides.get("threshold")
@@ -386,7 +448,7 @@ def build_conversation_plan(
         operation = OperationPlan(
             action="generate",
             task_type=task_type,
-            img_dir=images[0]["path"],
+            img_dir=selected_images["path"],
             out_dir=str((root / "data" / "labeled").resolve()),
             vis_dir=str((root / "data" / "visualized").resolve()),
             formats=formats,
@@ -395,7 +457,7 @@ def build_conversation_plan(
             plugin_config=str(plugin_config) if plugin_config.is_file() else None,
             require_approval=True,
         )
-        summary = f"이미지 {images[0]['file_count']}개에 대해 {task_type} 라벨 생성"
+        summary = f"이미지 {selected_images['file_count']}개에 대해 {task_type} 라벨 생성"
     else:
         if _contains_any(request.lower(), ("원본 이미지랑 잘 맞", "이미지와 잘 맞", "image alignment")):
             raise ValueError(

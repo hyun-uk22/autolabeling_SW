@@ -163,6 +163,7 @@ class TaskPluginOrchestrator:
             result.uncertainty_score = 1.0 - ((result.consistency_score + result.mean_confidence) / 2)
             used = [record["plugin"] for record in records if record["status"] == "ok"]
             if used:
-                result.source_model = f"{result.source_model}+{'+'.join(used)}"
+                prefix = f"{result.source_model}+" if result.source_model else ""
+                result.source_model = f"{prefix}{'+'.join(used)}"
 
         return result, records

@@ -16,6 +16,9 @@ class PluginRegistryTests(unittest.TestCase):
         )
         self.assertTrue(plugins[1].supports("object_detection"))
         self.assertTrue(plugins[2].supports("segmentation"))
+        self.assertTrue(plugins[2].supports("object_detection"))
+        self.assertEqual(plugins[2].config["backend"], "ultralytics_sam2")
+        self.assertEqual(plugins[2].config["model"], "sam2_b.pt")
         self.assertTrue(plugins[3].supports("pose_estimation"))
         self.assertTrue(plugins[4].supports("ocr"))
         self.assertTrue(plugins[5].supports("tracking"))
@@ -57,13 +60,39 @@ class PluginRegistryTests(unittest.TestCase):
         self.assertEqual(grounding_dino.config["weight"], 2.0)
         self.assertTrue(grounding_dino.supports("segmentation"))
 
-    def test_specialist_only_mode_adds_default_grounding_labels(self):
-        plugins = load_generation_plugins(generation_mode="specialist_only")
+    def test_candidate_labels_are_injected_into_grounding_dino(self):
+        plugins = load_generation_plugins(candidate_labels=["person", "giraffe", "cup"])
         names = [plugin.plugin_name for plugin in plugins]
         grounding_dino = plugins[names.index("grounding_dino")]
+        sam = plugins[names.index("sam")]
 
-        self.assertIn("person", grounding_dino.config["labels"])
-        self.assertIn("object", grounding_dino.config["labels"])
+        self.assertEqual(grounding_dino.config["labels"], ["person", "giraffe", "cup"])
+        self.assertEqual(sam.config["labels"], ["person", "giraffe", "cup"])
+
+    def test_sam_can_be_configured_for_official_sam3_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "plugins.json"
+            config.write_text(
+                json.dumps({
+                    "plugins": [{
+                        "name": "sam",
+                        "config": {
+                            "backend": "official_sam3",
+                            "model": "facebook/sam3",
+                            "threshold": 0.5,
+                            "mask_threshold": 0.5,
+                        },
+                    }]
+                }),
+                encoding="utf-8",
+            )
+
+            plugins = load_generation_plugins(str(config))
+
+        names = [plugin.plugin_name for plugin in plugins]
+        sam = plugins[names.index("sam")]
+        self.assertEqual(sam.config["backend"], "official_sam3")
+        self.assertEqual(sam.config["model"], "facebook/sam3")
 
 
 if __name__ == "__main__":

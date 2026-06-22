@@ -19,10 +19,10 @@
 현재 자동 라벨 생성 기능은 다음 목표를 가진다.
 
 1. 자연어 prompt를 사용해 라벨링 대상과 태스크를 지정한다.
-2. 저비용 VLM의 반복 추론으로 초안 라벨을 생성한다.
-3. 반복 결과의 self-consistency를 측정한다.
-4. consistency가 낮은 이미지만 고성능 VLM으로 에스컬레이션한다.
-5. 태스크별 전문 모델 plugin으로 VLM 결과를 보강한다.
+2. 태스크별 전문 모델 plugin을 먼저 실행해 VLM 결과가 섞이지 않은 라벨을 생성한다.
+3. 전문 모델 결과가 비어 있거나 불충분한 경우에만 저비용 VLM의 반복 추론으로 초안 라벨을 생성한다.
+4. 반복 결과의 self-consistency를 측정한다.
+5. consistency가 낮은 이미지만 고성능 VLM으로 에스컬레이션한다.
 6. 결과를 내부 공통 표현으로 정규화한다.
 7. YOLO, Pascal VOC, COCO, Vision JSONL, custom 포맷으로 저장한다.
 8. 처리 시간, API 호출, uncertainty, GT 평가 결과를 기록한다.
@@ -80,7 +80,7 @@ low/high 모델명 해석 및 cascade 검증
 출력 포맷 설정 + 기본 specialist plugin chain 로드
       |
       v
-API key 확인 및 VLM client 초기화
+specialist plugin prepare
       |
       v
 입력 이미지 목록 정렬
@@ -88,14 +88,16 @@ API key 확인 및 VLM client 초기화
       +------------------------------------------+
       | 이미지별 반복                            |
       |                                          |
-      |  Low VLM N회 추론                        |
+      |  specialist model 우선 추론              |
       |          |                               |
-      |          v                               |
-      |  태스크별 consistency 계산               |
+      |          +-- 결과 있음 --> 저장 후보     |
       |          |                               |
-      |          +-- threshold 이상 --> 첫 결과  |
-      |          |                               |
-      |          +-- threshold 미만 --> High VLM |
+      |          +-- 결과 없음 --> Low VLM fallback |
+      |                              |           |
+      |                              v           |
+      |                    consistency 계산      |
+      |                              |           |
+      |                              +-- 필요 시 High VLM |
       |                                          |
       |  required specialist plugin chain        |
       |          |                               |
@@ -170,8 +172,9 @@ python main.py
 | `--vis_dir` | `data/visualized` | 시각화 출력 디렉터리 |
 | `--prompt` | 객체 탐지 기본 prompt | VLM에 전달할 사용자 지시문 |
 | `--task_type` | `object_detection` | 라벨링 태스크 |
+| `--generation_strategy` | `specialist_first` | `specialist_first` 또는 기존 `vlm_first` |
+| `--classes_path` | 없음 | Grounding DINO와 SAM3 옵션 후보 클래스에 사용할 `classes.txt` 또는 YOLO `data.yaml` |
 | `--threshold` | `0.75` | low 결과 consistency 에스컬레이션 기준 |
-| `--generation_mode` | `vlm_plugin` | `vlm_plugin`은 VLM+전문 모델, `specialist_only`는 VLM 없이 전문 모델만 실행 |
 | `--low_model` | 환경 변수 또는 `gpt-4o-mini` | 초안 생성 VLM |
 | `--high_model` | 환경 변수 또는 `gpt-4o` | 불확실 샘플 검증 VLM |
 | `--inference_count` | `3` | low VLM 반복 추론 횟수 |
@@ -262,8 +265,6 @@ custom을 선택했는데 템플릿이 없으면 실행 전에 중단한다.
 5. orchestrator 생성
 
 전문 모델 weight는 태스크 시작 시점의 plugin prepare 단계에서 로드 또는 다운로드를 먼저 시도한다. 각 plugin은 이미 준비된 모델을 `refine()`에서 재사용한다.
-
-`generation_mode=specialist_only`에서는 low/high VLM 호출과 high verification을 건너뛰고 빈 seed 결과를 specialist plugin에 전달한다. Grounding DINO처럼 후보 class label이 필요한 모델은 `plugins.json`의 `labels`를 우선 사용하며, 설정이 없으면 성능 테스트용 기본 후보 label을 사용한다. 기존 동작으로 되돌리려면 `generation_mode`를 `vlm_plugin`으로 바꾸면 된다.
 
 ### 8.6 API key 검사
 
@@ -649,12 +650,12 @@ orchestrator는 설정 순서대로 plugin을 순회하고 현재 `task_type`을
 | --- | --- | --- |
 | `classification` | `openai/clip-vit-base-patch32` | zero-shot classification |
 | `grounding_dino` | `IDEA-Research/grounding-dino-tiny` | text-conditioned bbox |
-| `sam` | `sam2_b.pt` | seed bbox 기반 polygon mask |
+| `sam` | `sam2_b.pt` (`ultralytics_sam2`) | seed bbox 기반 polygon mask 생성 |
 | `pose` | `yolo11n-pose.pt` | pose keypoint |
 | `ocr` | EasyOCR | text detection/recognition |
 | `tracking` | `yolo11n.pt` + ByteTrack | frame sequence tracking |
 
-모델 파일은 repository에 포함되지 않으며 태스크 시작 시 plugin prepare 단계에서 library가 다운로드할 수 있다.
+모델 파일은 repository에 포함되지 않으며 태스크 시작 시 plugin prepare 단계에서 library가 다운로드할 수 있다. 기본 배포 설정은 별도 Hugging Face 승인이 필요 없는 `ultralytics_sam2` backend와 `sam2_b.pt`를 사용한다.
 
 ### 18.3 Plugin 입력
 
@@ -668,7 +669,30 @@ user prompt
 
 Grounding DINO는 설정의 `labels`와 VLM 결과의 classification/box/segment/pose label을 후보 text prompt로 사용한다.
 
-SAM은 seed bbox가 필요하다. 따라서 segmentation chain에서 Grounding DINO가 SAM보다 먼저 있어야 한다.
+기본 SAM2 backend는 seed bbox가 필요하다. 따라서 segmentation chain에서 Grounding DINO가 SAM보다 먼저 있어야 한다.
+
+고급 옵션으로 `official_sam3` backend를 사용할 수 있다. 이 경우 SAM3는 설정의 `labels`, `--classes_path`, 프롬프트의 YOLO `names:` 블록, 또는 seed result의 label을 text prompt로 사용해 직접 bbox와 segment를 생성한다. `facebook/sam3`는 Hugging Face gated model이므로 `https://huggingface.co/facebook/sam3` 접근 승인과 `hf auth login`이 필요하다.
+
+SAM3 설정 예시:
+
+```json
+{
+  "plugins": [
+    {
+      "name": "sam",
+      "enabled": true,
+      "tasks": ["object_detection", "segmentation"],
+      "config": {
+        "backend": "official_sam3",
+        "model": "facebook/sam3",
+        "device": "cpu",
+        "threshold": 0.5,
+        "mask_threshold": 0.5
+      }
+    }
+  ]
+}
+```
 
 ### 18.4 Plugin 출력
 
@@ -728,11 +752,13 @@ bedrock:...+grounding_dino+sam
 
 high VLM 에스컬레이션 결정은 low VLM 초안과 specialist plugin 실행 이후에 수행된다. 따라서 low VLM consistency, plugin agreement, validation issue를 함께 사용해 고성능 VLM 호출 여부를 결정할 수 있다.
 
-현재 순서:
+기본 순서:
 
 ```text
-Low VLM 반복 -> Specialist Plugins -> High 여부 결정
+Specialist Plugins -> 결과가 비어 있을 때 Low VLM 반복 -> High 여부 결정
 ```
+
+`generation_strategy=vlm_first`를 지정하면 기존 순서인 `Low VLM 반복 -> Specialist Plugins -> High 여부 결정`으로 실행할 수 있다.
 
 ## 19. Dataset Insight Agent
 
@@ -973,12 +999,13 @@ python main.py `
   --plugin_config configs/plugins.example.json
 ```
 
-### 28.3 DINO + SAM Segmentation
+### 28.3 DINO + SAM2 Segmentation
 
 ```powershell
 python main.py `
   --task_type segmentation `
   --label_formats coco,vision_json `
+  --classes_path data.yaml `
   --plugin_config configs/plugins.example.json
 ```
 

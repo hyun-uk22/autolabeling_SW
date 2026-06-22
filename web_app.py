@@ -515,14 +515,10 @@ with generate_tab:
             generation_output = st.text_input("라벨 출력", value=WORKSPACE_DEFAULTS["labels"])
             visualization_output = st.text_input("시각화 출력", value=WORKSPACE_DEFAULTS["visualized"])
             plugin_config = st.text_input("Plugin 설정 파일", value=WORKSPACE_DEFAULTS["plugin_config"])
+            generation_classes = st.text_input("클래스 매핑 파일", value="", placeholder="data.yaml 또는 classes.txt")
         with right:
             st.markdown('<div class="form-section">생성 규칙</div>', unsafe_allow_html=True)
             task_type = st.selectbox("태스크", TASK_OPTIONS)
-            generation_mode_label = st.selectbox(
-                "생성 모드",
-                ["VLM + 비전 모델", "비전 모델만"],
-                help="성능 테스트가 필요하면 비전 모델만을 선택해 VLM API 호출을 건너뜁니다.",
-            )
             generation_formats = st.multiselect("출력 포맷", FORMAT_OPTIONS, default=["yolo"], key="generation_formats")
             threshold = st.slider("신뢰도 기준", 0.0, 1.0, 0.75, 0.01)
             generation_insight_ratio = st.slider(
@@ -554,7 +550,6 @@ with generate_tab:
                 "operations": [{
                     "action": "generate",
                     "task_type": task_type,
-                    "generation_mode": "specialist_only" if generation_mode_label == "비전 모델만" else "vlm_plugin",
                     "img_dir": resolve_workspace_path(workspace, generation_images),
                     "out_dir": resolve_workspace_path(workspace, generation_output),
                     "vis_dir": resolve_workspace_path(workspace, visualization_output),
@@ -563,6 +558,8 @@ with generate_tab:
                     "insight_imbalance_ratio": generation_insight_ratio,
                     "inference_count": int(inference_count),
                     "prompt": prompt,
+                    "generation_strategy": "specialist_first",
+                    "classes_path": resolve_workspace_path(workspace, generation_classes) if generation_classes else None,
                     "plugin_config": resolve_workspace_path(workspace, plugin_config) if plugin_config else None,
                     "require_approval": True,
                 }],

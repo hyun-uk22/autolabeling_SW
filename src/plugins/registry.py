@@ -36,9 +36,10 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
     {
         "name": "sam",
         "enabled": True,
-        "tasks": ["segmentation"],
+        "tasks": ["object_detection", "segmentation"],
         "weight": 1.0,
         "config": {
+            "backend": "ultralytics_sam2",
             "model": "sam2_b.pt",
             "device": "cpu",
         },
@@ -123,24 +124,7 @@ class PluginRegistry:
         return self._plugins.keys()
 
 
-SPECIALIST_ONLY_DEFAULT_LABELS = [
-    "person",
-    "car",
-    "truck",
-    "bus",
-    "bicycle",
-    "motorcycle",
-    "dog",
-    "cat",
-    "animal",
-    "object",
-]
-
-
-def _merge_generation_plugin_specs(
-    config_path: Optional[str],
-    generation_mode: str = "vlm_plugin",
-) -> List[Dict[str, Any]]:
+def _merge_generation_plugin_specs(config_path: Optional[str]) -> List[Dict[str, Any]]:
     specs_by_name = {
         item["name"]: dict(item)
         for item in DEFAULT_GENERATION_PLUGIN_CONFIGS
@@ -168,23 +152,23 @@ def _merge_generation_plugin_specs(
                 specs_by_name[name] = dict(item)
             if name not in order:
                 order.append(name)
-    specs = [specs_by_name[name] for name in order]
-    if generation_mode == "specialist_only":
-        for item in specs:
-            if item.get("name") != "grounding_dino":
-                continue
-            config = dict(item.get("config") or {})
-            config.setdefault("labels", SPECIALIST_ONLY_DEFAULT_LABELS)
-            item["config"] = config
-    return specs
+    return [specs_by_name[name] for name in order]
 
 
 def load_generation_plugins(
     config_path: Optional[str] = None,
-    generation_mode: str = "vlm_plugin",
+    candidate_labels: Optional[Iterable[str]] = None,
 ) -> List[VisionTaskPlugin]:
     registry = create_default_registry()
-    return registry.create_from_specs(_merge_generation_plugin_specs(config_path, generation_mode))
+    specs = _merge_generation_plugin_specs(config_path)
+    labels = [str(label).strip() for label in (candidate_labels or []) if str(label).strip()]
+    if labels:
+        for spec in specs:
+            if spec.get("name") in {"grounding_dino", "sam"}:
+                config = dict(spec.get("config") or {})
+                config["labels"] = list(dict.fromkeys(labels))
+                spec["config"] = config
+    return registry.create_from_specs(specs)
 
 
 def create_default_registry() -> PluginRegistry:

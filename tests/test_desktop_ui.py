@@ -47,10 +47,15 @@ class DesktopUiTests(unittest.TestCase):
         generation.image_dir.setText("D:/dataset/images")
         generation.output_dir.setText("D:/dataset/labels")
         generation.visual_dir.setText("D:/dataset/visualized")
+        generation.classes_path.setText("D:/dataset/data.yaml")
         generation_plan, expensive = generation.build_plan()
         self.assertTrue(expensive)
         self.assertEqual(generation_plan["operations"][0]["action"], "generate")
-        self.assertEqual(generation_plan["operations"][0]["generation_mode"], "vlm_plugin")
+        self.assertEqual(generation_plan["operations"][0]["generation_strategy"], "specialist_first")
+        self.assertEqual(
+            generation_plan["operations"][0]["classes_path"],
+            str(Path("D:/dataset/data.yaml").resolve()),
+        )
         self.assertEqual(
             generation_plan["operations"][0]["plugin_config"],
             str((Path(self.workspace) / "configs" / "plugins.json").resolve()),

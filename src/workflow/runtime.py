@@ -22,7 +22,12 @@ from ..reporting import (
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
 from ..utils.format_converter import LabelExportWriter
 from ..utils.geometry import consistency_metric_name
-from ..utils.label_importer import find_image_path, import_labels_with_report
+from ..utils.label_importer import (
+    extract_class_names_from_text,
+    find_image_path,
+    import_labels_with_report,
+    load_classes,
+)
 from ..utils.label_validator import summarize_validation, validate_result
 from ..utils.result_metrics import count_result_labels
 from ..utils.visualize import visualize_boxes
@@ -38,6 +43,8 @@ class WorkflowRuntime:
         self.planner = WorkflowPlanner(planner_model)
         self.allow_same_model = allow_same_model
         self._generation_key = None
+        self._plugin_key = None
+        self._vlm_key = None
         self.low_client = None
         self.high_client = None
         self.verification_agent = None
@@ -60,23 +67,13 @@ class WorkflowRuntime:
             name for name in os.listdir(operation.img_dir)
             if name.lower().endswith((".png", ".jpg", ".jpeg"))
         )
-        if operation.generation_mode == "specialist_only":
-            self._ensure_generation_clients(operation, None, None)
-            return {
-                "images": images,
-                "low_model": None,
-                "high_model": None,
-                "warnings": ["specialist_only mode: VLM draft and high verification are disabled"],
-                "plugin_prepare_records": self.plugin_prepare_records,
-            }
         low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
-        valid, messages = validate_cascade_setup(low_model, high_model, self.allow_same_model)
-        if not valid:
-            raise ValueError("; ".join(messages))
-        missing_keys = [key for key in required_api_keys(low_model, high_model) if not os.getenv(key)]
-        if missing_keys:
-            raise ValueError(f"Missing API key(s): {', '.join(missing_keys)}")
-        self._ensure_generation_clients(operation, low_model, high_model)
+        messages = []
+        self._ensure_plugins(operation)
+        if operation.generation_strategy == "vlm_first":
+            messages = self._ensure_vlm_clients(operation, low_model, high_model)
+        else:
+            messages.append("specialist_first: specialist model results are generated before VLM fallback")
         return {
             "images": images,
             "low_model": low_model,
@@ -85,9 +82,29 @@ class WorkflowRuntime:
             "plugin_prepare_records": self.plugin_prepare_records,
         }
 
-    def _ensure_generation_clients(self, operation: OperationPlan, low_model: Optional[str], high_model: Optional[str]) -> None:
+    def _candidate_labels_for_generation(self, operation: OperationPlan) -> List[str]:
+        labels = load_classes(operation.classes_path)
+        if not labels:
+            labels = extract_class_names_from_text(operation.prompt)
+        return list(dict.fromkeys(label for label in labels if label))
+
+    def _ensure_plugins(self, operation: OperationPlan) -> None:
+        candidate_labels = self._candidate_labels_for_generation(operation)
         key = (
-            operation.generation_mode,
+            operation.task_type,
+            operation.plugin_config,
+            operation.plugin_fail_fast,
+            tuple(candidate_labels),
+        )
+        if key == self._plugin_key:
+            return
+        plugins = load_generation_plugins(operation.plugin_config, candidate_labels=candidate_labels)
+        self.plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=operation.plugin_fail_fast)
+        self.plugin_prepare_records = self.plugin_orchestrator.prepare(operation.task_type)
+        self._plugin_key = key
+
+    def _ensure_vlm_clients(self, operation: OperationPlan, low_model: str, high_model: str) -> List[str]:
+        key = (
             low_model,
             high_model,
             operation.task_type,
@@ -96,65 +113,33 @@ class WorkflowRuntime:
             operation.plugin_config,
             operation.plugin_fail_fast,
         )
-        if key == self._generation_key:
-            return
-        if operation.generation_mode == "specialist_only":
-            self.low_client = None
-            self.high_client = None
-            self.verification_agent = None
-        else:
-            self.low_client = VisionLLMClient(low_model)
-            self.high_client = VisionLLMClient(high_model)
-            self.verification_agent = HierarchicalVerificationAgent(
-                self.low_client,
-                self.high_client,
-                threshold=operation.threshold,
-                inference_count=operation.inference_count,
-                draft_temperature=operation.draft_temperature,
-            )
-        plugins = load_generation_plugins(operation.plugin_config, operation.generation_mode)
-        self.plugin_orchestrator = TaskPluginOrchestrator(plugins, fail_fast=operation.plugin_fail_fast)
-        self.plugin_prepare_records = self.plugin_orchestrator.prepare(operation.task_type)
-        self._generation_key = key
+        if key == self._vlm_key:
+            return []
+        valid, messages = validate_cascade_setup(low_model, high_model, self.allow_same_model)
+        if not valid:
+            raise ValueError("; ".join(messages))
+        missing_keys = [key for key in required_api_keys(low_model, high_model) if not os.getenv(key)]
+        if missing_keys:
+            raise ValueError(f"Missing API key(s): {', '.join(missing_keys)}")
+        self.low_client = VisionLLMClient(low_model)
+        self.high_client = VisionLLMClient(high_model)
+        self.verification_agent = HierarchicalVerificationAgent(
+            self.low_client,
+            self.high_client,
+            threshold=operation.threshold,
+            inference_count=operation.inference_count,
+            draft_temperature=operation.draft_temperature,
+        )
+        self._vlm_key = key
+        return messages
 
     def _ensure_generation_for_operation(self, operation: OperationPlan) -> None:
-        if operation.generation_mode == "specialist_only":
-            if self._generation_key != (
-                operation.generation_mode,
-                None,
-                None,
-                operation.task_type,
-                operation.inference_count,
-                operation.draft_temperature,
-                operation.plugin_config,
-                operation.plugin_fail_fast,
-            ):
-                self._ensure_generation_clients(operation, None, None)
-            return
         low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
-        if self._generation_key != (
-            operation.generation_mode,
-            low_model,
-            high_model,
-            operation.task_type,
-            operation.inference_count,
-            operation.draft_temperature,
-            operation.plugin_config,
-            operation.plugin_fail_fast,
-        ):
-            self._ensure_generation_clients(operation, low_model, high_model)
+        self._ensure_plugins(operation)
+        self._ensure_vlm_clients(operation, low_model, high_model)
 
     def generate_drafts(self, image_path: str, operation: OperationPlan) -> Dict[str, Any]:
         self._ensure_generation_for_operation(operation)
-        if operation.generation_mode == "specialist_only":
-            seed = DetectionResult(task_type=operation.task_type)
-            return {
-                "drafts": [],
-                "result": seed.model_dump(),
-                "consistency": 0.0,
-                "low_attempts": 0,
-                "elapsed_sec": 0.0,
-            }
         started = time.perf_counter()
         before = self.low_client.api_attempts
         drafts, seed, consistency = self.verification_agent.generate_draft_labels(
@@ -171,7 +156,7 @@ class WorkflowRuntime:
         }
 
     def run_specialists(self, image_path: str, operation: OperationPlan, result: DetectionResult) -> Dict[str, Any]:
-        self._ensure_generation_for_operation(operation)
+        self._ensure_plugins(operation)
         if not self.plugin_orchestrator:
             return {"result": result, "records": [], "elapsed_sec": 0.0}
         started = time.perf_counter()
@@ -191,8 +176,6 @@ class WorkflowRuntime:
         issues: List[str],
     ) -> Tuple[bool, str]:
         self._ensure_generation_for_operation(operation)
-        if operation.generation_mode == "specialist_only":
-            return False, "specialist_only mode disables high VLM verification"
         return self.verification_agent.needs_escalation(
             result,
             threshold=operation.threshold,
@@ -207,13 +190,6 @@ class WorkflowRuntime:
         specialist_result: DetectionResult,
     ) -> Dict[str, Any]:
         self._ensure_generation_for_operation(operation)
-        if operation.generation_mode == "specialist_only":
-            return {
-                "result": specialist_result,
-                "agreement": 0.0,
-                "high_attempts": 0,
-                "elapsed_sec": 0.0,
-            }
         started = time.perf_counter()
         before = self.high_client.api_attempts
         merged, agreement = self.verification_agent.high_verify(

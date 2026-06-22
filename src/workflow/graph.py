@@ -7,6 +7,7 @@ from langgraph.types import interrupt
 
 from ..core.models import DetectionResult
 from ..utils.label_validator import validate_result
+from ..utils.result_metrics import count_result_labels
 from .models import OperationPlan, WorkflowState
 from .runtime import WorkflowRuntime
 from .schema_repair import repair_result
@@ -164,12 +165,21 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
 
     def run_specialists(state: WorkflowState) -> Dict[str, Any]:
         operation = _operation(state)
-        result = DetectionResult.model_validate(state["current_result"])
+        raw_result = state.get("current_result") or {}
+        result = DetectionResult.model_validate(raw_result) if raw_result else DetectionResult(task_type=operation.task_type)
         image_path = f"{operation.img_dir}/{state['current_image']}"
         output = runtime.run_specialists(image_path, operation, result)
+        current_status = state.get("current_status", "SpecialistFirst")
+        if (
+            operation.generation_strategy == "specialist_first"
+            and state.get("current_low_attempts", 0) == 0
+            and count_result_labels(output["result"]) > 0
+        ):
+            current_status = "SpecialistFirst"
         return {
             "current_result": output["result"].model_dump(),
             "current_plugin_records": output["records"],
+            "current_status": current_status,
             "current_elapsed_sec": state.get("current_elapsed_sec", 0.0) + output["elapsed_sec"],
             "history": _event(state, "specialists_completed", records=output["records"]),
         }
@@ -429,7 +439,19 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
         return "advance" if state.get("operation_status") == "failed" else "select"
 
     def route_image(state):
-        return "finalize" if state.get("image_index", 0) >= len(state.get("images", [])) else "draft"
+        if state.get("image_index", 0) >= len(state.get("images", [])):
+            return "finalize"
+        return "specialists" if _operation(state).generation_strategy == "specialist_first" else "draft"
+
+    def route_specialists(state):
+        operation = _operation(state)
+        result = DetectionResult.model_validate(state.get("current_result") or {})
+        if (
+            operation.generation_strategy == "specialist_first"
+            and state.get("current_low_attempts", 0) == 0
+        ):
+            return "validate" if count_result_labels(result) > 0 else "draft"
+        return "decide"
 
     def route_high(state):
         return "approval" if state.get("high_required") else "validate"
@@ -486,9 +508,17 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
         "evaluate": "execute_evaluate",
     })
     builder.add_conditional_edges("prepare_generate", route_generate_ready, {"advance": "advance_operation", "select": "select_image"})
-    builder.add_conditional_edges("select_image", route_image, {"draft": "generate_draft", "finalize": "finalize_generate"})
+    builder.add_conditional_edges(
+        "select_image",
+        route_image,
+        {"draft": "generate_draft", "specialists": "run_specialists", "finalize": "finalize_generate"},
+    )
     builder.add_edge("generate_draft", "run_specialists")
-    builder.add_edge("run_specialists", "decide_high")
+    builder.add_conditional_edges(
+        "run_specialists",
+        route_specialists,
+        {"draft": "generate_draft", "decide": "decide_high", "validate": "validate_generated"},
+    )
     builder.add_conditional_edges("decide_high", route_high, {"approval": "approval_gate", "validate": "validate_generated"})
     builder.add_conditional_edges("approval_gate", route_approval, {"high": "high_verify", "validate": "validate_generated"})
     builder.add_edge("high_verify", "validate_generated")

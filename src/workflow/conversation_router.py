@@ -1,12 +1,14 @@
 import json
 import os
+import inspect
+from importlib import reload
 from typing import Any, Callable, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 from ..core.llm_client import extract_json
 from ..core.model_config import is_bedrock_model
-from .conversation import build_conversation_plan
+from . import conversation as conversation_module
 
 
 ROUTER_SYSTEM_PROMPT = """
@@ -198,6 +200,18 @@ class ChatNode:
         return _call_model(self.model_name, CHAT_SYSTEM_PROMPT, request, False).strip()
 
 
+def _build_conversation_plan_with_overrides(
+    request: str,
+    workspace: str,
+    overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    builder = conversation_module.build_conversation_plan
+    if "intent_overrides" not in inspect.signature(builder).parameters:
+        # Streamlit can keep an older imported conversation module alive across reruns.
+        builder = reload(conversation_module).build_conversation_plan
+    return builder(request, workspace, intent_overrides=overrides)
+
+
 def handle_conversation(
     request: str,
     workspace: str,
@@ -206,7 +220,7 @@ def handle_conversation(
     minimum_confidence: float = 0.65,
 ) -> Dict[str, Any]:
     try:
-        proposal = build_conversation_plan(request, workspace)
+        proposal = conversation_module.build_conversation_plan(request, workspace)
         return {"kind": "plan", "proposal": proposal, "route_source": "rules"}
     except ValueError as rule_error:
         message = str(rule_error)
@@ -241,7 +255,7 @@ def handle_conversation(
 
         overrides = route.parameters.model_dump(exclude_none=True)
         overrides["action"] = ACTION_INTENTS[route.intent]
-        proposal = build_conversation_plan(request, workspace, intent_overrides=overrides)
+        proposal = _build_conversation_plan_with_overrides(request, workspace, overrides)
         proposal["warnings"].append("규칙 기반 해석이 불충분하여 LLM Intent Router로 의도를 보완했습니다.")
         return {
             "kind": "plan",
