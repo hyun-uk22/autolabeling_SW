@@ -429,6 +429,51 @@ path: {test_images}
             self.assertEqual(Path(operation["img_dir"]), images)
             self.assertEqual(operation["formats"], ["yolo"])
 
+    def test_generate_prompt_starts_with_first_pass_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            Image.new("RGB", (100, 80), "white").save(root / "data" / "raw" / "sample.jpg")
+
+            proposal = build_conversation_plan(
+                "현재 이미지들을 YOLO로 객체 탐지 라벨 생성해줘. 1차 추론 이후 specialist 재추론 1회 진행하고 low advisor를 사용해줘.",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+            description = describe_plan(proposal, root)
+
+            self.assertEqual(operation["action"], "generate")
+            self.assertEqual(operation["specialist_consistency_runs"], 0)
+            self.assertEqual(operation["specialist_advisor_mode"], "none")
+            self.assertIn("Specialist 재추론", description)
+            self.assertIn("재추론 Advisor", description)
+
+    def test_llm_router_generate_plan_starts_with_first_pass_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            Image.new("RGB", (100, 80), "white").save(root / "data" / "raw" / "sample.jpg")
+            router = IntentRouter(caller=lambda request: {
+                "intent": "generate_labels",
+                "confidence": 0.94,
+                "parameters": {
+                    "target_formats": ["yolo"],
+                    "task_type": "object_detection",
+                },
+                "missing_parameters": [],
+            })
+
+            routed = handle_conversation(
+                "이 데이터셋을 후속 검증까지 포함해서 준비해줘",
+                str(root),
+                intent_router=router,
+            )
+            operation = routed["proposal"]["plan"]["operations"][0]
+
+            self.assertEqual(routed["route_source"], "llm")
+            self.assertEqual(operation["specialist_consistency_runs"], 0)
+            self.assertEqual(operation["specialist_advisor_mode"], "none")
+
 
 if __name__ == "__main__":
     unittest.main()

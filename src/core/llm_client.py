@@ -314,3 +314,97 @@ class VisionLLMClient:
         print(f"[Error] Failed to get prediction after {self.max_retries} attempts.")
         self.failed_predictions += 1
         return DetectionResult(task_type=task_type)
+
+    def complete_json(
+        self,
+        image_path: str,
+        prompt: str,
+        temperature: float = 0.0,
+        system_msg: str = "Return only a JSON object.",
+    ) -> dict:
+        base64_image = self._encode_image(image_path)
+        media_type = self._get_media_type(image_path)
+
+        for attempt in range(self.max_retries):
+            self.api_attempts += 1
+            try:
+                if self.provider == "openai":
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{base64_image}"}},
+                            ]},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=temperature,
+                    )
+                    content = response.choices[0].message.content
+                elif self.provider == "anthropic":
+                    response = self.client.messages.create(
+                        model=self.model_name,
+                        max_tokens=1024,
+                        temperature=temperature,
+                        system=system_msg,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": base64_image,
+                                        },
+                                    },
+                                    {"type": "text", "text": prompt},
+                                ],
+                            }
+                        ],
+                    )
+                    content = response.content[0].text
+                elif self.provider == "bedrock":
+                    body = {
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "max_tokens": 1024,
+                        "temperature": temperature,
+                        "system": system_msg,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": base64_image,
+                                        },
+                                    },
+                                    {"type": "text", "text": prompt},
+                                ],
+                            }
+                        ],
+                    }
+                    response = self.client.invoke_model(
+                        modelId=self.bedrock_model_id,
+                        body=json.dumps(body),
+                        contentType="application/json",
+                        accept="application/json",
+                    )
+                    data = json.loads(response["body"].read())
+                    content = data["content"][0]["text"]
+                else:
+                    raise ValueError(f"Unsupported provider: {self.provider}")
+                self.successful_predictions += 1
+                return extract_json(content)
+            except Exception as exc:
+                if attempt == self.max_retries - 1:
+                    self.failed_predictions += 1
+                    raise
+                print(f"[Retry {attempt + 1}] JSON completion failed: {exc}")
+                time.sleep(1)
+        return {}

@@ -123,19 +123,27 @@ class TaskPluginOrchestrator:
         prompt: str,
         task_type: str,
         seed_result: DetectionResult,
+        config_overrides: dict | None = None,
     ) -> Tuple[DetectionResult, List[dict]]:
         result = deepcopy(seed_result)
         records = []
         weighted_scores = []
+        config_overrides = config_overrides or {}
 
         for plugin in self.plugins:
             if not plugin.supports(task_type):
                 continue
             try:
-                match_iou = float(plugin.config.get("merge_iou", 0.35))
-                nms_iou = float(plugin.config.get("nms_iou", 0.6))
-                min_confidence = float(plugin.config.get("min_confidence", 0.0))
-                output = plugin.refine(image_path, prompt, result)
+                original_config = plugin.config
+                try:
+                    if config_overrides:
+                        plugin.config = {**plugin.config, **dict(config_overrides.get(plugin.plugin_name) or {})}
+                    match_iou = float(plugin.config.get("merge_iou", 0.35))
+                    nms_iou = float(plugin.config.get("nms_iou", 0.6))
+                    min_confidence = float(plugin.config.get("min_confidence", 0.0))
+                    output = plugin.refine(image_path, prompt, result)
+                finally:
+                    plugin.config = original_config
                 agreement = compute_result_consistency(result, output.result)
                 score = output.score if output.score is not None else agreement
                 weight = float(plugin.config.get("weight", 1.0))

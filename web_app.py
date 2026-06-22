@@ -1,5 +1,6 @@
 import html
 import json
+import copy
 import uuid
 from pathlib import Path
 
@@ -18,6 +19,9 @@ from src.core.workspace import (
     resolve_workspace_path,
     save_workspace,
 )
+from src.reporting import build_conversion_preflight
+from src.utils.label_importer import find_image_path, import_labels_with_report
+from src.utils.label_validator import summarize_validation, validate_result
 from src.workflow.service import execute_workflow_plan
 from src.workflow.conversation import (
     describe_plan,
@@ -220,6 +224,26 @@ def render_workflow_report(result, key_prefix="report"):
             columns[3].metric("Escalation 비율", f"{performance.get('escalation_rate', 0.0) * 100:.1f}%")
             if performance.get("estimation_notice"):
                 st.caption(performance["estimation_notice"])
+            first_pass = output.get("first_pass_report", {})
+            if first_pass.get("images"):
+                fp_columns = st.columns(3)
+                fp_columns[0].metric("1차 추론 이미지", first_pass.get("images", 0))
+                fp_columns[1].metric("1차 라벨", first_pass.get("total_labels", 0))
+                mean_confidence = first_pass.get("mean_confidence")
+                fp_columns[2].metric(
+                    "1차 평균 Confidence",
+                    "-" if mean_confidence is None else f"{mean_confidence:.2f}",
+                )
+            specialist_consistency = output.get("specialist_consistency", {})
+            if specialist_consistency.get("enabled_images"):
+                sc_columns = st.columns(3)
+                sc_columns[0].metric("재추론 이미지", specialist_consistency.get("enabled_images", 0))
+                sc_columns[1].metric("Advisor", specialist_consistency.get("advisor_mode", "none"))
+                mean_agreement = specialist_consistency.get("mean_bbox_agreement")
+                sc_columns[2].metric(
+                    "BBox Agreement",
+                    "-" if mean_agreement is None else f"{mean_agreement * 100:.1f}%",
+                )
         elif action == "convert":
             validation = output.get("validation", {})
             columns = st.columns(4)
@@ -304,12 +328,16 @@ def render_manual_result(result, result_key):
         })
 
 
-def run_plan(plan, auto_approve=False, result_key="workflow"):
+def run_plan(plan, auto_approve=False, result_key="workflow", first_pass_plan_key=None):
     try:
         result = execute_plan(plan, auto_approve=auto_approve)
         if "manual_results" not in st.session_state:
             st.session_state.manual_results = {}
         st.session_state.manual_results[result_key] = result
+        if first_pass_plan_key:
+            st.session_state[first_pass_plan_key] = (
+                plan if has_generate_operation(plan) else None
+            )
         render_manual_result(result, result_key)
     except Exception as exc:
         st.error(f"작업 실패: {exc}")
@@ -332,6 +360,118 @@ def parse_runs(value):
     return runs
 
 
+def build_convert_preflight_preview(
+    input_path,
+    image_dir,
+    source_format,
+    target_formats,
+    classes_path=None,
+    duplicate_iou=0.85,
+):
+    batch = import_labels_with_report(
+        input_path,
+        image_dir,
+        source_format=source_format,
+        classes_path=classes_path,
+        duplicate_iou=duplicate_iou,
+    )
+    validations = []
+    for image_name, result in batch.records:
+        image_path = find_image_path(image_dir, image_name)
+        validations.append({
+            "image": image_name,
+            "issues": validate_result(result, image_path),
+        })
+    return {
+        "input_summary": batch.report,
+        "validation": summarize_validation(validations),
+        "preflight": build_conversion_preflight(batch.report, target_formats, validations),
+        "records": validations,
+    }
+
+
+def render_convert_preflight_preview(preview):
+    preflight = preview.get("preflight", {})
+    validation = preview.get("validation", {})
+    summary = preview.get("input_summary", {})
+    columns = st.columns(4)
+    columns[0].metric("발견 소스", summary.get("sources_discovered", 0))
+    columns[1].metric("변환 대상", summary.get("records_after_merge", 0))
+    columns[2].metric("검증 이슈", validation.get("failed_records", 0))
+    columns[3].metric("상태", preflight.get("status", "unknown"))
+    if preflight.get("notices"):
+        st.markdown("**실행 전 확인 사항**")
+        st.dataframe([
+            {
+                "심각도": notice.get("severity", ""),
+                "항목": notice.get("code", ""),
+                "내용": notice.get("message", ""),
+                "필요 조치": notice.get("user_action", ""),
+            }
+            for notice in preflight.get("notices", [])
+        ], width="stretch")
+    else:
+        st.success("변환 전에 확인된 필수 누락 정보가 없습니다.")
+    detailed = [
+        {
+            "파일": record.get("image", ""),
+            "이슈": " / ".join(record.get("issues", [])),
+        }
+        for record in preview.get("records", [])
+        if record.get("issues")
+    ]
+    if detailed:
+        with st.expander("검증 이슈 상세"):
+            st.dataframe(detailed, width="stretch")
+
+
+def first_pass_chat_proposal(proposal):
+    prepared = copy.deepcopy(proposal)
+    for operation in prepared.get("plan", {}).get("operations", []):
+        if operation.get("action") == "generate":
+            operation["specialist_consistency_runs"] = 0
+            operation["specialist_advisor_mode"] = "none"
+    return prepared
+
+
+def has_generate_operation(plan):
+    return any(
+        operation.get("action") == "generate"
+        for operation in plan.get("operations", [])
+    )
+
+
+def chat_rerun_plan(first_pass_plan, advisor_mode):
+    plan = copy.deepcopy(first_pass_plan)
+    for operation in plan.get("operations", []):
+        if operation.get("action") == "generate":
+            operation["specialist_consistency_runs"] = 1
+            operation["specialist_advisor_mode"] = advisor_mode
+    return plan
+
+
+def render_selective_rerun_controls(first_pass_plan, key_prefix, on_complete):
+    if not first_pass_plan or not has_generate_operation(first_pass_plan):
+        return
+    st.divider()
+    st.markdown("#### 1차 추론 이후 선택 재추론")
+    st.caption("위 결과를 확인한 뒤 필요할 때만 동일 작업 설정으로 specialist 재추론을 실행합니다.")
+    advisor_mode = st.selectbox(
+        "재추론 Advisor",
+        ["none", "low", "high", "both"],
+        index=0,
+        key=f"{key_prefix}_specialist_advisor_mode",
+        help="none은 LLM 없이 고정 파라미터로 재추론하고, low/high/both는 LLM이 threshold, augmentation, prompt 보조 파라미터를 제안합니다.",
+    )
+    if st.button("Specialist 재추론 1회 실행", type="secondary", key=f"{key_prefix}_specialist_rerun"):
+        try:
+            result = execute_plan(chat_rerun_plan(first_pass_plan, advisor_mode), auto_approve=True)
+            on_complete(result)
+        except Exception as exc:
+            st.error(f"선택 재추론 실행 중 오류가 발생했습니다: {exc}")
+        st.rerun()
+
+
 def render_conversation(workspace):
     st.markdown('<div class="panel-title">대화형 작업</div>', unsafe_allow_html=True)
     st.caption("원하는 데이터 작업을 자연어로 입력하세요. Workspace를 탐색한 뒤 실행 계획을 먼저 보여드립니다.")
@@ -347,6 +487,8 @@ def render_conversation(workspace):
         st.session_state.pending_proposal = None
     if "last_chat_result" not in st.session_state:
         st.session_state.last_chat_result = None
+    if "last_chat_first_pass_plan" not in st.session_state:
+        st.session_state.last_chat_first_pass_plan = None
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
@@ -364,6 +506,11 @@ def render_conversation(workspace):
                 result = execute_plan(pending_proposal["plan"], auto_approve=True)
                 response = describe_result(result, workspace)
                 st.session_state.last_chat_result = result
+                st.session_state.last_chat_first_pass_plan = (
+                    pending_proposal["plan"]
+                    if has_generate_operation(pending_proposal["plan"])
+                    else None
+                )
             except Exception as exc:
                 response = f"작업 실행 중 오류가 발생했습니다: {exc}"
             st.session_state.chat_messages.append({"role": "assistant", "content": response})
@@ -380,10 +527,12 @@ def render_conversation(workspace):
     )
     if chat_request:
         st.session_state.chat_messages.append({"role": "user", "content": chat_request})
+        st.session_state.last_chat_result = None
+        st.session_state.last_chat_first_pass_plan = None
         try:
             routed = handle_conversation(chat_request, workspace)
             if routed["kind"] == "plan":
-                proposal = routed["proposal"]
+                proposal = first_pass_chat_proposal(routed["proposal"])
                 response = describe_plan(proposal, workspace)
                 st.session_state.pending_proposal = proposal
             else:
@@ -395,6 +544,16 @@ def render_conversation(workspace):
 
     if st.session_state.last_chat_result:
         render_workflow_report(st.session_state.last_chat_result, key_prefix="chat")
+        def complete_chat_rerun(result):
+            response = "선택 재추론을 완료했습니다.\n\n" + describe_result(result, workspace)
+            st.session_state.last_chat_result = result
+            st.session_state.chat_messages.append({"role": "assistant", "content": response})
+
+        render_selective_rerun_controls(
+            st.session_state.last_chat_first_pass_plan,
+            "chat",
+            complete_chat_rerun,
+        )
 
 
 st.markdown(
@@ -469,6 +628,11 @@ with convert_tab:
             input_path = st.text_input("입력 라벨 경로", value=WORKSPACE_DEFAULTS["labels"])
             image_dir = st.text_input("이미지 디렉터리", value=WORKSPACE_DEFAULTS["images"])
             output_dir = st.text_input("출력 디렉터리", value=WORKSPACE_DEFAULTS["converted"])
+            convert_classes = st.text_input(
+                "클래스 매핑 파일",
+                value="",
+                placeholder="YOLO data.yaml, dataset.yaml 또는 classes.txt",
+            )
         with right:
             st.markdown('<div class="form-section">변환 규칙</div>', unsafe_allow_html=True)
             source_format = st.selectbox("입력 포맷", SOURCE_OPTIONS)
@@ -483,7 +647,25 @@ with convert_tab:
                 key="convert_insight_ratio",
             )
             strict = st.checkbox("검증 이슈가 있는 레코드 제외")
+        preflight_submit = st.form_submit_button("변환 사전 점검", icon=":material/rule:")
         convert_submit = st.form_submit_button("변환 실행", type="primary", icon=":material/sync_alt:")
+    if preflight_submit:
+        if not input_path or not image_dir or not target_formats:
+            st.error("입력 라벨 경로, 이미지 디렉터리, 출력 포맷을 지정하세요.")
+        else:
+            try:
+                st.session_state.convert_preflight_preview = build_convert_preflight_preview(
+                    resolve_workspace_path(workspace, input_path),
+                    resolve_workspace_path(workspace, image_dir),
+                    source_format,
+                    target_formats,
+                    classes_path=resolve_workspace_path(workspace, convert_classes) if convert_classes else None,
+                    duplicate_iou=duplicate_iou,
+                )
+            except Exception as exc:
+                st.error(f"사전 점검 실패: {exc}")
+    if st.session_state.get("convert_preflight_preview"):
+        render_convert_preflight_preview(st.session_state.convert_preflight_preview)
     if convert_submit:
         if not input_path or not image_dir or not output_dir or not target_formats:
             st.error("입력, 이미지, 출력 경로와 출력 포맷을 모두 지정하세요.")
@@ -497,6 +679,7 @@ with convert_tab:
                     "out_dir": resolve_workspace_path(workspace, output_dir),
                     "source_format": source_format,
                     "formats": target_formats,
+                    "classes_path": resolve_workspace_path(workspace, convert_classes) if convert_classes else None,
                     "duplicate_iou": duplicate_iou,
                     "insight_imbalance_ratio": convert_insight_ratio,
                     "strict": strict,
@@ -530,6 +713,7 @@ with generate_tab:
                 key="generation_insight_ratio",
             )
             inference_count = st.number_input("초안 추론 횟수", 1, 10, 3)
+            st.caption("Specialist 재추론은 1차 결과 확인 후 결과 리포트 아래에서 선택 실행합니다.")
         prompt = st.text_area(
             "프롬프트",
             value="",
@@ -545,7 +729,7 @@ with generate_tab:
         elif not approve_expensive:
             st.error("모델 호출 승인이 필요합니다.")
         else:
-            run_plan({
+            generate_plan = {
                 "request_summary": "Streamlit automatic label generation",
                 "operations": [{
                     "action": "generate",
@@ -559,13 +743,32 @@ with generate_tab:
                     "inference_count": int(inference_count),
                     "prompt": prompt,
                     "generation_strategy": "specialist_first",
+                    "specialist_consistency_runs": 0,
+                    "specialist_advisor_mode": "none",
                     "classes_path": resolve_workspace_path(workspace, generation_classes) if generation_classes else None,
                     "plugin_config": resolve_workspace_path(workspace, plugin_config) if plugin_config else None,
                     "require_approval": True,
                 }],
-            }, auto_approve=True, result_key="generate")
+            }
+            run_plan(
+                generate_plan,
+                auto_approve=True,
+                result_key="generate",
+                first_pass_plan_key="last_generate_first_pass_plan",
+            )
     elif st.session_state.get("manual_results", {}).get("generate"):
         render_manual_result(st.session_state.manual_results["generate"], "generate")
+    if st.session_state.get("manual_results", {}).get("generate"):
+        def complete_generate_rerun(result):
+            if "manual_results" not in st.session_state:
+                st.session_state.manual_results = {}
+            st.session_state.manual_results["generate"] = result
+
+        render_selective_rerun_controls(
+            st.session_state.get("last_generate_first_pass_plan"),
+            "generate",
+            complete_generate_rerun,
+        )
 
 with evaluate_tab:
     st.markdown('<div class="panel-title">실험 결과 평가</div>', unsafe_allow_html=True)

@@ -533,6 +533,8 @@ def build_conversation_plan(
             formats=formats,
             threshold=threshold if threshold is not None else 0.75,
             prompt=request,
+            specialist_consistency_runs=0,
+            specialist_advisor_mode="none",
             plugin_config=str(plugin_config) if plugin_config.is_file() else None,
             require_approval=True,
         )
@@ -589,6 +591,9 @@ def describe_plan(proposal: Dict[str, Any], workspace: str | Path) -> str:
         lines.append("- 검증 이슈 레코드: `제외(strict)`")
     if operation.get("threshold") != 0.75:
         lines.append(f"- 신뢰도 기준: `{operation['threshold']}`")
+    if operation.get("action") == "generate":
+        lines.append(f"- Specialist 재추론: `{operation.get('specialist_consistency_runs', 0)}회`")
+        lines.append(f"- 재추론 Advisor: `{operation.get('specialist_advisor_mode', 'none')}`")
     for warning in proposal.get("warnings", []):
         lines.append(f"- 확인 사항: {warning}")
     lines.append("이 계획으로 실행할까요?")

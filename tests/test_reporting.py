@@ -146,10 +146,36 @@ class ReportingTests(unittest.TestCase):
             [{"image": "sample.jpg", "issues": ["missing_image:D:/sample.jpg"]}],
         )
 
-        self.assertEqual(preflight["status"], "blocked")
+        self.assertEqual(preflight["status"], "needs_attention")
         codes = [notice["code"] for notice in preflight["notices"]]
         self.assertIn("missing_yolo_class_mapping", codes)
         self.assertIn("missing_images", codes)
+        missing_images = next(notice for notice in preflight["notices"] if notice["code"] == "missing_images")
+        self.assertEqual(missing_images["severity"], "warning")
+
+    def test_conversion_preflight_reports_numeric_label_normalization(self):
+        preflight = build_conversion_preflight(
+            {
+                "sources_discovered": 2,
+                "records_after_merge": 1,
+                "processed_files": [],
+                "failed_files": [],
+                "skipped_files": [],
+                "merge": {
+                    "conflicts": [],
+                    "label_normalizations": [{
+                        "numeric_label": "3",
+                        "canonical_label": "Lion",
+                    }],
+                },
+                "class_list": ["Lion"],
+            },
+            ["coco"],
+            [],
+        )
+
+        codes = [notice["code"] for notice in preflight["notices"]]
+        self.assertIn("numeric_label_normalized", codes)
 
 
 if __name__ == "__main__":

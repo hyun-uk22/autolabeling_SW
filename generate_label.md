@@ -174,6 +174,8 @@ python main.py
 | `--task_type` | `object_detection` | 라벨링 태스크 |
 | `--generation_strategy` | `specialist_first` | `specialist_first` 또는 기존 `vlm_first` |
 | `--classes_path` | 없음 | Grounding DINO와 SAM3 옵션 후보 클래스에 사용할 `classes.txt` 또는 YOLO `data.yaml` |
+| `--specialist_consistency_runs` | `0` | 1이면 1차 specialist 결과를 유지한 채 검증용 specialist 재추론 1회 수행 |
+| `--specialist_advisor_mode` | `none` | 재추론 설정 patch 제안 방식. `none`, `low`, `high`, `both` |
 | `--threshold` | `0.75` | low 결과 consistency 에스컬레이션 기준 |
 | `--low_model` | 환경 변수 또는 `gpt-4o-mini` | 초안 생성 VLM |
 | `--high_model` | 환경 변수 또는 `gpt-4o` | 불확실 샘플 검증 VLM |
@@ -759,6 +761,33 @@ Specialist Plugins -> 결과가 비어 있을 때 Low VLM 반복 -> High 여부 
 ```
 
 `generation_strategy=vlm_first`를 지정하면 기존 순서인 `Low VLM 반복 -> Specialist Plugins -> High 여부 결정`으로 실행할 수 있다.
+
+### 18.9 Specialist 재추론 Agreement
+
+`specialist_consistency_runs=1`이면 1차 specialist 결과를 최종 라벨 후보로 유지하고, 같은 이미지에 대해 specialist plugin을 한 번 더 실행한다. 재추론 결과는 최종 라벨을 덮어쓰지 않으며 안정성 리포트에만 사용한다.
+
+재추론 전에 1차 specialist 결과의 first-pass report를 생성한다. 이 리포트에는 전체 라벨 수, class별 count, confidence 평균/최소/최대, low-confidence 개수, plugin record, 현재 Grounding DINO threshold 파라미터가 포함된다. `specialist_advisor_mode`가 `low`, `high`, `both`이면 이 report가 advisor prompt에 참고 정보로 포함된다.
+
+재추론 설정은 두 방식으로 결정한다.
+
+- `specialist_advisor_mode=none`: 고정 patch 사용. `box_threshold -0.05`, `text_threshold +0.03`, `nms_iou -0.05`
+- `low`, `high`, `both`: 선택한 LLM이 제한된 JSON patch만 제안
+
+LLM advisor는 다음 필드만 제안할 수 있다.
+
+```json
+{
+  "box_threshold_delta": -0.05,
+  "text_threshold_delta": 0.03,
+  "nms_iou_delta": -0.05,
+  "min_confidence_delta": 0.0,
+  "prompt_prefix": "",
+  "prompt_suffix": "Prefer clearly visible objects only.",
+  "augmentation": {"enabled": false, "brightness": 1.0, "contrast": 1.0}
+}
+```
+
+사용자가 지정한 class list는 immutable이다. advisor는 클래스 추가, 삭제, 이름 변경, synonym 치환, bbox 생성, 최종 라벨 수정을 수행할 수 없다. 결과에는 `specialist_result_consistency`, `specialist_bbox_agreement`, `specialist_mean_matched_iou`, `specialist_rerun_patch`가 기록된다.
 
 ## 19. Dataset Insight Agent
 

@@ -24,6 +24,7 @@ from src.core.model_config import (
 )
 from src.utils.result_metrics import count_result_labels
 from src.utils.label_importer import extract_class_names_from_text, load_classes
+from src.utils.geometry import calculate_iou, compute_result_consistency
 
 load_dotenv()
 
@@ -36,6 +37,149 @@ SUPPORTED_TASK_TYPES = {
     "tracking",
     "all",
 }
+
+
+def clamp(value, low, high, default=0.0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def sanitize_specialist_patch(patch, immutable_labels):
+    if not isinstance(patch, dict):
+        patch = {}
+    blocked = [
+        key for key in patch
+        if key not in {
+            "box_threshold_delta",
+            "text_threshold_delta",
+            "nms_iou_delta",
+            "min_confidence_delta",
+            "prompt_prefix",
+            "prompt_suffix",
+            "augmentation",
+        }
+        or "label" in key.lower()
+        or "class" in key.lower()
+    ]
+    augmentation = patch.get("augmentation") if isinstance(patch.get("augmentation"), dict) else {}
+    sanitized = {
+        "box_threshold_delta": clamp(patch.get("box_threshold_delta"), -0.20, 0.20, -0.05),
+        "text_threshold_delta": clamp(patch.get("text_threshold_delta"), -0.20, 0.20, 0.03),
+        "nms_iou_delta": clamp(patch.get("nms_iou_delta"), -0.20, 0.20, -0.05),
+        "min_confidence_delta": clamp(patch.get("min_confidence_delta"), -0.20, 0.20, 0.0),
+        "prompt_prefix": str(patch.get("prompt_prefix", ""))[:200],
+        "prompt_suffix": str(patch.get("prompt_suffix", " Prefer clearly visible objects only."))[:200],
+        "augmentation": {
+            "enabled": False,
+            "brightness": clamp(augmentation.get("brightness"), 0.80, 1.20, 1.0),
+            "contrast": clamp(augmentation.get("contrast"), 0.80, 1.20, 1.0),
+        },
+        "immutable_labels": immutable_labels,
+    }
+    if blocked:
+        sanitized["blocked_fields"] = blocked
+    return sanitized
+
+
+def bbox_agreement(base, rerun, iou_threshold=0.5):
+    used = set()
+    matched = 0
+    ious = []
+    for base_box in base.boxes:
+        best_index = None
+        best_iou = 0.0
+        for index, rerun_box in enumerate(rerun.boxes):
+            if index in used or rerun_box.label != base_box.label:
+                continue
+            iou = calculate_iou(
+                [base_box.xmin, base_box.ymin, base_box.xmax, base_box.ymax],
+                [rerun_box.xmin, rerun_box.ymin, rerun_box.xmax, rerun_box.ymax],
+            )
+            if iou > best_iou:
+                best_iou = iou
+                best_index = index
+        if best_index is not None and best_iou >= iou_threshold:
+            used.add(best_index)
+            matched += 1
+            ious.append(best_iou)
+    denominator = max(len(base.boxes), len(rerun.boxes), 1)
+    return {
+        "base_boxes": len(base.boxes),
+        "rerun_boxes": len(rerun.boxes),
+        "matched_boxes": matched,
+        "agreement": matched / denominator,
+        "mean_matched_iou": sum(ious) / len(ious) if ious else 0.0,
+    }
+
+
+def result_labels(result):
+    labels = []
+    labels.extend(item.label for item in result.classifications)
+    labels.extend(item.label for item in result.boxes)
+    labels.extend(item.label for item in result.segments)
+    labels.extend(item.label for item in result.poses)
+    labels.extend(item.label for item in result.tracks)
+    return list(dict.fromkeys(label for label in labels if label))
+
+
+def confidence_summary(result):
+    values = []
+    values.extend(item.confidence for item in result.boxes)
+    values.extend(item.confidence for item in result.segments)
+    values.extend(item.confidence for item in result.classifications)
+    values.extend(item.confidence for item in result.poses)
+    values.extend(item.confidence for item in result.tracks)
+    values.extend(item.confidence for item in result.texts)
+    if not values:
+        return {"count": 0, "mean": None, "min": None, "max": None, "low_confidence_count": 0}
+    return {
+        "count": len(values),
+        "mean": sum(values) / len(values),
+        "min": min(values),
+        "max": max(values),
+        "low_confidence_count": sum(value < 0.5 for value in values),
+    }
+
+
+def first_pass_report(result, plugin_records, args):
+    class_counts = {}
+    for label in result_labels(result):
+        class_counts[label] = (
+            sum(item.label == label for item in result.boxes)
+            + sum(item.label == label for item in result.segments)
+            + sum(item.label == label for item in result.classifications)
+            + sum(item.label == label for item in result.poses)
+            + sum(item.label == label for item in result.tracks)
+        )
+    return {
+        "task_type": args.task_type,
+        "generation_strategy": args.generation_strategy,
+        "total_labels": count_result_labels(result),
+        "boxes": len(result.boxes),
+        "segments": len(result.segments),
+        "classifications": len(result.classifications),
+        "poses": len(result.poses),
+        "texts": len(result.texts),
+        "tracks": len(result.tracks),
+        "class_counts": class_counts,
+        "confidence": confidence_summary(result),
+        "source_model": result.source_model,
+        "consistency_score": result.consistency_score,
+        "mean_confidence": result.mean_confidence,
+        "uncertainty_score": result.uncertainty_score,
+        "plugin_records": plugin_records,
+        "current_parameters": {
+            "grounding_dino": {
+                "box_threshold": 0.45,
+                "text_threshold": 0.30,
+                "nms_iou": 0.60,
+                "min_confidence": 0.20,
+            }
+        },
+    }
 
 def main():
     parser = argparse.ArgumentParser(description="Agentic Auto-Labeling System - Paper Experiment Mode")
@@ -55,6 +199,20 @@ def main():
         type=str,
         default=None,
         help="Optional classes.txt or YOLO data.yaml used to restrict Grounding DINO candidate labels.",
+    )
+    parser.add_argument(
+        "--specialist_consistency_runs",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Run one report-only specialist rerun for IoU/NMS agreement after the first specialist result.",
+    )
+    parser.add_argument(
+        "--specialist_advisor_mode",
+        type=str,
+        default="none",
+        choices=["none", "low", "high", "both"],
+        help="Use no LLM, low LLM, high LLM, or both to suggest rerun parameter patches. Labels remain immutable.",
     )
     parser.add_argument(
         "--task_type",
@@ -193,6 +351,8 @@ def main():
     print(f"   - Draft Repeats: {args.inference_count} at temperature {args.draft_temperature}")
     print(f"   - Task Type: {args.task_type}")
     print(f"   - Generation Strategy: {args.generation_strategy}")
+    print(f"   - Specialist Consistency Runs: {args.specialist_consistency_runs}")
+    print(f"   - Specialist Advisor Mode: {args.specialist_advisor_mode}")
     print(f"   - Uncertainty Threshold: {args.threshold} (Escalate if Consistency < {args.threshold})")
     print(f"   - Label Formats: {', '.join(label_writer.formats)}")
     print(f"   - Specialist Plugins: {', '.join(plugin_orchestrator.names) or 'none'}")
@@ -308,6 +468,54 @@ def main():
             
             if status == "Escalated":
                 escalation_count += 1
+            base_report = first_pass_report(result, plugin_records, args)
+            specialist_consistency = {"enabled": False}
+            if args.specialist_consistency_runs > 0 and count_result_labels(result) > 0:
+                immutable_labels = candidate_labels or list(dict.fromkeys(box.label for box in result.boxes))
+                patch = {}
+                if args.specialist_advisor_mode != "none":
+                    active_verifier = ensure_verifier()
+                    advisor_prompt = (
+                        "Suggest a conservative JSON patch for one specialist vision-model rerun. "
+                        "Do not create labels or boxes. Do not change, add, remove, translate, or synonymize classes. "
+                        f"Immutable classes: {immutable_labels}. "
+                        "Allowed keys only: box_threshold_delta, text_threshold_delta, nms_iou_delta, "
+                        "min_confidence_delta, prompt_prefix, prompt_suffix, augmentation. "
+                        "Use this first-pass specialist report as reference only; do not edit boxes or labels directly: "
+                        f"{json.dumps(base_report, ensure_ascii=False)}. Return only JSON."
+                    )
+                    if args.specialist_advisor_mode in {"low", "both"}:
+                        patch = low_client.complete_json(img_path, advisor_prompt, temperature=0.0)
+                    if args.specialist_advisor_mode in {"high", "both"}:
+                        patch = high_client.complete_json(
+                            img_path,
+                            advisor_prompt + f"\nPrevious patch: {json.dumps(patch, ensure_ascii=False)}",
+                            temperature=0.0,
+                        )
+                patch = sanitize_specialist_patch(patch, immutable_labels)
+                rerun_prompt = f"{patch.get('prompt_prefix', '')} {args.prompt} {patch.get('prompt_suffix', '')}".strip()
+                rerun_result, rerun_records = plugin_orchestrator.process(
+                    img_path,
+                    rerun_prompt,
+                    args.task_type,
+                    DetectionResult(task_type=args.task_type),
+                    config_overrides={
+                        "grounding_dino": {
+                            "box_threshold": clamp(0.45 + patch["box_threshold_delta"], 0.0, 1.0),
+                            "text_threshold": clamp(0.30 + patch["text_threshold_delta"], 0.0, 1.0),
+                            "nms_iou": clamp(0.60 + patch["nms_iou_delta"], 0.0, 1.0),
+                            "min_confidence": clamp(0.20 + patch["min_confidence_delta"], 0.0, 1.0),
+                        }
+                    },
+                )
+                specialist_consistency = {
+                    "enabled": True,
+                    "advisor_mode": args.specialist_advisor_mode,
+                    "patch": patch,
+                    "records": rerun_records,
+                    "result_consistency": compute_result_consistency(result, rerun_result),
+                    "bbox_agreement": bbox_agreement(result, rerun_result),
+                }
                 
             # Update progress bar text
             reliability = 1.0 - result.uncertainty_score if result.uncertainty_score is not None else 1.0
@@ -332,6 +540,17 @@ def main():
                 "uncertainty_score": result.uncertainty_score,
                 "plugin_scores": json.dumps(result.plugin_scores, ensure_ascii=False),
                 "plugin_records": json.dumps(plugin_records, ensure_ascii=False),
+                "first_pass_report": json.dumps(base_report, ensure_ascii=False),
+                "first_pass_total_labels": base_report.get("total_labels"),
+                "first_pass_mean_confidence": (base_report.get("confidence") or {}).get("mean"),
+                "first_pass_low_confidence_count": (base_report.get("confidence") or {}).get("low_confidence_count"),
+                "specialist_consistency_enabled": specialist_consistency.get("enabled", False),
+                "specialist_advisor_mode": specialist_consistency.get("advisor_mode", args.specialist_advisor_mode),
+                "specialist_result_consistency": specialist_consistency.get("result_consistency"),
+                "specialist_bbox_agreement": (specialist_consistency.get("bbox_agreement") or {}).get("agreement"),
+                "specialist_mean_matched_iou": (specialist_consistency.get("bbox_agreement") or {}).get("mean_matched_iou"),
+                "specialist_rerun_patch": json.dumps(specialist_consistency.get("patch", {}), ensure_ascii=False),
+                "specialist_rerun_records": json.dumps(specialist_consistency.get("records", []), ensure_ascii=False),
                 "low_api_attempts": (low_client.api_attempts if low_client else 0) - low_attempts_before,
                 "high_api_attempts": (high_client.api_attempts if high_client else 0) - high_attempts_before,
                 "elapsed_sec": elapsed,
@@ -368,6 +587,23 @@ def main():
             evaluation = evaluate_yolo_dirs(args.out_dir, args.gt_dir, args.eval_iou)
 
     dataset_insight = insighter.analyze()
+    first_pass_reports = []
+    for record in run_records:
+        try:
+            first_pass_reports.append(json.loads(record.get("first_pass_report") or "{}"))
+        except ValueError:
+            continue
+    first_pass_label_counts = [int(report.get("total_labels", 0)) for report in first_pass_reports if report]
+    first_pass_confidences = [
+        (report.get("confidence") or {}).get("mean")
+        for report in first_pass_reports
+        if (report.get("confidence") or {}).get("mean") is not None
+    ]
+    specialist_bbox_agreements = [
+        record.get("specialist_bbox_agreement")
+        for record in run_records
+        if record.get("specialist_bbox_agreement") is not None
+    ]
     run_summary = {
         "images": len(images),
         "task_type": args.task_type,
@@ -389,6 +625,27 @@ def main():
         "cost_reduction_pct": cost_reduction_pct,
         "plugins": plugin_orchestrator.names if plugin_orchestrator else [],
         "plugin_prepare_records": plugin_prepare_records,
+        "first_pass_report": {
+            "images": len(first_pass_reports),
+            "total_labels": sum(first_pass_label_counts),
+            "mean_labels_per_image": (
+                sum(first_pass_label_counts) / len(first_pass_label_counts)
+                if first_pass_label_counts else 0.0
+            ),
+            "mean_confidence": (
+                sum(first_pass_confidences) / len(first_pass_confidences)
+                if first_pass_confidences else None
+            ),
+        },
+        "specialist_consistency": {
+            "enabled_images": sum(bool(record.get("specialist_consistency_enabled")) for record in run_records),
+            "advisor_mode": args.specialist_advisor_mode,
+            "requested_runs": args.specialist_consistency_runs,
+            "mean_bbox_agreement": (
+                sum(specialist_bbox_agreements) / len(specialist_bbox_agreements)
+                if specialist_bbox_agreements else None
+            ),
+        },
         "evaluation": evaluation,
         "dataset_insight": dataset_insight,
     }

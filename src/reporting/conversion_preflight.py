@@ -86,6 +86,15 @@ def build_conversion_preflight(
             "input_summary.merge.conflicts를 확인해 taxonomy나 class alias를 정리하세요.",
             count=len(conflicts),
         ))
+    label_normalizations = merge.get("label_normalizations", [])
+    if label_normalizations:
+        notices.append(_notice(
+            "info",
+            "numeric_label_normalized",
+            f"겹치는 라벨을 기준으로 숫자 클래스 라벨 {len(label_normalizations)}건을 실제 클래스명으로 정규화했습니다.",
+            "input_summary.merge.label_normalizations를 확인해 추론된 class id와 클래스명이 의도와 일치하는지 검토하세요.",
+            count=len(label_normalizations),
+        ))
 
     if validation_records:
         issue_counts = Counter(
@@ -95,10 +104,10 @@ def build_conversion_preflight(
         )
         if issue_counts.get("missing_image"):
             notices.append(_notice(
-                "critical",
+                "warning",
                 "missing_images",
                 f"이미지 파일을 찾지 못한 레코드가 {issue_counts['missing_image']}개 있습니다.",
-                "라벨 filename/stem과 이미지 디렉터리 구성을 맞춘 뒤 다시 실행하세요.",
+                "라벨 파일만 점검하는 경우 계속 진행할 수 있지만, COCO/Pascal VOC처럼 이미지 크기가 필요한 출력은 이미지 디렉터리 연결 후 다시 실행하세요.",
                 count=issue_counts["missing_image"],
             ))
         if issue_counts.get("image_open_failed") or issue_counts.get("invalid_image_size"):

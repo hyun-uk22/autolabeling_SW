@@ -17,7 +17,7 @@ answer it and do not perform any operation. Return JSON only with this shape:
 {
   "intent": "convert_labels|generate_labels|evaluate_labels|inspect_dataset|explain_result|configure_workspace|general_chat|unknown",
   "confidence": 0.0,
-  "parameters": {
+    "parameters": {
     "target_formats": ["yolo|pascal_voc|coco|vision_json"],
     "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json",
     "source_path": "optional workspace-relative path",

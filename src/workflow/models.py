@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 
 ActionType = Literal["generate", "convert", "evaluate"]
 GenerationStrategy = Literal["specialist_first", "vlm_first"]
+SpecialistAdvisorMode = Literal["none", "low", "high", "both"]
 
 
 class OperationPlan(BaseModel):
@@ -20,6 +21,8 @@ class OperationPlan(BaseModel):
     custom_label_extension: str = ".json"
     prompt: str = "Detect and classify all prominent objects in this image. Output strictly as JSON."
     generation_strategy: GenerationStrategy = "specialist_first"
+    specialist_consistency_runs: int = Field(default=0, ge=0, le=3)
+    specialist_advisor_mode: SpecialistAdvisorMode = "none"
     plugin_config: Optional[str] = None
     plugin_fail_fast: bool = False
     gt_dir: Optional[str] = None
@@ -82,6 +85,8 @@ class WorkflowState(TypedDict, total=False):
     current_result: Dict[str, Any]
     current_status: str
     current_plugin_records: List[Dict[str, Any]]
+    current_first_pass_report: Dict[str, Any]
+    current_specialist_consistency: Dict[str, Any]
     current_issues: List[str]
     current_low_attempts: int
     current_high_attempts: int

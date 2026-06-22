@@ -1,10 +1,12 @@
 import csv
 import json
 import os
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+from PIL import Image, ImageEnhance
 
 from ..agents.insight_agent import DatasetInsightAgent
 from ..agents.verification_agent import HierarchicalVerificationAgent
@@ -21,7 +23,7 @@ from ..reporting import (
 )
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
 from ..utils.format_converter import LabelExportWriter
-from ..utils.geometry import consistency_metric_name
+from ..utils.geometry import calculate_iou, compute_result_consistency, consistency_metric_name
 from ..utils.label_importer import (
     extract_class_names_from_text,
     find_image_path,
@@ -36,6 +38,96 @@ from .planner import WorkflowPlanner
 from .schema_repair import repair_result, schema_candidates
 
 load_dotenv()
+
+
+ALLOWED_ADVISOR_FIELDS = {
+    "box_threshold_delta",
+    "text_threshold_delta",
+    "nms_iou_delta",
+    "min_confidence_delta",
+    "prompt_prefix",
+    "prompt_suffix",
+    "augmentation",
+}
+
+
+def _clamp(value: Any, low: float, high: float, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _result_labels(result: DetectionResult) -> List[str]:
+    labels = []
+    labels.extend(item.label for item in result.classifications)
+    labels.extend(item.label for item in result.boxes)
+    labels.extend(item.label for item in result.segments)
+    labels.extend(item.label for item in result.poses)
+    labels.extend(item.label for item in result.tracks)
+    return list(dict.fromkeys(label for label in labels if label))
+
+
+def _bbox_agreement(base: DetectionResult, rerun: DetectionResult, iou_threshold: float = 0.5) -> Dict[str, Any]:
+    matches = []
+    used = set()
+    for base_index, base_box in enumerate(base.boxes):
+        best_index = None
+        best_iou = 0.0
+        for rerun_index, rerun_box in enumerate(rerun.boxes):
+            if rerun_index in used or rerun_box.label != base_box.label:
+                continue
+            iou = calculate_iou(
+                [base_box.xmin, base_box.ymin, base_box.xmax, base_box.ymax],
+                [rerun_box.xmin, rerun_box.ymin, rerun_box.xmax, rerun_box.ymax],
+            )
+            if iou > best_iou:
+                best_iou = iou
+                best_index = rerun_index
+        if best_index is not None and best_iou >= iou_threshold:
+            used.add(best_index)
+            matches.append({"base_index": base_index, "rerun_index": best_index, "label": base_box.label, "iou": best_iou})
+    base_count = len(base.boxes)
+    rerun_count = len(rerun.boxes)
+    match_count = len(matches)
+    denominator = max(base_count, rerun_count, 1)
+    return {
+        "bbox_iou_threshold": iou_threshold,
+        "base_boxes": base_count,
+        "rerun_boxes": rerun_count,
+        "matched_boxes": match_count,
+        "missing_boxes": max(0, base_count - match_count),
+        "new_boxes": max(0, rerun_count - match_count),
+        "mean_matched_iou": sum(item["iou"] for item in matches) / match_count if match_count else 0.0,
+        "agreement": match_count / denominator,
+        "matches": matches[:20],
+    }
+
+
+def _confidence_summary(values: List[float]) -> Dict[str, Any]:
+    if not values:
+        return {"count": 0, "mean": None, "min": None, "max": None, "low_confidence_count": 0}
+    return {
+        "count": len(values),
+        "mean": sum(values) / len(values),
+        "min": min(values),
+        "max": max(values),
+        "low_confidence_count": sum(value < 0.5 for value in values),
+    }
+
+
+def _class_counts(result: DetectionResult) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for label in _result_labels(result):
+        counts[label] = (
+            sum(item.label == label for item in result.boxes)
+            + sum(item.label == label for item in result.segments)
+            + sum(item.label == label for item in result.classifications)
+            + sum(item.label == label for item in result.poses)
+            + sum(item.label == label for item in result.tracks)
+        )
+    return counts
 
 
 class WorkflowRuntime:
@@ -138,6 +230,195 @@ class WorkflowRuntime:
         self._ensure_plugins(operation)
         self._ensure_vlm_clients(operation, low_model, high_model)
 
+    def _current_specialist_parameters(self) -> Dict[str, Any]:
+        parameters: Dict[str, Any] = {}
+        if not self.plugin_orchestrator:
+            return parameters
+        for plugin in self.plugin_orchestrator.plugins:
+            if plugin.plugin_name == "grounding_dino":
+                parameters["grounding_dino"] = {
+                    "box_threshold": float(plugin.config.get("box_threshold", 0.45)),
+                    "text_threshold": float(plugin.config.get("text_threshold", 0.30)),
+                    "nms_iou": float(plugin.config.get("nms_iou", 0.60)),
+                    "min_confidence": float(plugin.config.get("min_confidence", 0.20)),
+                }
+        return parameters
+
+    def _first_pass_report(
+        self,
+        result: DetectionResult,
+        plugin_records: List[dict],
+        operation: OperationPlan,
+    ) -> Dict[str, Any]:
+        confidences = []
+        confidences.extend(item.confidence for item in result.boxes)
+        confidences.extend(item.confidence for item in result.segments)
+        confidences.extend(item.confidence for item in result.classifications)
+        confidences.extend(item.confidence for item in result.poses)
+        confidences.extend(item.confidence for item in result.tracks)
+        confidences.extend(item.confidence for item in result.texts)
+        return {
+            "task_type": operation.task_type,
+            "generation_strategy": operation.generation_strategy,
+            "total_labels": count_result_labels(result),
+            "boxes": len(result.boxes),
+            "segments": len(result.segments),
+            "classifications": len(result.classifications),
+            "poses": len(result.poses),
+            "texts": len(result.texts),
+            "tracks": len(result.tracks),
+            "class_counts": _class_counts(result),
+            "confidence": _confidence_summary(confidences),
+            "source_model": result.source_model,
+            "consistency_score": result.consistency_score,
+            "mean_confidence": result.mean_confidence,
+            "uncertainty_score": result.uncertainty_score,
+            "plugin_records": plugin_records,
+            "current_parameters": self._current_specialist_parameters(),
+        }
+
+    def _default_specialist_patch(self) -> Dict[str, Any]:
+        return {
+            "box_threshold_delta": -0.05,
+            "text_threshold_delta": 0.03,
+            "nms_iou_delta": -0.05,
+            "min_confidence_delta": 0.0,
+            "prompt_suffix": " Prefer clearly visible objects only.",
+            "augmentation": {"enabled": False, "brightness": 1.0, "contrast": 1.0},
+        }
+
+    def _sanitize_advisor_patch(self, patch: Dict[str, Any], immutable_labels: List[str]) -> Dict[str, Any]:
+        if not isinstance(patch, dict):
+            return self._default_specialist_patch()
+        blocked = [
+            key for key in patch
+            if key not in ALLOWED_ADVISOR_FIELDS or "label" in key.lower() or "class" in key.lower()
+        ]
+        sanitized = self._default_specialist_patch()
+        sanitized.update({
+            "box_threshold_delta": _clamp(patch.get("box_threshold_delta"), -0.20, 0.20, sanitized["box_threshold_delta"]),
+            "text_threshold_delta": _clamp(patch.get("text_threshold_delta"), -0.20, 0.20, sanitized["text_threshold_delta"]),
+            "nms_iou_delta": _clamp(patch.get("nms_iou_delta"), -0.20, 0.20, sanitized["nms_iou_delta"]),
+            "min_confidence_delta": _clamp(patch.get("min_confidence_delta"), -0.20, 0.20, sanitized["min_confidence_delta"]),
+            "prompt_prefix": str(patch.get("prompt_prefix", ""))[:200],
+            "prompt_suffix": str(patch.get("prompt_suffix", sanitized["prompt_suffix"]))[:200],
+        })
+        augmentation = patch.get("augmentation") if isinstance(patch.get("augmentation"), dict) else {}
+        sanitized["augmentation"] = {
+            "enabled": bool(augmentation.get("enabled", False)),
+            "brightness": _clamp(augmentation.get("brightness"), 0.80, 1.20, 1.0),
+            "contrast": _clamp(augmentation.get("contrast"), 0.80, 1.20, 1.0),
+        }
+        if blocked:
+            sanitized["blocked_fields"] = blocked
+        sanitized["immutable_labels"] = immutable_labels
+        return sanitized
+
+    def _advisor_prompt(
+        self,
+        operation: OperationPlan,
+        base_result: DetectionResult,
+        immutable_labels: List[str],
+        first_pass_report: Dict[str, Any],
+    ) -> str:
+        return (
+            "Suggest a conservative JSON patch for one specialist vision-model rerun. "
+            "Do not create labels or boxes. Do not change, add, remove, translate, or synonymize classes. "
+            f"Immutable classes: {immutable_labels}. "
+            "Allowed keys only: box_threshold_delta, text_threshold_delta, nms_iou_delta, "
+            "min_confidence_delta, prompt_prefix, prompt_suffix, augmentation. "
+            "Deltas must be between -0.20 and 0.20. augmentation may include enabled, brightness, contrast. "
+            f"Current task: {operation.task_type}. Current label count: {count_result_labels(base_result)}. "
+            "Use this first-pass specialist report as reference only; do not edit boxes or labels directly: "
+            f"{json.dumps(first_pass_report, ensure_ascii=False)}. "
+            "Return only JSON."
+        )
+
+    def _advisor_patch(
+        self,
+        image_path: str,
+        operation: OperationPlan,
+        base_result: DetectionResult,
+        immutable_labels: List[str],
+        first_pass_report: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if operation.specialist_advisor_mode == "none":
+            return self._sanitize_advisor_patch({}, immutable_labels)
+        low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
+        self._ensure_vlm_clients(operation, low_model, high_model)
+        prompt = self._advisor_prompt(operation, base_result, immutable_labels, first_pass_report)
+        patches = []
+        if operation.specialist_advisor_mode in {"low", "both"}:
+            patches.append(self.low_client.complete_json(image_path, prompt, temperature=0.0))
+        if operation.specialist_advisor_mode in {"high", "both"}:
+            review_prompt = prompt
+            if patches:
+                review_prompt += f"\nLow-model patch candidate: {json.dumps(patches[-1], ensure_ascii=False)}"
+            patches.append(self.high_client.complete_json(image_path, review_prompt, temperature=0.0))
+        return self._sanitize_advisor_patch(patches[-1] if patches else {}, immutable_labels)
+
+    def _plugin_config_overrides(self, patch: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+        def adjusted(current: float, delta_key: str) -> float:
+            return max(0.0, min(1.0, current + float(patch.get(delta_key, 0.0))))
+
+        return {
+            "grounding_dino": {
+                "box_threshold": adjusted(0.45, "box_threshold_delta"),
+                "text_threshold": adjusted(0.30, "text_threshold_delta"),
+                "nms_iou": adjusted(0.60, "nms_iou_delta"),
+                "min_confidence": adjusted(0.20, "min_confidence_delta"),
+            }
+        }
+
+    def _augmented_image_path(self, image_path: str, patch: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+        augmentation = patch.get("augmentation") or {}
+        if not augmentation.get("enabled"):
+            return image_path, None
+        image = Image.open(image_path).convert("RGB")
+        image = ImageEnhance.Brightness(image).enhance(float(augmentation.get("brightness", 1.0)))
+        image = ImageEnhance.Contrast(image).enhance(float(augmentation.get("contrast", 1.0)))
+        handle = tempfile.NamedTemporaryFile(prefix="autolabel-rerun-", suffix=".jpg", delete=False)
+        handle.close()
+        image.save(handle.name)
+        return handle.name, handle.name
+
+    def _specialist_consistency_rerun(
+        self,
+        image_path: str,
+        operation: OperationPlan,
+        base_result: DetectionResult,
+        first_pass_report: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if operation.specialist_consistency_runs <= 0 or count_result_labels(base_result) <= 0:
+            return {"enabled": False, "reason": "disabled_or_empty"}
+        immutable_labels = self._candidate_labels_for_generation(operation) or _result_labels(base_result)
+        patch = self._advisor_patch(image_path, operation, base_result, immutable_labels, first_pass_report)
+        rerun_prompt = f"{patch.get('prompt_prefix', '')} {operation.prompt} {patch.get('prompt_suffix', '')}".strip()
+        rerun_image, temporary_path = self._augmented_image_path(image_path, patch)
+        try:
+            rerun_result, rerun_records = self.plugin_orchestrator.process(
+                rerun_image,
+                rerun_prompt,
+                operation.task_type,
+                DetectionResult(task_type=operation.task_type),
+                config_overrides=self._plugin_config_overrides(patch),
+            )
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+        consistency = compute_result_consistency(base_result, rerun_result)
+        bbox = _bbox_agreement(base_result, rerun_result)
+        return {
+            "enabled": True,
+            "advisor_mode": operation.specialist_advisor_mode,
+            "runs": 1,
+            "patch": patch,
+            "result": rerun_result.model_dump(),
+            "records": rerun_records,
+            "result_consistency": consistency,
+            "bbox_agreement": bbox,
+        }
+
     def generate_drafts(self, image_path: str, operation: OperationPlan) -> Dict[str, Any]:
         self._ensure_generation_for_operation(operation)
         started = time.perf_counter()
@@ -158,7 +439,13 @@ class WorkflowRuntime:
     def run_specialists(self, image_path: str, operation: OperationPlan, result: DetectionResult) -> Dict[str, Any]:
         self._ensure_plugins(operation)
         if not self.plugin_orchestrator:
-            return {"result": result, "records": [], "elapsed_sec": 0.0}
+            return {
+                "result": result,
+                "records": [],
+                "elapsed_sec": 0.0,
+                "first_pass_report": self._first_pass_report(result, [], operation),
+                "specialist_consistency": {"enabled": False},
+            }
         started = time.perf_counter()
         merged, records = self.plugin_orchestrator.process(
             image_path,
@@ -166,7 +453,15 @@ class WorkflowRuntime:
             operation.task_type,
             result,
         )
-        return {"result": merged, "records": records, "elapsed_sec": time.perf_counter() - started}
+        first_pass_report = self._first_pass_report(merged, records, operation)
+        specialist_consistency = self._specialist_consistency_rerun(image_path, operation, merged, first_pass_report)
+        return {
+            "result": merged,
+            "records": records,
+            "elapsed_sec": time.perf_counter() - started,
+            "first_pass_report": first_pass_report,
+            "specialist_consistency": specialist_consistency,
+        }
 
     def needs_high_verification(
         self,
@@ -234,6 +529,9 @@ class WorkflowRuntime:
                 "issues": auditor.audit_record(label_paths),
             })
             vis_path = visualize_boxes(image_path, result, operation.vis_dir)
+            first_pass_report = record.get("first_pass_report") or {}
+            specialist_consistency = record.get("specialist_consistency") or {}
+            bbox_agreement = specialist_consistency.get("bbox_agreement") or {}
             metric_rows.append({
                 "image": record["image"],
                 "status": record["status"],
@@ -252,6 +550,17 @@ class WorkflowRuntime:
                 "uncertainty_score": result.uncertainty_score,
                 "plugin_scores": json.dumps(result.plugin_scores, ensure_ascii=False),
                 "plugin_records": json.dumps(record.get("plugin_records", []), ensure_ascii=False),
+                "first_pass_report": json.dumps(first_pass_report, ensure_ascii=False),
+                "first_pass_total_labels": first_pass_report.get("total_labels"),
+                "first_pass_mean_confidence": (first_pass_report.get("confidence") or {}).get("mean"),
+                "first_pass_low_confidence_count": (first_pass_report.get("confidence") or {}).get("low_confidence_count"),
+                "specialist_consistency_enabled": bool(specialist_consistency.get("enabled")),
+                "specialist_advisor_mode": specialist_consistency.get("advisor_mode", operation.specialist_advisor_mode),
+                "specialist_result_consistency": specialist_consistency.get("result_consistency"),
+                "specialist_bbox_agreement": bbox_agreement.get("agreement"),
+                "specialist_mean_matched_iou": bbox_agreement.get("mean_matched_iou"),
+                "specialist_rerun_records": json.dumps(specialist_consistency.get("records", []), ensure_ascii=False),
+                "specialist_rerun_patch": json.dumps(specialist_consistency.get("patch", {}), ensure_ascii=False),
                 "validation_issues": json.dumps(record.get("issues", []), ensure_ascii=False),
                 "low_api_attempts": record.get("low_api_attempts", 0),
                 "high_api_attempts": record.get("high_api_attempts", 0),
@@ -295,6 +604,30 @@ class WorkflowRuntime:
             for plugin_record in record.get("plugin_records", [])
             if plugin_record.get("plugin")
         })
+        specialist_consistency_records = [
+            record.get("specialist_consistency")
+            for record in records
+            if (record.get("specialist_consistency") or {}).get("enabled")
+        ]
+        specialist_bbox_agreements = [
+            (item.get("bbox_agreement") or {}).get("agreement")
+            for item in specialist_consistency_records
+            if (item.get("bbox_agreement") or {}).get("agreement") is not None
+        ]
+        first_pass_reports = [
+            record.get("first_pass_report")
+            for record in records
+            if record.get("first_pass_report")
+        ]
+        first_pass_label_counts = [
+            int(report.get("total_labels", 0))
+            for report in first_pass_reports
+        ]
+        first_pass_confidences = [
+            (report.get("confidence") or {}).get("mean")
+            for report in first_pass_reports
+            if (report.get("confidence") or {}).get("mean") is not None
+        ]
         summary = {
             "report_version": "2.0",
             "action": "generate",
@@ -309,6 +642,35 @@ class WorkflowRuntime:
             "escalation_count": escalation_count,
             "plugins": plugins,
             "plugin_prepare_records": self.plugin_prepare_records,
+            "first_pass_report": {
+                "images": len(first_pass_reports),
+                "total_labels": sum(first_pass_label_counts),
+                "mean_labels_per_image": (
+                    sum(first_pass_label_counts) / len(first_pass_label_counts)
+                    if first_pass_label_counts else 0.0
+                ),
+                "mean_confidence": (
+                    sum(first_pass_confidences) / len(first_pass_confidences)
+                    if first_pass_confidences else None
+                ),
+                "records": [
+                    {
+                        "image": record["image"],
+                        "report": record.get("first_pass_report"),
+                    }
+                    for record in records
+                    if record.get("first_pass_report")
+                ],
+            },
+            "specialist_consistency": {
+                "enabled_images": len(specialist_consistency_records),
+                "advisor_mode": operation.specialist_advisor_mode,
+                "requested_runs": operation.specialist_consistency_runs,
+                "mean_bbox_agreement": (
+                    sum(specialist_bbox_agreements) / len(specialist_bbox_agreements)
+                    if specialist_bbox_agreements else None
+                ),
+            },
             "evaluation": evaluation,
             "performance": build_generation_performance(
                 len(records), total_elapsed, low_attempts, high_attempts, escalation_count,
