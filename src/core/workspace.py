@@ -5,6 +5,8 @@ from typing import Optional
 
 WORKSPACE_DEFAULTS = {
     "images": "data/raw",
+    "source_labels": "data/labels",
+    "generated_labels": "data/labeled",
     "labels": "data/labeled",
     "visualized": "data/visualized",
     "converted": "data/converted",

@@ -3,7 +3,6 @@ from typing import Any, Dict
 from .graph import build_workflow_graph
 from .runtime import WorkflowRuntime
 
-
 def execute_workflow_plan(
     plan: Dict[str, Any],
     auto_approve: bool = False,

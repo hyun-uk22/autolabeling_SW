@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import ast
 import re
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -12,6 +13,7 @@ from ..core.models import BoundingBox, DetectionResult, Point, PolygonSegment
 
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+YOLO_DATASET_FILENAMES = ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml")
 SOURCE_PRIORITY = {
     "coco": 60,
     "pascal_voc": 50,
@@ -20,12 +22,21 @@ SOURCE_PRIORITY = {
     "csv": 20,
     "generic_json": 10,
 }
+CLASS_LIST_PRIORITY = {
+    "yolo": 100,
+    "coco": 80,
+    "pascal_voc": 70,
+    "vision_json": 60,
+    "csv": 50,
+    "generic_json": 40,
+}
 
 
 @dataclass(frozen=True)
 class LabelSource:
     path: str
     format: str
+    search_root: Optional[str] = None
 
 
 @dataclass
@@ -73,11 +84,307 @@ def infer_label_format(input_path: str) -> str:
     raise ValueError(f"Cannot infer label format from {input_path}")
 
 
+def _strip_yaml_value(value: str) -> str:
+    value = value.strip().strip(",")
+    if "#" in value:
+        value = value.split("#", 1)[0].strip()
+    if (
+        (value.startswith('"') and value.endswith('"'))
+        or (value.startswith("'") and value.endswith("'"))
+    ):
+        return value[1:-1]
+    return value
+
+
+def _parse_inline_yaml_names(value: str) -> List[str]:
+    value = value.strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except (SyntaxError, ValueError):
+            inner = value.strip("[]")
+            return [_strip_yaml_value(item) for item in inner.split(",") if _strip_yaml_value(item)]
+    if value.startswith("{"):
+        inner = value.strip("{}")
+        entries = []
+        for item in inner.split(","):
+            if ":" not in item:
+                continue
+            key, label = item.split(":", 1)
+            try:
+                index = int(_strip_yaml_value(key))
+            except ValueError:
+                index = len(entries)
+            entries.append((index, _strip_yaml_value(label)))
+        return [label for _, label in sorted(entries) if label]
+    inline_pairs = re.findall(r"(?:^|\s)(\d+)\s*:\s*(.*?)(?=\s+\d+\s*:|\s+path\s*:|$)", value)
+    if inline_pairs:
+        return [
+            _strip_yaml_value(label)
+            for _, label in sorted(((int(index), label) for index, label in inline_pairs))
+            if _strip_yaml_value(label)
+        ]
+    return [_strip_yaml_value(value)]
+
+
+def load_yolo_yaml_classes(yaml_path: Optional[str]) -> List[str]:
+    if not yaml_path or not os.path.exists(yaml_path):
+        return []
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not stripped.startswith("names:"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        inline_value = stripped.split(":", 1)[1].strip()
+        if inline_value:
+            return _parse_inline_yaml_names(inline_value)
+
+        ordered_entries = []
+        list_entries = []
+        for child in lines[index + 1:]:
+            child_stripped = child.strip()
+            if not child_stripped or child_stripped.startswith("#"):
+                continue
+            child_indent = len(child) - len(child.lstrip())
+            if child_indent <= indent:
+                break
+            if child_stripped.startswith("-"):
+                label = _strip_yaml_value(child_stripped[1:])
+                if label:
+                    list_entries.append(label)
+                continue
+            if ":" in child_stripped:
+                key, label = child_stripped.split(":", 1)
+                try:
+                    class_id = int(_strip_yaml_value(key))
+                except ValueError:
+                    class_id = len(ordered_entries)
+                label = _strip_yaml_value(label)
+                if label:
+                    ordered_entries.append((class_id, label))
+        if ordered_entries:
+            return [label for _, label in sorted(ordered_entries)]
+        return list_entries
+    return []
+
+
+def extract_class_names_from_text(text: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    lines = str(text).splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("names:"):
+            continue
+        inline_value = stripped.split(":", 1)[1].strip()
+        if inline_value:
+            return _parse_inline_yaml_names(inline_value)
+
+        entries = []
+        list_entries = []
+        for child in lines[index + 1:]:
+            child_stripped = child.strip()
+            if not child_stripped:
+                continue
+            if child_stripped.startswith(("- ", "-")):
+                label = _strip_yaml_value(child_stripped[1:])
+                if label:
+                    list_entries.append(label)
+                continue
+            if ":" not in child_stripped:
+                break
+            key, label = child_stripped.split(":", 1)
+            try:
+                class_id = int(_strip_yaml_value(key))
+            except ValueError:
+                break
+            label = _strip_yaml_value(label)
+            if label:
+                entries.append((class_id, label))
+        if entries:
+            return [label for _, label in sorted(entries)]
+        return list_entries
+    return []
+
+
+def _candidate_yolo_class_paths(
+    source_path: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> List[str]:
+    if classes_path:
+        return [classes_path]
+    base_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+    search_dirs = []
+    current = os.path.abspath(base_dir)
+    root = os.path.abspath(search_root) if search_root else current
+    while True:
+        search_dirs.append(current)
+        if current == root or os.path.dirname(current) == current:
+            break
+        try:
+            common = os.path.commonpath([current, root])
+        except ValueError:
+            break
+        if common != root:
+            break
+        current = os.path.dirname(current)
+
+    candidates = []
+    for directory in search_dirs:
+        candidates.extend(os.path.join(directory, name) for name in YOLO_DATASET_FILENAMES)
+    for directory in search_dirs:
+        if not os.path.isdir(directory):
+            continue
+        candidates.extend(
+            os.path.join(directory, name)
+            for name in sorted(os.listdir(directory))
+            if name.lower().endswith((".yaml", ".yml"))
+            and name.lower() not in YOLO_DATASET_FILENAMES
+        )
+    candidates.extend(os.path.join(directory, "classes.txt") for directory in search_dirs)
+    return candidates
+
+
 def load_classes(classes_path: Optional[str]) -> List[str]:
     if not classes_path or not os.path.exists(classes_path):
         return []
+    if classes_path.lower().endswith((".yaml", ".yml")):
+        return load_yolo_yaml_classes(classes_path)
     with open(classes_path, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
+
+
+def load_yolo_classes(
+    source_path: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> List[str]:
+    classes, _ = resolve_yolo_class_mapping(source_path, classes_path, search_root)
+    return classes
+
+
+def resolve_yolo_class_mapping(
+    source_path: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> Tuple[List[str], Optional[str]]:
+    for candidate in _candidate_yolo_class_paths(source_path, classes_path, search_root):
+        class_list = load_classes(candidate)
+        if class_list:
+            return class_list, os.path.abspath(candidate)
+    return [], None
+
+
+def _append_unique(labels: List[str], values: Iterable[str]) -> None:
+    seen = set(labels)
+    for value in values:
+        label = str(value).strip()
+        if not label or label in seen:
+            continue
+        labels.append(label)
+        seen.add(label)
+
+
+def _labels_from_result(result: DetectionResult) -> List[str]:
+    labels: List[str] = []
+    _append_unique(labels, (item.label for item in result.boxes))
+    _append_unique(labels, (item.label for item in result.segments))
+    _append_unique(labels, (item.label for item in result.classifications))
+    _append_unique(labels, (item.label for item in result.poses))
+    _append_unique(labels, (item.label for item in result.tracks))
+    return labels
+
+
+def _classes_for_source(source: LabelSource, classes_path: Optional[str]) -> List[str]:
+    if source.format == "yolo":
+        return load_yolo_classes(source.path, classes_path, source.search_root)
+    if source.format == "coco":
+        with open(source.path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        categories = sorted(data.get("categories", []), key=lambda item: item.get("id", 0))
+        return [item.get("name", str(item.get("id"))) for item in categories]
+    if source.format == "pascal_voc":
+        labels: List[str] = []
+        files = [source.path]
+        if os.path.isdir(source.path):
+            files = [
+                os.path.join(source.path, name)
+                for name in sorted(os.listdir(source.path))
+                if name.lower().endswith(".xml")
+            ]
+        for path in files:
+            root = ET.parse(path).getroot()
+            _append_unique(labels, (obj.findtext("name") or "object" for obj in root.findall("object")))
+        return labels
+    return []
+
+
+def _source_metadata(source: LabelSource, classes_path: Optional[str]) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    if source.format == "yolo":
+        class_list, mapping_path = resolve_yolo_class_mapping(source.path, classes_path, source.search_root)
+        metadata["class_mapping"] = {
+            "status": "found" if class_list else "missing",
+            "path": mapping_path,
+            "classes": len(class_list),
+            "searched": [
+                os.path.abspath(path)
+                for path in _candidate_yolo_class_paths(source.path, classes_path, source.search_root)
+            ],
+        }
+        metadata["duplicate_label_rows"] = _duplicate_yolo_rows(source.path)
+    return metadata
+
+
+def _duplicate_yolo_rows(source_path: str) -> List[Dict[str, Any]]:
+    files = [source_path]
+    if os.path.isdir(source_path):
+        files = [
+            os.path.join(source_path, name)
+            for name in sorted(os.listdir(source_path))
+            if name.lower().endswith(".txt")
+        ]
+    duplicates = []
+    for path in files:
+        seen: Dict[str, int] = {}
+        duplicate_rows = []
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    normalized = " ".join(line.strip().split())
+                    if not normalized:
+                        continue
+                    parts = normalized.split()
+                    if len(parts) != 5:
+                        continue
+                    try:
+                        [float(value) for value in parts]
+                    except ValueError:
+                        continue
+                    first_line = seen.setdefault(normalized, line_number)
+                    if first_line != line_number:
+                        duplicate_rows.append({
+                            "line": line_number,
+                            "first_line": first_line,
+                            "row": normalized,
+                        })
+        except (OSError, UnicodeError):
+            continue
+        if duplicate_rows:
+            duplicates.append({
+                "path": os.path.abspath(path),
+                "count": len(duplicate_rows),
+                "rows": duplicate_rows[:5],
+            })
+    return duplicates
 
 
 def label_for_class_id(class_id: int, class_list: List[str]) -> str:
@@ -99,7 +406,7 @@ def normalize_pixel_box(xmin, ymin, xmax, ymax, width: float, height: float) -> 
 
 def parse_yolo_file(path: str, image_name: str, class_list: List[str]) -> Tuple[str, DetectionResult]:
     result = DetectionResult(task_type="object_detection")
-    with open(path, "r", encoding="utf-8-sig") as f:
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split()
             if len(parts) != 5:
@@ -109,19 +416,23 @@ def parse_yolo_file(path: str, image_name: str, class_list: List[str]) -> Tuple[
             result.boxes.append(
                 BoundingBox(
                     label=label_for_class_id(class_id, class_list),
-                    xmin=x_center - width / 2,
-                    ymin=y_center - height / 2,
-                    xmax=x_center + width / 2,
-                    ymax=y_center + height / 2,
+                    xmin=normalize_coordinate(x_center - width / 2),
+                    ymin=normalize_coordinate(y_center - height / 2),
+                    xmax=normalize_coordinate(x_center + width / 2),
+                    ymax=normalize_coordinate(y_center + height / 2),
                     confidence=1.0,
                 )
             )
     return image_name, result
 
 
-def import_yolo(input_path: str, image_dir: str, classes_path: Optional[str] = None) -> List[Tuple[str, DetectionResult]]:
-    default_classes = os.path.join(input_path if os.path.isdir(input_path) else os.path.dirname(input_path), "classes.txt")
-    class_list = load_classes(classes_path or default_classes)
+def import_yolo(
+    input_path: str,
+    image_dir: str,
+    classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
+) -> List[Tuple[str, DetectionResult]]:
+    class_list = load_yolo_classes(input_path, classes_path, search_root)
     files = []
     if os.path.isdir(input_path):
         files = [
@@ -214,7 +525,7 @@ def import_vision_json(input_path: str) -> List[Tuple[str, DetectionResult]]:
 
     records = []
     for path in files:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -299,10 +610,11 @@ def _import_with_format(
     image_dir: str,
     source_format: str,
     classes_path: Optional[str] = None,
+    search_root: Optional[str] = None,
 ) -> List[Tuple[str, DetectionResult]]:
     fmt = source_format
     if fmt == "yolo":
-        return import_yolo(input_path, image_dir, classes_path=classes_path)
+        return import_yolo(input_path, image_dir, classes_path=classes_path, search_root=search_root)
     if fmt == "pascal_voc":
         return import_pascal_voc(input_path)
     if fmt == "coco":
@@ -317,18 +629,21 @@ def _import_with_format(
 
 
 def _looks_like_yolo(path: str, image_dir: str) -> bool:
-    with open(path, "r", encoding="utf-8-sig") as f:
+    with open(path, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
     if not lines:
-        return True
+        image_name = os.path.splitext(os.path.basename(path))[0] + ".jpg"
+        return os.path.exists(find_image_path(image_dir, image_name))
     for line in lines:
         parts = line.split()
         if len(parts) != 5:
             return False
         try:
             float(parts[0])
-            [float(value) for value in parts[1:]]
+            coordinates = [float(value) for value in parts[1:]]
         except ValueError:
+            return False
+        if not all(0.0 <= value <= 1.0 for value in coordinates):
             return False
     return True
 
@@ -347,7 +662,7 @@ def _detect_label_file(path: str, image_dir: str) -> Tuple[Optional[str], Option
         if ext == ".txt":
             return ("yolo", None) if _looks_like_yolo(path, image_dir) else (None, "unrecognized_txt_schema")
         if ext == ".jsonl":
-            with open(path, "r", encoding="utf-8-sig") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 first = next((line for line in f if line.strip()), None)
             if first is None:
                 return "vision_json", None
@@ -369,43 +684,19 @@ def _detect_label_file(path: str, image_dir: str) -> Tuple[Optional[str], Option
             if fieldnames & image_fields and box_fields.issubset(fieldnames):
                 return "csv", None
             return None, "unrecognized_csv_schema"
-        if ext in {".yaml", ".yml"}:
-            return None, _audit_yaml_config(path)
     except (OSError, ValueError, json.JSONDecodeError, ET.ParseError) as exc:
         return None, f"schema_read_failed:{exc}"
     return None, None
 
 
-def _audit_yaml_config(path: str) -> str:
-    text = open(path, "r", encoding="utf-8-sig").read()
-    if not re.search(r"(?m)^\s*names\s*:", text):
-        return "unrecognized_yaml_schema"
-
-    invalid_keys = []
-    for key in re.findall(r"(?m)^\s{2,}([^:\s]+)\s*:", text):
-        try:
-            if int(key) < 0:
-                invalid_keys.append(key)
-        except ValueError:
-            invalid_keys.append(key)
-    if invalid_keys:
-        return f"yaml_invalid_class_id:{','.join(invalid_keys[:5])}"
-
-    base_path = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("path:"):
-            base_path = stripped.split(":", 1)[1].strip().strip("'\"")
-            break
-    if base_path and not os.path.exists(base_path):
-        return f"yaml_path_missing:{base_path}"
-    return "yaml_config_not_label_source"
-
-
 def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelSource], Dict[str, Any]]:
     if not os.path.isdir(input_path):
         fmt = infer_label_format(input_path)
-        return [LabelSource(path=input_path, format=fmt)], {
+        return [LabelSource(
+            path=input_path,
+            format=fmt,
+            search_root=os.path.dirname(os.path.abspath(input_path)),
+        )], {
             "files_scanned": 1,
             "skipped_files": [],
         }
@@ -413,7 +704,7 @@ def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelS
     sources = []
     skipped = []
     files_scanned = 0
-    candidate_extensions = {".xml", ".txt", ".json", ".jsonl", ".csv", ".yaml", ".yml"}
+    candidate_extensions = {".xml", ".txt", ".json", ".jsonl", ".csv"}
     for root, _, names in os.walk(input_path):
         for name in sorted(names):
             path = os.path.join(root, name)
@@ -423,7 +714,7 @@ def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelS
                 continue
             fmt, reason = _detect_label_file(path, image_dir)
             if fmt:
-                sources.append(LabelSource(path=path, format=fmt))
+                sources.append(LabelSource(path=path, format=fmt, search_root=os.path.abspath(input_path)))
             elif reason:
                 skipped.append({"path": os.path.abspath(path), "reason": reason})
     sources.sort(key=lambda item: (item.format, item.path.lower()))
@@ -459,6 +750,11 @@ def _prefer_new(existing, existing_format: str, new, new_format: str) -> bool:
     return SOURCE_PRIORITY.get(new_format, 0) > SOURCE_PRIORITY.get(existing_format, 0)
 
 
+def _is_numeric_label(label: str) -> bool:
+    text = str(label).strip()
+    return text.isdigit()
+
+
 def _merge_spatial_items(
     target: list,
     target_sources: List[str],
@@ -469,17 +765,40 @@ def _merge_spatial_items(
     image_name: str,
     item_type: str,
     conflicts: List[Dict[str, Any]],
+    label_normalizations: List[Dict[str, Any]],
 ) -> int:
     duplicates = 0
     for item in incoming:
         item_values = value_getter(item)
         duplicate_index = None
+        normalized = False
         for index, existing in enumerate(target):
             overlap = _spatial_iou(value_getter(existing), item_values)
             if overlap < duplicate_iou:
                 continue
             if existing.label == item.label:
                 duplicate_index = index
+                break
+            existing_numeric = _is_numeric_label(existing.label)
+            incoming_numeric = _is_numeric_label(item.label)
+            if existing_numeric != incoming_numeric:
+                duplicates += 1
+                existing_format = target_sources[index]
+                chosen_label = item.label if existing_numeric else existing.label
+                numeric_label = existing.label if existing_numeric else item.label
+                if existing_numeric:
+                    target[index] = item.model_copy(deep=True)
+                    target_sources[index] = incoming_format
+                label_normalizations.append({
+                    "image": image_name,
+                    "type": item_type,
+                    "numeric_label": numeric_label,
+                    "canonical_label": chosen_label,
+                    "iou": round(overlap, 6),
+                    "existing_format": existing_format,
+                    "incoming_format": incoming_format,
+                })
+                normalized = True
                 break
             conflicts.append({
                 "image": image_name,
@@ -490,6 +809,8 @@ def _merge_spatial_items(
                 "existing_format": target_sources[index],
                 "incoming_format": incoming_format,
             })
+        if normalized:
+            continue
         if duplicate_index is None:
             target.append(item.model_copy(deep=True))
             target_sources.append(incoming_format)
@@ -507,6 +828,46 @@ def _canonical_image_key(image_name: str) -> str:
     return os.path.splitext(os.path.basename(normalized))[0].casefold()
 
 
+def _apply_inferred_numeric_label_mapping(
+    records: List[Tuple[str, DetectionResult]],
+    label_normalizations: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    candidates: Dict[str, set] = {}
+    for item in label_normalizations:
+        numeric_label = str(item.get("numeric_label", "")).strip()
+        canonical_label = str(item.get("canonical_label", "")).strip()
+        if numeric_label.isdigit() and canonical_label and not canonical_label.isdigit():
+            candidates.setdefault(numeric_label, set()).add(canonical_label)
+
+    inferred = {
+        numeric_label: next(iter(labels))
+        for numeric_label, labels in candidates.items()
+        if len(labels) == 1
+    }
+    if not inferred:
+        return []
+
+    propagated: List[Dict[str, Any]] = []
+    fields = ("boxes", "segments", "classifications", "poses", "tracks")
+    for image_name, result in records:
+        for field in fields:
+            for item in getattr(result, field):
+                label = getattr(item, "label", None)
+                if str(label) not in inferred:
+                    continue
+                numeric_label = str(label)
+                canonical_label = inferred[numeric_label]
+                item.label = canonical_label
+                propagated.append({
+                    "image": image_name,
+                    "type": f"{field}_global_numeric_label",
+                    "numeric_label": numeric_label,
+                    "canonical_label": canonical_label,
+                    "reason": "inferred_from_matching_named_label",
+                })
+    return propagated
+
+
 def merge_label_records(
     records: List[Tuple[str, DetectionResult, LabelSource]],
     duplicate_iou: float = 0.85,
@@ -514,6 +875,7 @@ def merge_label_records(
     grouped: Dict[str, Dict[str, Any]] = {}
     duplicates_removed = 0
     conflicts: List[Dict[str, Any]] = []
+    label_normalizations: List[Dict[str, Any]] = []
     identity_collisions = []
 
     for image_name, result, source in records:
@@ -548,6 +910,7 @@ def merge_label_records(
             image_name,
             "box_label_conflict",
             conflicts,
+            label_normalizations,
         )
         duplicates_removed += _merge_spatial_items(
             merged.segments,
@@ -559,6 +922,7 @@ def merge_label_records(
             image_name,
             "segment_label_conflict",
             conflicts,
+            label_normalizations,
         )
 
         existing_classes = {item.label: index for index, item in enumerate(merged.classifications)}
@@ -596,10 +960,14 @@ def merge_label_records(
         }
         output.append((entry["image_name"], result))
     output.sort(key=lambda item: item[0].casefold())
+    global_normalizations = _apply_inferred_numeric_label_mapping(output, label_normalizations)
+    label_normalizations.extend(global_normalizations)
     return output, {
         "duplicate_iou": duplicate_iou,
         "duplicates_removed": duplicates_removed,
         "conflicts": conflicts,
+        "label_normalizations": label_normalizations,
+        "global_label_normalizations": global_normalizations,
         "image_identity_collisions": identity_collisions,
     }
 
@@ -616,11 +984,13 @@ def import_labels_with_report(
         sources, discovery = discover_label_sources(input_path, image_dir)
     else:
         fmt = infer_label_format(input_path) if source_format == "auto" else source_format
-        sources = [LabelSource(path=input_path, format=fmt)]
+        search_root = input_path if os.path.isdir(input_path) else os.path.dirname(os.path.abspath(input_path))
+        sources = [LabelSource(path=input_path, format=fmt, search_root=os.path.abspath(search_root))]
 
     imported = []
     processed_sources = []
     failed_sources = []
+    class_sources = []
     for source in sources:
         try:
             source_records = _import_with_format(
@@ -628,12 +998,25 @@ def import_labels_with_report(
                 image_dir,
                 source.format,
                 classes_path=classes_path,
+                search_root=source.search_root,
             )
+            source_classes = _classes_for_source(source, classes_path)
+            metadata = _source_metadata(source, classes_path)
+            has_unmapped_yolo = (
+                source.format == "yolo"
+                and metadata.get("class_mapping", {}).get("status") == "missing"
+            )
+            if not source_classes and not has_unmapped_yolo:
+                for _, result in source_records:
+                    _append_unique(source_classes, _labels_from_result(result))
             processed_sources.append({
                 "path": os.path.abspath(source.path),
                 "format": source.format,
                 "records": len(source_records),
+                "classes": source_classes,
+                **metadata,
             })
+            class_sources.append((source.format, os.path.abspath(source.path), source_classes))
             imported.extend((image_name, result, source) for image_name, result in source_records)
         except Exception as exc:
             failed_sources.append({
@@ -643,6 +1026,14 @@ def import_labels_with_report(
             })
 
     merged, merge_report = merge_label_records(imported, duplicate_iou=duplicate_iou)
+    class_list: List[str] = []
+    for _, _, labels in sorted(
+        class_sources,
+        key=lambda item: (-CLASS_LIST_PRIORITY.get(item[0], 0), item[1].lower()),
+    ):
+        _append_unique(class_list, labels)
+    for _, result in merged:
+        _append_unique(class_list, _labels_from_result(result))
     format_counts = Counter(item["format"] for item in processed_sources)
     report = {
         "mode": "mixed_auto" if source_format == "auto" and os.path.isdir(input_path) else "single_format",
@@ -653,6 +1044,7 @@ def import_labels_with_report(
         "formats": dict(sorted(format_counts.items())),
         "records_before_merge": len(imported),
         "records_after_merge": len(merged),
+        "class_list": class_list,
         "processed_files": processed_sources,
         "failed_files": failed_sources,
         "skipped_files": discovery["skipped_files"],

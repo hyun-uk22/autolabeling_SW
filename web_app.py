@@ -1,10 +1,10 @@
 import html
 import json
-import os
 import uuid
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.core.user_settings import (
     ENV_FIELDS,
@@ -19,9 +19,7 @@ from src.core.workspace import (
     resolve_workspace_path,
     save_workspace,
 )
-from src.workflow import service as workflow_service
-from src.workflow.models import OperationPlan
-from src.workflow.runtime import WorkflowRuntime
+from src.workflow.service import execute_workflow_plan
 from src.workflow.conversation import (
     describe_plan,
     describe_result,
@@ -168,11 +166,13 @@ st.markdown(
 FORMAT_OPTIONS = ["yolo", "pascal_voc", "coco", "vision_json"]
 SOURCE_OPTIONS = ["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "generic_json"]
 TASK_OPTIONS = ["object_detection", "classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"]
+SOURCE_LABELS_DEFAULT = WORKSPACE_DEFAULTS.get("source_labels", WORKSPACE_DEFAULTS["labels"])
+GENERATED_LABELS_DEFAULT = WORKSPACE_DEFAULTS.get("generated_labels", WORKSPACE_DEFAULTS["labels"])
 
 
 def execute_plan(plan, auto_approve=False):
     with st.spinner("작업 실행 중"):
-        return workflow_service.execute_workflow_plan(
+        return execute_workflow_plan(
             plan,
             auto_approve=auto_approve,
             thread_id=f"streamlit-{uuid.uuid4()}",
@@ -201,6 +201,7 @@ def _download_report_files(output, report_index, key_prefix):
                 data=path.read_bytes(),
                 file_name=path.name,
                 key=f"{key_prefix}-download-{report_index}-{file_index}-{name}",
+                width="stretch",
             )
 
 
@@ -232,11 +233,25 @@ def render_workflow_report(result, key_prefix="report"):
                 "출력 이슈",
                 output.get("export_validation", {}).get("failed_records", 0),
             )
+            preflight = output.get("preflight", {})
+            if preflight.get("notices"):
+                st.markdown("**입력 데이터 확인사항**")
+                st.dataframe([
+                    {
+                        "심각도": notice.get("severity", ""),
+                        "변환 영향": notice.get("conversion_impact", ""),
+                        "항목": notice.get("code", ""),
+                        "대상 데이터": "\n".join(notice.get("files") or notice.get("examples") or []),
+                        "내용": notice.get("message", ""),
+                        "확인/조치": notice.get("user_action", ""),
+                    }
+                    for notice in preflight.get("notices", [])
+                ], width="stretch", hide_index=True)
         elif action == "evaluate":
             rows = output.get("rows", [])
             st.metric("평가 실행", len(rows))
             if rows:
-                st.dataframe(rows)
+                st.dataframe(rows, width="stretch")
 
         user_report = output.get("user_action_report", {})
         if user_report:
@@ -259,7 +274,7 @@ def render_workflow_report(result, key_prefix="report"):
                         "우선 조치": " / ".join(record.get("priority_actions", [])),
                     }
                     for record in detailed
-                ])
+                ], width="stretch", hide_index=True)
 
         insight = output.get("dataset_insight", {})
         distribution = insight.get("distribution", {})
@@ -272,7 +287,7 @@ def render_workflow_report(result, key_prefix="report"):
                     "비율(%)": round(values.get("percentage", 0.0), 2),
                 }
                 for label, values in distribution.items()
-            ])
+            ], width="stretch", hide_index=True)
             for suggestion in insight.get("suggestions", []):
                 st.warning(suggestion)
 
@@ -305,114 +320,22 @@ def run_plan(plan, auto_approve=False, result_key="workflow"):
         st.error(f"작업 실패: {exc}")
 
 
-def validation_issue_rows(validations):
-    rows = []
-    for record in validations:
-        issues = record.get("issues", [])
-        if issues:
-            input_paths = record.get("input_paths") or []
-            label_path = input_paths[0] if input_paths else ""
-            rows.append({
-                "데이터명": os.path.basename(label_path) if label_path else record.get("image", ""),
-                "기대 이미지": record.get("image", ""),
-                "이슈": ", ".join(issues),
-                "수정 안내": _precheck_fix_instruction(record),
-                "처리": "승인 시 제외 후 변환",
-            })
-    return rows
-
-
-def _precheck_fix_instruction(record):
-    issues = record.get("issues", [])
-    input_paths = record.get("input_paths") or []
-    label_path = input_paths[0] if input_paths else ""
-    image_name = record.get("image", "")
-    label_name = os.path.basename(label_path) if label_path else "해당 라벨 파일"
-    if any(str(issue).startswith("missing_image:") for issue in issues):
-        return (
-            f"라벨은 `{label_name}`인데 기대 이미지는 `{image_name}`입니다. "
-            "이미지 파일이 누락됐으면 복구하고, 라벨 파일명만 바꾼 경우 실제 이미지 파일명과 같은 이름으로 라벨명을 되돌리세요."
-        )
-    if "empty_result" in issues:
-        return "라벨 파일이 비어 있거나 유효 라벨이 없습니다. 라벨 행을 추가하거나 해당 샘플을 제외하세요."
-    if any("coordinate_out_of_range" in str(issue) for issue in issues):
-        return "좌표가 0~1 범위를 벗어났습니다. 픽셀 좌표라면 이미지 크기로 나눠 정규화하세요."
-    return "라벨 파일 구조, 이미지 파일명, 출력 포맷 호환성을 확인하세요."
-
-
-def run_conversion_export(operation_payload, records, validations, loaded, result_key="convert"):
-    runtime = WorkflowRuntime()
-    operation = OperationPlan.model_validate(operation_payload)
-    repaired = runtime.repair_conversion(records)
-    result = {
-        "status": "completed",
-        "operation_outputs": [
-            runtime.export_conversion(
-                operation,
-                repaired,
-                validations,
-                loaded["resolved_source_format"],
-                loaded["input_summary"],
-            )
-        ],
-        "errors": [],
-        "history_path": "",
-    }
-    if "manual_results" not in st.session_state:
-        st.session_state.manual_results = {}
-    st.session_state.manual_results[result_key] = result
-    st.session_state.pending_conversion = None
-    render_manual_result(result, result_key)
-
-
-def start_conversion_with_review(operation_payload):
-    try:
-        runtime = WorkflowRuntime()
-        operation = OperationPlan.model_validate(operation_payload)
-        loaded = runtime.load_conversion(operation, operation.source_format)
-        validations = runtime.validate_conversion(operation, loaded["records"])
-        issue_rows = validation_issue_rows(validations)
-        if issue_rows:
-            st.session_state.pending_conversion = {
-                "operation": operation_payload,
-                "records": loaded["records"],
-                "validations": validations,
-                "loaded": loaded,
-            }
-            st.warning("문제가 있는 데이터가 발견되었습니다. 아래 항목을 제외하고 변환할지 확인하세요.")
-            st.dataframe(issue_rows)
-            return
-        run_conversion_export(operation_payload, loaded["records"], validations, loaded)
-    except Exception as exc:
-        run_plan({
-            "request_summary": "Streamlit label conversion",
-            "operations": [operation_payload],
-        }, result_key="convert")
-
-
-def render_pending_conversion():
-    pending = st.session_state.get("pending_conversion")
-    if not pending:
+def render_preflight_preview(proposal):
+    preflight = (proposal or {}).get("preflight_preview") or {}
+    notices = preflight.get("notices") or []
+    if not notices:
         return
-    rows = validation_issue_rows(pending["validations"])
-    st.warning("문제가 있는 데이터가 있습니다. 해당 데이터를 제외하고 변환하시겠습니까?")
-    if rows:
-        st.dataframe(rows)
-    approve_col, cancel_col, _ = st.columns([1.4, 1, 4])
-    with approve_col:
-        approve = st.button("문제 데이터 제외 후 변환", type="primary")
-    with cancel_col:
-        cancel = st.button("취소")
-    if approve:
-        run_conversion_export(
-            pending["operation"],
-            pending["records"],
-            pending["validations"],
-            pending["loaded"],
-        )
-    if cancel:
-        st.session_state.pending_conversion = None
-        st.info("변환을 취소했습니다.")
+    st.markdown("**실행 전 입력 데이터 확인사항**")
+    st.dataframe([
+        {
+            "심각도": notice.get("severity", ""),
+            "변환 영향": notice.get("conversion_impact", ""),
+            "항목": notice.get("code", ""),
+            "대상 데이터": "\n".join(notice.get("files") or notice.get("examples") or []),
+            "확인/조치": notice.get("user_action", ""),
+        }
+        for notice in notices
+    ], width="stretch", hide_index=True)
 
 
 def parse_runs(value):
@@ -436,6 +359,12 @@ def render_conversation(workspace):
     st.markdown('<div class="panel-title">대화형 작업</div>', unsafe_allow_html=True)
     st.caption("원하는 데이터 작업을 자연어로 입력하세요. Workspace를 탐색한 뒤 실행 계획을 먼저 보여드립니다.")
 
+    chat_ui_version = "preflight-table-v2"
+    if st.session_state.get("chat_ui_version") != chat_ui_version:
+        st.session_state.chat_ui_version = chat_ui_version
+        st.session_state.chat_messages = []
+        st.session_state.pending_proposal = None
+
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = [{
             "role": "assistant",
@@ -452,8 +381,12 @@ def render_conversation(workspace):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    if st.session_state.last_chat_result:
+        st.info("최근 대화형 작업 결과는 `결과 리포트` 탭에서 확인하세요.")
+
     pending_proposal = st.session_state.pending_proposal
     if pending_proposal:
+        render_preflight_preview(pending_proposal)
         approve_column, cancel_column, _ = st.columns([1, 1, 4])
         with approve_column:
             execute_chat_plan = st.button("계획 실행", type="primary", use_container_width=True)
@@ -464,6 +397,7 @@ def render_conversation(workspace):
                 result = execute_plan(pending_proposal["plan"], auto_approve=True)
                 response = describe_result(result, workspace)
                 st.session_state.last_chat_result = result
+                st.session_state.open_result_report = True
             except Exception as exc:
                 response = f"작업 실행 중 오류가 발생했습니다: {exc}"
             st.session_state.chat_messages.append({"role": "assistant", "content": response})
@@ -484,27 +418,16 @@ def render_conversation(workspace):
             routed = handle_conversation(chat_request, workspace)
             if routed["kind"] == "plan":
                 proposal = routed["proposal"]
-                response = describe_plan(proposal, workspace)
+                chat_proposal = dict(proposal)
+                chat_proposal["preflight_preview"] = None
+                response = describe_plan(chat_proposal, workspace)
                 st.session_state.pending_proposal = proposal
             else:
                 response = routed["response"]
         except (OSError, ValueError) as exc:
             response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
         st.session_state.chat_messages.append({"role": "assistant", "content": response})
-        with st.chat_message("user"):
-            st.markdown(chat_request)
-        with st.chat_message("assistant"):
-            st.markdown(response)
-        if st.session_state.pending_proposal:
-            approve_column, cancel_column, _ = st.columns([1, 1, 4])
-            with approve_column:
-                st.button("계획 실행", type="primary", use_container_width=True, key="immediate-plan-execute")
-            with cancel_column:
-                st.button("취소", use_container_width=True, key="immediate-plan-cancel")
-
-    if st.session_state.last_chat_result:
-        render_workflow_report(st.session_state.last_chat_result, key_prefix="chat")
-
+        st.rerun()
 
 st.markdown(
     """
@@ -547,6 +470,7 @@ if "workspace" not in st.session_state:
         workspace_submit = st.form_submit_button(
             "Workspace 적용",
             type="primary",
+            icon=":material/folder_open:",
         )
     if workspace_submit:
         if not selected_workspace.strip():
@@ -559,14 +483,35 @@ if "workspace" not in st.session_state:
                 st.error(f"Workspace 생성 실패: {exc}")
     st.stop()
 
-workspace = st.session_state.workspace
+workspace = st.session_state.get("workspace")
+if not workspace:
+    st.rerun()
 st.markdown(f'<div class="workspace-path">{html.escape(workspace)}</div>', unsafe_allow_html=True)
-chat_tab, convert_tab, generate_tab, evaluate_tab, settings_tab = st.tabs(
-    ["대화형 작업", "형식 변환", "라벨 생성", "평가", "설정"]
+chat_tab, convert_tab, generate_tab, evaluate_tab, result_tab, settings_tab = st.tabs(
+    ["대화형 작업", "형식 변환", "라벨 생성", "평가", "결과 리포트", "설정"]
 )
+
+if st.session_state.pop("open_result_report", False):
+    components.html(
+        """
+        <script>
+        const labels = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
+        const target = labels.find((el) => el.textContent.includes('결과 리포트'));
+        if (target) target.click();
+        </script>
+        """,
+        height=0,
+    )
 
 with chat_tab:
     render_conversation(workspace)
+
+with result_tab:
+    st.markdown('<div class="panel-title">결과 리포트</div>', unsafe_allow_html=True)
+    if st.session_state.get("last_chat_result"):
+        render_workflow_report(st.session_state.last_chat_result, key_prefix="chat")
+    else:
+        st.info("아직 대화형 작업 결과가 없습니다.")
 
 with convert_tab:
     st.markdown('<div class="panel-title">라벨 형식 변환</div>', unsafe_allow_html=True)
@@ -574,7 +519,7 @@ with convert_tab:
         left, right = st.columns(2)
         with left:
             st.markdown('<div class="form-section">데이터 경로</div>', unsafe_allow_html=True)
-            input_path = st.text_input("입력 라벨 경로", value=WORKSPACE_DEFAULTS["labels"])
+            input_path = st.text_input("입력 라벨 경로", value=SOURCE_LABELS_DEFAULT)
             image_dir = st.text_input("이미지 디렉터리", value=WORKSPACE_DEFAULTS["images"])
             output_dir = st.text_input("출력 디렉터리", value=WORKSPACE_DEFAULTS["converted"])
         with right:
@@ -591,24 +536,25 @@ with convert_tab:
                 key="convert_insight_ratio",
             )
             strict = st.checkbox("검증 이슈가 있는 레코드 제외")
-        convert_submit = st.form_submit_button("변환 실행", type="primary")
+        convert_submit = st.form_submit_button("변환 실행", type="primary", icon=":material/sync_alt:")
     if convert_submit:
         if not input_path or not image_dir or not output_dir or not target_formats:
             st.error("입력, 이미지, 출력 경로와 출력 포맷을 모두 지정하세요.")
         else:
-            start_conversion_with_review({
-                "action": "convert",
-                "input_path": resolve_workspace_path(workspace, input_path),
-                "img_dir": resolve_workspace_path(workspace, image_dir),
-                "out_dir": resolve_workspace_path(workspace, output_dir),
-                "source_format": source_format,
-                "formats": target_formats,
-                "duplicate_iou": duplicate_iou,
-                "insight_imbalance_ratio": convert_insight_ratio,
-                "strict": strict,
-            })
-    elif st.session_state.get("pending_conversion"):
-        render_pending_conversion()
+            run_plan({
+                "request_summary": "Streamlit label conversion",
+                "operations": [{
+                    "action": "convert",
+                    "input_path": resolve_workspace_path(workspace, input_path),
+                    "img_dir": resolve_workspace_path(workspace, image_dir),
+                    "out_dir": resolve_workspace_path(workspace, output_dir),
+                    "source_format": source_format,
+                    "formats": target_formats,
+                    "duplicate_iou": duplicate_iou,
+                    "insight_imbalance_ratio": convert_insight_ratio,
+                    "strict": strict,
+                }],
+            }, result_key="convert")
     elif st.session_state.get("manual_results", {}).get("convert"):
         render_manual_result(st.session_state.manual_results["convert"], "convert")
 
@@ -619,9 +565,10 @@ with generate_tab:
         with left:
             st.markdown('<div class="form-section">데이터 경로</div>', unsafe_allow_html=True)
             generation_images = st.text_input("이미지 디렉터리", value=WORKSPACE_DEFAULTS["images"], key="generation_images")
-            generation_output = st.text_input("라벨 출력", value=WORKSPACE_DEFAULTS["labels"])
+            generation_output = st.text_input("라벨 출력", value=GENERATED_LABELS_DEFAULT)
             visualization_output = st.text_input("시각화 출력", value=WORKSPACE_DEFAULTS["visualized"])
             plugin_config = st.text_input("Plugin 설정 파일", value=WORKSPACE_DEFAULTS["plugin_config"])
+            generation_classes = st.text_input("클래스 매핑 파일", value="", placeholder="data.yaml 또는 classes.txt")
         with right:
             st.markdown('<div class="form-section">생성 규칙</div>', unsafe_allow_html=True)
             task_type = st.selectbox("태스크", TASK_OPTIONS)
@@ -642,7 +589,7 @@ with generate_tab:
             placeholder="이미지에서 눈에 띄는 모든 객체를 탐지하고 분류해 주세요.",
         )
         approve_expensive = st.checkbox("고비용 모델 API 호출 승인")
-        generate_submit = st.form_submit_button("라벨 생성 실행", type="primary")
+        generate_submit = st.form_submit_button("라벨 생성 실행", type="primary", icon=":material/auto_awesome:")
     if generate_submit:
         if not generation_images or not generation_output or not visualization_output or not generation_formats:
             st.error("이미지, 라벨 출력, 시각화 출력 경로와 출력 포맷을 모두 지정하세요.")
@@ -664,6 +611,8 @@ with generate_tab:
                     "insight_imbalance_ratio": generation_insight_ratio,
                     "inference_count": int(inference_count),
                     "prompt": prompt,
+                    "generation_strategy": "specialist_first",
+                    "classes_path": resolve_workspace_path(workspace, generation_classes) if generation_classes else None,
                     "plugin_config": resolve_workspace_path(workspace, plugin_config) if plugin_config else None,
                     "require_approval": True,
                 }],
@@ -680,7 +629,7 @@ with evaluate_tab:
             "실험 경로",
             placeholder="baseline=D:/runs/baseline\ncascade=D:/runs/cascade",
         )
-        evaluate_submit = st.form_submit_button("평가 실행", type="primary")
+        evaluate_submit = st.form_submit_button("평가 실행", type="primary", icon=":material/analytics:")
     if evaluate_submit:
         try:
             runs = parse_runs(run_lines)
@@ -739,7 +688,7 @@ with settings_tab:
                         type="password" if key in SECRET_FIELDS else "default",
                         key=f"setting_{key}",
                     )
-        settings_submit = st.form_submit_button("설정 저장", type="primary")
+        settings_submit = st.form_submit_button("설정 저장", type="primary", icon=":material/save:")
     if settings_submit:
         if not workspace_value.strip():
             st.error("Workspace 경로를 입력하세요.")
