@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -47,8 +48,38 @@ class WorkflowRuntime:
 
     @staticmethod
     def analyze_dataset(operation: OperationPlan, results: List[DetectionResult]) -> Dict[str, Any]:
-        agent = DatasetInsightAgent(operation.insight_imbalance_ratio)
-        return agent.analyze(results)
+        labels = []
+        for result in results:
+            labels.extend(item.label for item in result.classifications)
+            labels.extend(item.label for item in result.boxes)
+            labels.extend(item.label for item in result.segments)
+            labels.extend(item.label for item in result.poses)
+            labels.extend("text" for item in result.texts)
+            labels.extend(item.label for item in result.tracks)
+        counts = Counter(labels)
+        total = sum(counts.values())
+        distribution = {
+            label: {
+                "count": count,
+                "percentage": (count / total * 100.0) if total else 0.0,
+            }
+            for label, count in sorted(counts.items())
+        }
+        suggestions = []
+        if len(counts) > 1:
+            max_label, max_count = counts.most_common(1)[0]
+            min_label, min_count = min(counts.items(), key=lambda item: item[1])
+            ratio = max_count / min_count if min_count else float("inf")
+            if ratio >= operation.insight_imbalance_ratio:
+                suggestions.append(
+                    f"'{min_label}' 클래스가 '{max_label}' 대비 부족합니다. "
+                    "희소 클래스 중심 증강 또는 추가 수집을 권장합니다."
+                )
+        return {
+            "total_labels": total,
+            "distribution": distribution,
+            "suggestions": suggestions,
+        }
 
     def prepare_generation(self, operation: OperationPlan) -> Dict[str, Any]:
         os.makedirs(operation.img_dir, exist_ok=True)
@@ -375,6 +406,8 @@ class WorkflowRuntime:
         converted = 0
         export_records = []
         exported_results = []
+        skipped_validations = self._skipped_file_validations(input_summary or {})
+        all_validations = [*validations, *skipped_validations]
         for record in records:
             issues = validation_map.get(record["image"], [])
             blocking = any(
@@ -401,10 +434,10 @@ class WorkflowRuntime:
         artifacts = writer.finalize()
         artifact_issues = auditor.audit_artifacts(artifacts)
         user_action_report = build_user_action_report(
-            validations,
+            all_validations,
             export_records,
             artifact_issues,
-            total_records=len(records),
+            total_records=len(records) + len(skipped_validations),
         )
         report = {
             "report_version": "2.0",
@@ -415,14 +448,14 @@ class WorkflowRuntime:
             "target_formats": writer.formats,
             "records_read": len(records),
             "records_converted": converted,
-            "validation": summarize_validation(validations),
+            "validation": summarize_validation(all_validations),
             "export_validation": {
                 "failed_records": sum(bool(record["issues"]) for record in export_records),
                 "artifact_issues": artifact_issues,
             },
             "user_action_report": user_action_report,
             "dataset_insight": self.analyze_dataset(operation, exported_results),
-            "records": validations,
+            "records": all_validations,
             "exports": export_records,
             "artifacts": artifacts,
         }
@@ -435,6 +468,29 @@ class WorkflowRuntime:
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         return report
+
+    @staticmethod
+    def _skipped_file_validations(input_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+        records = []
+        for item in input_summary.get("skipped_files", []):
+            path = item.get("path", "")
+            reason = item.get("reason", "skipped_input_file")
+            records.append({
+                "image": os.path.basename(path) if path else "skipped_file",
+                "image_path": "",
+                "input_paths": [path] if path else [],
+                "issues": [reason],
+            })
+        for item in input_summary.get("failed_files", []):
+            path = item.get("path", "")
+            error = item.get("error", "schema_read_failed")
+            records.append({
+                "image": os.path.basename(path) if path else "failed_file",
+                "image_path": "",
+                "input_paths": [path] if path else [],
+                "issues": [f"schema_read_failed:{error}"],
+            })
+        return records
 
     def conversion_schema_candidates(self, operation: OperationPlan) -> List[str]:
         return schema_candidates(operation.input_path, operation.source_format)

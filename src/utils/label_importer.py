@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
@@ -319,8 +320,7 @@ def _looks_like_yolo(path: str, image_dir: str) -> bool:
     with open(path, "r", encoding="utf-8-sig") as f:
         lines = [line.strip() for line in f if line.strip()]
     if not lines:
-        image_name = os.path.splitext(os.path.basename(path))[0] + ".jpg"
-        return os.path.exists(find_image_path(image_dir, image_name))
+        return True
     for line in lines:
         parts = line.split()
         if len(parts) != 5:
@@ -369,9 +369,37 @@ def _detect_label_file(path: str, image_dir: str) -> Tuple[Optional[str], Option
             if fieldnames & image_fields and box_fields.issubset(fieldnames):
                 return "csv", None
             return None, "unrecognized_csv_schema"
+        if ext in {".yaml", ".yml"}:
+            return None, _audit_yaml_config(path)
     except (OSError, ValueError, json.JSONDecodeError, ET.ParseError) as exc:
         return None, f"schema_read_failed:{exc}"
     return None, None
+
+
+def _audit_yaml_config(path: str) -> str:
+    text = open(path, "r", encoding="utf-8-sig").read()
+    if not re.search(r"(?m)^\s*names\s*:", text):
+        return "unrecognized_yaml_schema"
+
+    invalid_keys = []
+    for key in re.findall(r"(?m)^\s{2,}([^:\s]+)\s*:", text):
+        try:
+            if int(key) < 0:
+                invalid_keys.append(key)
+        except ValueError:
+            invalid_keys.append(key)
+    if invalid_keys:
+        return f"yaml_invalid_class_id:{','.join(invalid_keys[:5])}"
+
+    base_path = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("path:"):
+            base_path = stripped.split(":", 1)[1].strip().strip("'\"")
+            break
+    if base_path and not os.path.exists(base_path):
+        return f"yaml_path_missing:{base_path}"
+    return "yaml_config_not_label_source"
 
 
 def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelSource], Dict[str, Any]]:
@@ -385,7 +413,7 @@ def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelS
     sources = []
     skipped = []
     files_scanned = 0
-    candidate_extensions = {".xml", ".txt", ".json", ".jsonl", ".csv"}
+    candidate_extensions = {".xml", ".txt", ".json", ".jsonl", ".csv", ".yaml", ".yml"}
     for root, _, names in os.walk(input_path):
         for name in sorted(names):
             path = os.path.join(root, name)

@@ -1,4 +1,5 @@
 import re
+import os
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -38,6 +39,13 @@ ISSUE_CATALOG = {
     "missing_category_id": ("high", "output_format", "COCO category_id가 누락되었습니다", "annotation의 category_id를 확인하세요."),
     "no_label_records": ("critical", "output_format", "Vision JSON에 유효한 라벨이 없습니다", "입력 결과와 task를 확인하세요."),
     "no_labels": ("critical", "output_format", "클래스 목록이 비어 있습니다", "생성된 객체의 클래스 이름을 확인하세요."),
+    "unrecognized_txt_schema": ("medium", "input_data", "라벨로 해석할 수 없는 txt 파일입니다", "라벨 파일이 아니면 제외하고, YOLO 라벨이면 class_id x_center y_center width height 형식으로 수정하세요."),
+    "unrecognized_json_schema": ("medium", "input_data", "라벨로 해석할 수 없는 JSON 파일입니다", "라벨 파일이 아니면 입력 폴더에서 제외하고, COCO JSON이면 images/annotations/categories 구조를 확인하세요."),
+    "unrecognized_yaml_schema": ("medium", "input_data", "지원하지 않는 YAML 구조입니다", "YAML이 데이터셋 설정 파일인지 확인하고 라벨 입력 폴더와 분리하세요."),
+    "yaml_config_not_label_source": ("medium", "input_data", "YAML 설정 파일은 라벨 변환 대상이 아닙니다", "dataset.yaml은 설정 파일로 보관하고 라벨 입력 폴더에서는 제외하세요."),
+    "yaml_invalid_class_id": ("high", "input_data", "YAML 클래스 ID가 올바르지 않습니다", "dataset.yaml의 names 키가 0 이상의 정수인지 확인하세요."),
+    "yaml_path_missing": ("high", "file_system", "YAML 내부 데이터 경로를 찾을 수 없습니다", "dataset.yaml의 path/val 경로가 현재 PC의 실제 데이터 경로와 일치하는지 확인하세요."),
+    "schema_read_failed": ("high", "input_data", "파일 구조를 읽는 중 오류가 발생했습니다", "파일 인코딩, JSON/XML/YAML 문법, 깨진 문자를 확인하세요."),
 }
 
 
@@ -67,20 +75,32 @@ def categorize_issue(issue: str) -> Dict[str, Any]:
 
 def _path_from_issue(issue: str) -> Optional[str]:
     text = str(issue)
-    parts = text.split(":")
-    if len(parts) >= 3:
-        return ":".join(parts[2:])
-    if len(parts) == 2 and issue_code(text) in {"missing_image", "missing_output_file", "empty_output_file"}:
-        return parts[1]
+    code = issue_code(text)
+    prefixes = {
+        "missing_image",
+        "missing_output_file",
+        "empty_output_file",
+        "output_parse_failed",
+        "no_label_rows",
+        "coordinate_out_of_range",
+        "invalid_box_size",
+        "yaml_path_missing",
+        "yaml_invalid_class_id",
+        "schema_read_failed",
+    }
+    if code in prefixes and text.startswith(f"{code}:"):
+        return text[len(code) + 1:]
     return None
 
 
 def _affected_path(code: str, issue: str, metadata: Dict[str, Any]) -> str:
+    input_paths = metadata.get("input_paths") or []
+    output_paths = metadata.get("output_paths") or {}
+    if code.startswith("yaml_") or code.startswith("unrecognized_") or code == "schema_read_failed":
+        return input_paths[0] if input_paths else metadata.get("image_path", "")
     explicit = _path_from_issue(issue)
     if explicit:
         return explicit
-    input_paths = metadata.get("input_paths") or []
-    output_paths = metadata.get("output_paths") or {}
     if code == "missing_image":
         return metadata.get("image_path", "")
     if code in {"empty_output_file", "missing_output_file", "missing_output_path"}:
@@ -91,15 +111,26 @@ def _affected_path(code: str, issue: str, metadata: Dict[str, Any]) -> str:
 
 
 def _fix_instruction(code: str, path: str) -> str:
-    target = f" `{path}`" if path else ""
+    target_name = os.path.basename(path) if path else ""
+    target = f" `{target_name}`" if target_name else ""
     instructions = {
         "empty_result": f"라벨 파일{target}에 객체 라벨 행 또는 annotation을 추가하거나, 해당 샘플을 제외하고 다시 변환하세요.",
-        "missing_image": f"이미지 파일{target}을 복원하거나 라벨 파일의 이미지 이름이 실제 파일명과 일치하도록 수정하세요.",
+        "missing_image": (
+            f"이미지 파일{target}을 찾을 수 없습니다. 이미지가 실제로 없으면 복원하고, "
+            "라벨 파일명만 바꾼 경우 라벨 파일명을 실제 이미지 파일명과 같은 stem으로 되돌리세요. "
+            "Pascal VOC/COCO/JSON 계열이면 라벨 내부 filename/file_name도 실제 이미지명과 일치해야 합니다."
+        ),
         "coordinate_out_of_range": f"라벨 파일{target}의 좌표를 0~1 정규화 YOLO 좌표로 수정하세요. 픽셀 좌표라면 이미지 width/height로 나눠 정규화하세요.",
         "invalid_box_order": f"라벨 파일{target}에서 xmin < xmax, ymin < ymax가 되도록 박스 좌표 순서를 수정하세요.",
         "empty_output_file": f"출력 파일{target}이 비어 있습니다. task와 출력 포맷 호환성을 확인하고, segmentation/pose/OCR이면 Vision JSON 또는 COCO 등 표현 가능한 포맷으로 다시 변환하세요.",
         "no_label_rows": f"YOLO 출력 파일{target}에 class_id x_center y_center width height 행이 생기도록 bounding box 라벨을 추가하세요.",
         "missing_output_file": f"출력 파일{target}이 생성되지 않았습니다. 출력 디렉터리 권한과 경로를 확인한 뒤 다시 실행하세요.",
+        "unrecognized_txt_schema": f"txt 파일{target}이 라벨 형식이 아닙니다. 라벨 파일이 아니면 입력 폴더에서 제외하고, YOLO 라벨이면 `class_id x_center y_center width height` 형식으로 수정하세요.",
+        "unrecognized_json_schema": f"JSON 파일{target}이 라벨 형식이 아닙니다. 이전 결과 리포트 파일이면 입력 폴더에서 제외하세요.",
+        "yaml_config_not_label_source": f"YAML 파일{target}은 라벨 변환 대상이 아닙니다. dataset 설정 파일로만 사용하고 라벨 입력 폴더에서는 제외하세요.",
+        "yaml_invalid_class_id": f"YAML 파일{target}의 클래스 번호를 0 이상의 정수로 수정하세요.",
+        "yaml_path_missing": f"YAML 파일{target}의 path/val 경로가 현재 PC에 존재하지 않습니다. 실제 이미지/라벨 폴더 경로로 수정하세요.",
+        "schema_read_failed": f"파일{target}의 문법 또는 인코딩을 확인하세요. 깨진 JSON/XML/YAML이면 수정하거나 입력에서 제외하세요.",
     }
     return instructions.get(code, f"파일{target}의 원본 이슈를 확인하고 라벨 구조 또는 출력 포맷 설정을 수정하세요.")
 
@@ -124,7 +155,6 @@ def _record_report(image: str, issues: Iterable[str], metadata: Optional[Dict[st
     priority = [
         item["fix_instruction"]
         for item in details
-        if item["severity"] in {"critical", "high"}
     ]
     return {
         "image": image,

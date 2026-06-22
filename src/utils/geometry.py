@@ -127,3 +127,13 @@ def get_consistency_score(detections: List[DetectionResult]) -> float:
             consistencies.append(score)
             
     return np.mean(consistencies) if consistencies else 0.0
+
+
+def consistency_metric_name(task_type: str) -> str:
+    if task_type in {"object_detection", "segmentation", "tracking"}:
+        return "pairwise_iou_consistency"
+    if task_type == "classification":
+        return "label_jaccard_consistency"
+    if task_type in {"pose_estimation", "ocr"}:
+        return "semantic_label_consistency"
+    return "mixed_consistency"

@@ -27,11 +27,13 @@ class OperationPlan(BaseModel):
     eval_iou: float = 0.5
     inference_count: int = 3
     draft_temperature: float = 0.7
+    duplicate_iou: float = 0.85
     low_model: Optional[str] = None
     high_model: Optional[str] = None
     strict: bool = False
     require_approval: bool = True
     max_retries: int = 2
+    insight_imbalance_ratio: float = 3.0
 
     @field_validator("formats", mode="before")
     @classmethod

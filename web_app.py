@@ -1,5 +1,6 @@
 import html
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -310,14 +311,33 @@ def validation_issue_rows(validations):
         issues = record.get("issues", [])
         if issues:
             input_paths = record.get("input_paths") or []
+            label_path = input_paths[0] if input_paths else ""
             rows.append({
-                "파일": record.get("image", ""),
-                "이미지 경로": record.get("image_path", ""),
-                "라벨 경로": input_paths[0] if input_paths else "",
+                "데이터명": os.path.basename(label_path) if label_path else record.get("image", ""),
+                "기대 이미지": record.get("image", ""),
                 "이슈": ", ".join(issues),
+                "수정 안내": _precheck_fix_instruction(record),
                 "처리": "승인 시 제외 후 변환",
             })
     return rows
+
+
+def _precheck_fix_instruction(record):
+    issues = record.get("issues", [])
+    input_paths = record.get("input_paths") or []
+    label_path = input_paths[0] if input_paths else ""
+    image_name = record.get("image", "")
+    label_name = os.path.basename(label_path) if label_path else "해당 라벨 파일"
+    if any(str(issue).startswith("missing_image:") for issue in issues):
+        return (
+            f"라벨은 `{label_name}`인데 기대 이미지는 `{image_name}`입니다. "
+            "이미지 파일이 누락됐으면 복구하고, 라벨 파일명만 바꾼 경우 실제 이미지 파일명과 같은 이름으로 라벨명을 되돌리세요."
+        )
+    if "empty_result" in issues:
+        return "라벨 파일이 비어 있거나 유효 라벨이 없습니다. 라벨 행을 추가하거나 해당 샘플을 제외하세요."
+    if any("coordinate_out_of_range" in str(issue) for issue in issues):
+        return "좌표가 0~1 범위를 벗어났습니다. 픽셀 좌표라면 이미지 크기로 나눠 정규화하세요."
+    return "라벨 파일 구조, 이미지 파일명, 출력 포맷 호환성을 확인하세요."
 
 
 def run_conversion_export(operation_payload, records, validations, loaded, result_key="convert"):
