@@ -7,6 +7,32 @@ from pathlib import Path
 import streamlit as st
 from PIL import Image
 
+
+def patch_streamlit_drawable_canvas_image_url():
+    try:
+        import streamlit.elements.image as st_image
+        from streamlit.elements.lib import image_utils
+        from streamlit.elements.lib.layout_utils import LayoutConfig
+    except Exception:
+        return
+    if hasattr(st_image, "image_to_url"):
+        return
+
+    def image_to_url(image, width, clamp, channels, output_format, image_id):
+        return image_utils.image_to_url(
+            image,
+            LayoutConfig(width=width),
+            clamp,
+            channels,
+            output_format,
+            image_id,
+        )
+
+    st_image.image_to_url = image_to_url
+
+
+patch_streamlit_drawable_canvas_image_url()
+
 try:
     from streamlit_drawable_canvas import st_canvas
 except Exception:  # pragma: no cover - optional Streamlit component
@@ -48,6 +74,7 @@ from src.workflow.conversation import (
 )
 from src.workflow.conversation_router import handle_conversation
 from src.workflow.plan_patcher import revise_pending_proposal
+from src.ui.polygon_editor import polygon_vertex_editor
 
 
 st.set_page_config(page_title="AutoLabel", page_icon=":material/dataset:", layout="wide")
@@ -1119,7 +1146,7 @@ def polygon_canvas_object(segment, width, height):
 def canvas_objects_from_result(result, task_type, width, height):
     result = DetectionResult.model_validate(result)
     objects = []
-    if task_type in {"object_detection", "segmentation"}:
+    if task_type == "object_detection" or (task_type == "segmentation" and not result.segments):
         objects.extend(
             rect_canvas_object(box.label, box.xmin, box.ymin, box.xmax, box.ymax, width, height, extra={"confidence": box.confidence})
             for box in result.boxes
@@ -1155,11 +1182,127 @@ def object_polygon_points(obj, width, height):
     scale_x = to_float(obj.get("scaleX"), 1.0)
     scale_y = to_float(obj.get("scaleY"), 1.0)
     points = obj.get("points") or []
+    if not points and obj.get("path"):
+        points = []
+        for command in obj.get("path") or []:
+            if not isinstance(command, (list, tuple)) or len(command) < 3:
+                continue
+            command_type = str(command[0]).upper()
+            if command_type not in {"M", "L"}:
+                continue
+            points.append({"x": command[1], "y": command[2], "_absolute": True})
     result = []
     for point in points:
-        x = (left + to_float(point.get("x")) * scale_x) / max(width, 1)
-        y = (top + to_float(point.get("y")) * scale_y) / max(height, 1)
+        point_x = to_float(point.get("x"))
+        point_y = to_float(point.get("y"))
+        if point.get("_absolute"):
+            x = point_x / max(width, 1)
+            y = point_y / max(height, 1)
+        elif 0 <= point_x <= 1 and 0 <= point_y <= 1:
+            x = point_x
+            y = point_y
+        else:
+            x = (left + point_x * scale_x) / max(width, 1)
+            y = (top + point_y * scale_y) / max(height, 1)
         result.append(Point(x=clamp_unit(x), y=clamp_unit(y)))
+    return result
+
+
+def canvas_point_coordinate(obj, width, height):
+    obj_type = str(obj.get("type", "")).lower()
+    if obj_type not in {"circle", "point"}:
+        return None
+    left = to_float(obj.get("left"))
+    top = to_float(obj.get("top"))
+    radius = to_float(obj.get("radius"), 0.0)
+    scale_x = to_float(obj.get("scaleX"), 1.0)
+    scale_y = to_float(obj.get("scaleY"), 1.0)
+    x = (left + radius * scale_x) / max(width, 1)
+    y = (top + radius * scale_y) / max(height, 1)
+    return Point(x=clamp_unit(x), y=clamp_unit(y))
+
+
+def last_canvas_point(objects, width, height):
+    for obj in reversed(objects or []):
+        point = canvas_point_coordinate(obj, width, height)
+        if point is not None:
+            return point
+    return None
+
+
+def result_with_moved_segment_point(base_result, segment_index, point_index, point):
+    result = DetectionResult.model_validate(base_result).model_copy(deep=True)
+    if segment_index < 0 or segment_index >= len(result.segments):
+        return result
+    segment = result.segments[segment_index]
+    if point_index < 0 or point_index >= len(segment.polygon):
+        return result
+    segment.polygon[point_index] = point
+    return result
+
+
+def segments_for_vertex_editor(result):
+    result = DetectionResult.model_validate(result)
+    return [
+        {
+            "label": segment.label,
+            "confidence": segment.confidence,
+            "polygon": [point.model_dump() for point in segment.polygon],
+        }
+        for segment in result.segments
+    ]
+
+
+def boxes_for_vertex_editor(result):
+    result = DetectionResult.model_validate(result)
+    return [
+        {
+            "label": box.label,
+            "confidence": box.confidence,
+            "xmin": box.xmin,
+            "ymin": box.ymin,
+            "xmax": box.xmax,
+            "ymax": box.ymax,
+        }
+        for box in result.boxes
+    ]
+
+
+def result_with_vertex_editor_payload(base_result, segment_payload, box_payload):
+    result = DetectionResult.model_validate(base_result).model_copy(deep=True)
+    updated_segments = []
+    for item in segment_payload or []:
+        label = str(item.get("label") or "object").strip()
+        points = [
+            Point(x=clamp_unit(point.get("x")), y=clamp_unit(point.get("y")))
+            for point in item.get("polygon", [])
+            if isinstance(point, dict)
+        ]
+        if len(points) >= 3:
+            updated_segments.append(PolygonSegment(
+                label=label,
+                polygon=points,
+                confidence=clamp_unit(item.get("confidence", 1.0)),
+            ))
+    result.segments = updated_segments
+    updated_boxes = []
+    for item in box_payload or []:
+        label = str(item.get("label") or "object").strip()
+        xmin = clamp_unit(item.get("xmin"))
+        ymin = clamp_unit(item.get("ymin"))
+        xmax = clamp_unit(item.get("xmax"))
+        ymax = clamp_unit(item.get("ymax"))
+        if xmin >= xmax or ymin >= ymax:
+            continue
+        updated_boxes.append(BoundingBox(
+            label=label,
+            xmin=xmin,
+            ymin=ymin,
+            xmax=xmax,
+            ymax=ymax,
+            confidence=clamp_unit(item.get("confidence", 1.0)),
+        ))
+    result.boxes = updated_boxes
     return result
 
 
@@ -1203,6 +1346,24 @@ def result_with_canvas_objects(base_result, task_type, objects, default_label, d
             if len(points) >= 3:
                 result.segments.append(PolygonSegment(label=label, polygon=points, confidence=confidence))
     return result
+
+
+def result_with_new_canvas_polygons(base_result, objects, default_label, width, height):
+    result = DetectionResult.model_validate(base_result).model_copy(deep=True)
+    polygon_objects = [
+        obj for obj in objects or []
+        if str(obj.get("type", "")).lower() in {"polygon", "path"}
+    ]
+    added = 0
+    for obj in polygon_objects:
+        points = object_polygon_points(obj, width, height)
+        if len(points) < 3:
+            continue
+        label = str(obj.get("label") or default_label or "object").strip()
+        confidence = clamp_unit(obj.get("confidence", 1.0))
+        result.segments.append(PolygonSegment(label=label, polygon=points, confidence=confidence))
+        added += 1
+    return result, added
 
 
 def render_label_editor_tab(workspace):
@@ -1331,7 +1492,98 @@ def render_label_editor_tab(workspace):
     with preview_col:
         st.markdown("**이미지 / 마우스 편집**")
         if image_exists:
-            if st_canvas:
+            if editor_task == "segmentation":
+                original_width, original_height, canvas_width, canvas_height = fit_canvas_size(image_path)
+                st.caption("기본 editor에서는 polygon vertex와 bbox를 편집합니다. 새 polygon은 이전 Canvas 생성 방식으로 일시 전환해 만들 수 있습니다.")
+                undo_key = f"polygon_vertex_editor_undo_{selected_image}"
+                polygon_create_key = f"polygon_create_mode_{safe_state_key(selected_image)}"
+                editor_version_key = f"polygon_vertex_editor_version_{safe_state_key(selected_image)}"
+                undo_stack = st.session_state.get(undo_key, [])
+                undo_col, create_col, info_col = st.columns([1, 1, 3])
+                if undo_col.button("되돌리기", disabled=not undo_stack, key=f"undo_polygon_vertex_{safe_state_key(selected_image)}"):
+                    previous = undo_stack.pop()
+                    record["result"] = previous
+                    records[record_index] = record
+                    st.session_state.editor_records = records
+                    st.session_state[undo_key] = undo_stack
+                    st.rerun()
+                if create_col.button("Polygon 생성", key=f"open_polygon_create_{safe_state_key(selected_image)}"):
+                    st.session_state[polygon_create_key] = True
+                    st.session_state[editor_version_key] = st.session_state.get(editor_version_key, 0) + 1
+                    st.rerun()
+                info_col.caption("되돌리기는 vertex 이동, polygon/bbox 생성 직전 상태로 복원합니다.")
+                if st.session_state.get(polygon_create_key):
+                    st.info("이전 Canvas polygon 생성 방식입니다. polygon을 그린 뒤 아래 적용 버튼을 누르면 통합 editor로 돌아갑니다.")
+                    cancel_col, apply_col = st.columns(2)
+                    if cancel_col.button("생성 취소", key=f"cancel_polygon_create_{safe_state_key(selected_image)}"):
+                        st.session_state[polygon_create_key] = False
+                        st.rerun()
+                    if not st_canvas:
+                        st.warning("이전 polygon 생성 방식을 사용하려면 `streamlit-drawable-canvas`가 필요합니다.")
+                    else:
+                        canvas_label = st.text_input("새 Polygon 라벨", value="object", key=f"polygon_canvas_label_{safe_state_key(selected_image)}")
+                        st.caption("polygon을 모두 찍은 뒤 더블클릭으로 마무리하거나 Canvas 상단의 전송 버튼을 누른 다음 `Polygon 생성 적용`을 누르세요.")
+                        with Image.open(image_path) as bg_image:
+                            bg_image = bg_image.convert("RGB").resize((canvas_width, canvas_height))
+                            canvas_result = st_canvas(
+                                fill_color="rgba(37, 99, 235, 0.15)",
+                                stroke_width=2,
+                                stroke_color="#2563eb",
+                                background_image=bg_image,
+                                update_streamlit=True,
+                                height=canvas_height,
+                                width=canvas_width,
+                                drawing_mode="polygon",
+                                initial_drawing={"version": "4.4.0", "objects": []},
+                                key=f"polygon_create_canvas_{selected_image}_{st.session_state.get(editor_version_key, 0)}",
+                            )
+                        if apply_col.button("Polygon 생성 적용", key=f"apply_polygon_create_{safe_state_key(selected_image)}"):
+                            objects = []
+                            if canvas_result and canvas_result.json_data:
+                                objects = canvas_result.json_data.get("objects", [])
+                            updated, added_count = result_with_new_canvas_polygons(
+                                result,
+                                objects,
+                                canvas_label,
+                                canvas_width,
+                                canvas_height,
+                            )
+                            if added_count < 1:
+                                st.warning("생성된 polygon을 찾지 못했습니다. Canvas에서 polygon을 그린 뒤 다시 적용하세요.")
+                                st.stop()
+                            st.session_state.setdefault(undo_key, []).append(result.model_dump())
+                            record["result"] = updated.model_dump()
+                            records[record_index] = record
+                            st.session_state.editor_records = records
+                            st.session_state[polygon_create_key] = False
+                            st.session_state[editor_version_key] = st.session_state.get(editor_version_key, 0) + 1
+                            st.success("Polygon을 추가하고 통합 editor로 돌아갑니다.")
+                            st.rerun()
+                else:
+                    editor_value = polygon_vertex_editor(
+                        image_path=image_path,
+                        segments=segments_for_vertex_editor(result),
+                        boxes=boxes_for_vertex_editor(result),
+                        width=canvas_width,
+                        height=canvas_height,
+                        key=f"polygon_vertex_editor_{selected_image}_{len(result.segments)}_{st.session_state.get(editor_version_key, 0)}",
+                    )
+                    if editor_value and (editor_value.get("segments") is not None or editor_value.get("boxes") is not None):
+                        update_key = f"polygon_vertex_editor_update_{selected_image}"
+                        updated_at = editor_value.get("updatedAt")
+                        if updated_at and st.session_state.get(update_key) != updated_at:
+                            st.session_state.setdefault(undo_key, []).append(result.model_dump())
+                            updated = result_with_vertex_editor_payload(
+                                result,
+                                editor_value.get("segments", []),
+                                editor_value.get("boxes", []),
+                            )
+                            record["result"] = updated.model_dump()
+                            records[record_index] = record
+                            st.session_state.editor_records = records
+                            st.session_state[update_key] = updated_at
+                            st.rerun()
+            elif st_canvas:
                 original_width, original_height, canvas_width, canvas_height = fit_canvas_size(image_path)
                 canvas_label = st.text_input("새 도형 기본 라벨", value="object", key="editor_canvas_label")
                 canvas_text = st.text_input("새 OCR 텍스트", value="text", key="editor_canvas_text")
@@ -1339,9 +1591,6 @@ def render_label_editor_tab(workspace):
                 if editor_task in {"object_detection", "ocr", "tracking"}:
                     mode_options = ["transform", "rect"]
                     mode_help = "rect로 새 bbox를 그리고, transform으로 기존 bbox를 통째로 이동/리사이즈하세요."
-                elif editor_task == "segmentation":
-                    mode_options = ["transform", "polygon", "rect"]
-                    mode_help = "polygon으로 새 polygon을 그리고, rect로 bbox도 추가할 수 있습니다. transform으로 기존 도형을 이동/리사이즈하세요."
                 elif editor_task == "pose_estimation":
                     mode_options = ["transform", "point"]
                     mode_help = "pose는 표 편집이 기본이며, point 도형은 참고용으로 사용할 수 있습니다."
@@ -1365,7 +1614,7 @@ def render_label_editor_tab(workspace):
                     )
                 st.caption(
                     "도형을 선택해 통째로 이동하거나 크기를 조절할 수 있습니다. "
-                    "새 bbox/polygon을 그린 뒤 아래 버튼을 눌러 라벨에 반영하세요."
+                    "새 bbox를 그린 뒤 아래 버튼을 눌러 라벨에 반영하세요."
                 )
                 if st.button("Canvas 도형을 현재 라벨에 적용", icon=":material/select_check_box:"):
                     objects = []
@@ -1401,12 +1650,16 @@ def render_label_editor_tab(workspace):
         elif editor_task == "ocr":
             edited_tables["texts"] = st.data_editor(tables["texts"], num_rows="dynamic", key=f"edit_texts_{selected_image}")
         elif editor_task == "segmentation":
-            edited_tables["segments"] = render_segmentation_point_editor(
-                tables["segments"],
-                selected_image,
-                image_path,
-                image_exists,
-            )
+            st.caption("segmentation은 Canvas에서 polygon을 직접 추가/이동하고, 좌표를 수치로 미세 조정해야 할 때만 아래 정밀 편집을 열어 사용하세요.")
+            with st.expander("Polygon point 정밀 편집 열기", expanded=False):
+                edited_tables["segments"] = render_segmentation_point_editor(
+                    tables["segments"],
+                    selected_image,
+                    image_path,
+                    image_exists,
+                )
+            if "segments" not in edited_tables:
+                edited_tables["segments"] = tables["segments"]
         elif editor_task == "pose_estimation":
             edited_tables["poses"] = st.data_editor(tables["poses"], num_rows="dynamic", key=f"edit_poses_{selected_image}")
         elif editor_task == "tracking":

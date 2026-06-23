@@ -320,6 +320,31 @@ path: d:\\datasets\\yolo
                     line = handle.read().strip()
                 self.assertTrue(line.startswith("3 "), line)
 
+    def test_explicit_coco_directory_discovers_json_and_segments(self):
+        coco = {
+            "images": [{"id": 1, "file_name": "image_a.jpg", "width": 100, "height": 100}],
+            "categories": [{"id": 1, "name": "object"}],
+            "annotations": [{
+                "id": 1,
+                "image_id": 1,
+                "category_id": 1,
+                "bbox": [10, 20, 40, 50],
+                "segmentation": [[10, 20, 50, 20, 50, 70, 10, 70]],
+            }],
+        }
+        self._write("coco/labels.json", json.dumps(coco))
+
+        batch = import_labels_with_report(
+            os.path.join(self.label_dir, "coco"),
+            self.image_dir,
+            source_format="coco",
+        )
+
+        self.assertEqual(len(batch.records), 1)
+        self.assertEqual(batch.report["formats"], {"coco": 1})
+        self.assertEqual(len(batch.records[0][1].boxes), 1)
+        self.assertEqual(len(batch.records[0][1].segments), 1)
+
     def test_generic_json_import_accepts_bbox_key(self):
         self._write(
             "custom.json",

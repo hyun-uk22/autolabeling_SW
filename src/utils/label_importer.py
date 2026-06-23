@@ -1005,8 +1005,10 @@ def import_labels_with_report(
     duplicate_iou: float = 0.85,
 ) -> LabelImportBatch:
     discovery = {"files_scanned": 1, "skipped_files": []}
-    if source_format == "auto" and os.path.isdir(input_path):
+    if os.path.isdir(input_path):
         sources, discovery = discover_label_sources(input_path, image_dir)
+        if source_format != "auto":
+            sources = [source for source in sources if source.format == source_format]
     else:
         fmt = infer_label_format(input_path) if source_format == "auto" else source_format
         search_root = input_path if os.path.isdir(input_path) else os.path.dirname(os.path.abspath(input_path))

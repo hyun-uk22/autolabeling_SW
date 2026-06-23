@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        font-family: "Pretendard", "Malgun Gothic", "Segoe UI", sans-serif;
+        background: transparent;
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        min-height: 32px;
+        color: #475569;
+        font-size: 13px;
+        margin-bottom: 8px;
+      }
+      button {
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #fff;
+        padding: 5px 9px;
+        cursor: pointer;
+        color: #334155;
+      }
+      button.active {
+        border-color: #2563eb;
+        background: #eff6ff;
+        color: #1d4ed8;
+        font-weight: 600;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: .45;
+      }
+      input {
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        padding: 5px 8px;
+        min-width: 96px;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid #cbd5e1;
+        border-radius: 999px;
+        padding: 2px 8px;
+        background: #f8fafc;
+      }
+      svg {
+        display: block;
+        max-width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #0f172a;
+        touch-action: none;
+        user-select: none;
+      }
+      polygon {
+        cursor: move;
+      }
+      rect.box {
+        cursor: move;
+      }
+      circle.vertex {
+        cursor: grab;
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.35));
+      }
+      circle.vertex:hover,
+      circle.vertex.active {
+        r: 7;
+        stroke-width: 3;
+      }
+      circle.draft {
+        pointer-events: none;
+      }
+      text {
+        paint-order: stroke;
+        stroke: white;
+        stroke-width: 3px;
+        stroke-linejoin: round;
+        font-size: 12px;
+        fill: #0f172a;
+        pointer-events: none;
+      }
+      .hint {
+        flex-basis: 100%;
+        color: #64748b;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <span class="badge">Polygon editor</span>
+      <button id="mode-edit" class="active" type="button">Point 드래그</button>
+      <button id="mode-polygon" type="button" style="display: none;">Polygon 생성</button>
+      <button id="mode-bbox" type="button">BBox 생성</button>
+      <button id="finish-polygon" type="button" style="display: none;" disabled>Polygon 완료</button>
+      <button id="cancel-draft" type="button" disabled>생성 취소</button>
+      <input id="label-input" value="object" aria-label="label" />
+      <span id="status">point를 직접 드래그하거나 bbox 생성 모드를 선택하세요.</span>
+      <span class="hint">Point 드래그: 기존 vertex 수정. BBox 생성: 드래그해서 박스 생성. Polygon 생성은 위 전환 버튼으로 이전 생성 방식을 사용하세요.</span>
+    </div>
+    <svg id="editor"></svg>
+
+    <script>
+      const Streamlit = {
+        RENDER_EVENT: "streamlit:render",
+        ready() {
+          window.parent.postMessage(
+            { isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 },
+            "*",
+          );
+        },
+        setFrameHeight(height) {
+          window.parent.postMessage(
+            { isStreamlitMessage: true, type: "streamlit:setFrameHeight", height },
+            "*",
+          );
+        },
+        setComponentValue(value) {
+          window.parent.postMessage(
+            { isStreamlitMessage: true, type: "streamlit:setComponentValue", value },
+            "*",
+          );
+        },
+      };
+
+      const svg = document.getElementById("editor");
+      const statusEl = document.getElementById("status");
+      const labelInput = document.getElementById("label-input");
+      const buttons = {
+        edit: document.getElementById("mode-edit"),
+        polygon: document.getElementById("mode-polygon"),
+        bbox: document.getElementById("mode-bbox"),
+        finish: document.getElementById("finish-polygon"),
+        cancel: document.getElementById("cancel-draft"),
+      };
+      let state = {
+        imageDataUrl: "",
+        width: 1,
+        height: 1,
+        segments: [],
+        boxes: [],
+      };
+      let mode = "edit";
+      let drag = null;
+      let draftPolygon = [];
+      let draftBox = null;
+
+      function clone(value) {
+        return JSON.parse(JSON.stringify(value));
+      }
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function svgPoint(event) {
+        const point = svg.createSVGPoint();
+        point.x = event.clientX;
+        point.y = event.clientY;
+        return point.matrixTransform(svg.getScreenCTM().inverse());
+      }
+
+      function normalizedPoint(event) {
+        const coord = svgPoint(event);
+        return {
+          x: clamp(coord.x / state.width, 0, 1),
+          y: clamp(coord.y / state.height, 0, 1),
+        };
+      }
+
+      function setMode(nextMode) {
+        mode = nextMode;
+        Object.entries(buttons).forEach(([key, button]) => {
+          if (["edit", "polygon", "bbox"].includes(key)) {
+            button.classList.toggle("active", key === mode);
+          }
+        });
+        statusEl.textContent = {
+          edit: "point를 직접 드래그하세요.",
+          polygon: "이미지를 클릭해 polygon point를 추가하세요. 완료 버튼 또는 더블클릭으로 확정합니다.",
+          bbox: "드래그해서 bbox를 생성하세요.",
+        }[mode];
+        render();
+      }
+
+      function emit(action) {
+        Streamlit.setComponentValue({
+          action,
+          segments: state.segments,
+          boxes: state.boxes,
+          updatedAt: Date.now(),
+        });
+      }
+
+      function updateDraftButtons() {
+        buttons.finish.disabled = draftPolygon.length < 3;
+        buttons.cancel.disabled = draftPolygon.length === 0 && draftBox === null;
+      }
+
+      function finishPolygon() {
+        if (draftPolygon.length < 3) return;
+        state.segments.push({
+          label: labelInput.value.trim() || "object",
+          confidence: 1,
+          polygon: clone(draftPolygon),
+        });
+        draftPolygon = [];
+        updateDraftButtons();
+        statusEl.textContent = "polygon을 추가했습니다.";
+        emit("add_polygon");
+        render();
+      }
+
+      function cancelDraft() {
+        draftPolygon = [];
+        draftBox = null;
+        updateDraftButtons();
+        statusEl.textContent = "생성을 취소했습니다.";
+        render();
+      }
+
+      function segmentPoints(segment) {
+        return (segment.polygon || [])
+          .map((point) => `${point.x * state.width},${point.y * state.height}`)
+          .join(" ");
+      }
+
+      function drawImage() {
+        const image = document.createElementNS("http://www.w3.org/2000/svg", "image");
+        image.setAttribute("href", state.imageDataUrl);
+        image.setAttribute("x", "0");
+        image.setAttribute("y", "0");
+        image.setAttribute("width", state.width);
+        image.setAttribute("height", state.height);
+        svg.appendChild(image);
+      }
+
+      function drawBoxes() {
+        (state.boxes || []).forEach((box, boxIndex) => {
+          const x = box.xmin * state.width;
+          const y = box.ymin * state.height;
+          const width = Math.max(1, (box.xmax - box.xmin) * state.width);
+          const height = Math.max(1, (box.ymax - box.ymin) * state.height);
+          const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          rect.classList.add("box");
+          rect.setAttribute("x", x);
+          rect.setAttribute("y", y);
+          rect.setAttribute("width", width);
+          rect.setAttribute("height", height);
+          rect.setAttribute("fill", "rgba(239, 68, 68, 0.08)");
+          rect.setAttribute("stroke", "#ef4444");
+          rect.setAttribute("stroke-width", "2");
+          rect.setAttribute("stroke-dasharray", "4 3");
+          svg.appendChild(rect);
+
+          const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          label.setAttribute("x", clamp(x + 6, 0, state.width));
+          label.setAttribute("y", clamp(y + 14, 12, state.height));
+          label.textContent = `bbox ${boxIndex}: ${box.label || "object"}`;
+          svg.appendChild(label);
+        });
+      }
+
+      function drawSegments() {
+        state.segments.forEach((segment, segmentIndex) => {
+          const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+          polygon.setAttribute("points", segmentPoints(segment));
+          polygon.setAttribute("fill", "rgba(37, 99, 235, 0.18)");
+          polygon.setAttribute("stroke", "#2563eb");
+          polygon.setAttribute("stroke-width", "2");
+          svg.appendChild(polygon);
+
+          const first = (segment.polygon || [])[0];
+          if (first) {
+            const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            label.setAttribute("x", clamp(first.x * state.width + 6, 0, state.width));
+            label.setAttribute("y", clamp(first.y * state.height - 6, 12, state.height));
+            label.textContent = `${segmentIndex}: ${segment.label || "object"}`;
+            svg.appendChild(label);
+          }
+
+          (segment.polygon || []).forEach((point, pointIndex) => {
+            const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            circle.classList.add("vertex");
+            circle.setAttribute("cx", point.x * state.width);
+            circle.setAttribute("cy", point.y * state.height);
+            circle.setAttribute("r", "5");
+            circle.setAttribute("fill", "#f97316");
+            circle.setAttribute("stroke", "#ffffff");
+            circle.setAttribute("stroke-width", "2");
+            circle.addEventListener("pointerdown", (event) => {
+              if (mode !== "edit") return;
+              event.preventDefault();
+              circle.setPointerCapture(event.pointerId);
+              drag = { kind: "vertex", segmentIndex, pointIndex, pointerId: event.pointerId };
+              circle.classList.add("active");
+              statusEl.textContent = `segment ${segmentIndex}, point ${pointIndex} 이동 중`;
+            });
+            svg.appendChild(circle);
+          });
+        });
+      }
+
+      function drawDrafts() {
+        if (draftPolygon.length) {
+          const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+          polyline.setAttribute(
+            "points",
+            draftPolygon.map((point) => `${point.x * state.width},${point.y * state.height}`).join(" "),
+          );
+          polyline.setAttribute("fill", "none");
+          polyline.setAttribute("stroke", "#22c55e");
+          polyline.setAttribute("stroke-width", "2");
+          svg.appendChild(polyline);
+          draftPolygon.forEach((point) => {
+            const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            circle.classList.add("draft");
+            circle.setAttribute("cx", point.x * state.width);
+            circle.setAttribute("cy", point.y * state.height);
+            circle.setAttribute("r", "4");
+            circle.setAttribute("fill", "#22c55e");
+            circle.setAttribute("stroke", "#ffffff");
+            circle.setAttribute("stroke-width", "2");
+            svg.appendChild(circle);
+          });
+        }
+        if (draftBox) {
+          const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          rect.setAttribute("x", draftBox.xmin * state.width);
+          rect.setAttribute("y", draftBox.ymin * state.height);
+          rect.setAttribute("width", (draftBox.xmax - draftBox.xmin) * state.width);
+          rect.setAttribute("height", (draftBox.ymax - draftBox.ymin) * state.height);
+          rect.setAttribute("fill", "rgba(34, 197, 94, 0.1)");
+          rect.setAttribute("stroke", "#22c55e");
+          rect.setAttribute("stroke-width", "2");
+          svg.appendChild(rect);
+        }
+      }
+
+      function render() {
+        svg.setAttribute("width", state.width);
+        svg.setAttribute("height", state.height);
+        svg.setAttribute("viewBox", `0 0 ${state.width} ${state.height}`);
+        svg.innerHTML = "";
+        drawImage();
+        drawBoxes();
+        drawSegments();
+        drawDrafts();
+        updateDraftButtons();
+        Streamlit.setFrameHeight(document.body.scrollHeight + 8);
+      }
+
+      svg.addEventListener("pointerdown", (event) => {
+        if (event.target.classList && event.target.classList.contains("vertex")) return;
+        if (mode === "polygon") {
+          draftPolygon.push(normalizedPoint(event));
+          statusEl.textContent = `polygon point ${draftPolygon.length}개 추가됨`;
+          render();
+          return;
+        }
+        if (mode === "bbox") {
+          const point = normalizedPoint(event);
+          draftBox = { xmin: point.x, ymin: point.y, xmax: point.x, ymax: point.y };
+          drag = { kind: "bbox", start: point };
+          render();
+        }
+      });
+
+      svg.addEventListener("pointermove", (event) => {
+        if (!drag) return;
+        const coord = normalizedPoint(event);
+        if (drag.kind === "vertex") {
+          const point = state.segments[drag.segmentIndex].polygon[drag.pointIndex];
+          point.x = coord.x;
+          point.y = coord.y;
+          render();
+        } else if (drag.kind === "bbox" && draftBox) {
+          draftBox.xmax = coord.x;
+          draftBox.ymax = coord.y;
+          draftBox = {
+            xmin: Math.min(drag.start.x, coord.x),
+            ymin: Math.min(drag.start.y, coord.y),
+            xmax: Math.max(drag.start.x, coord.x),
+            ymax: Math.max(drag.start.y, coord.y),
+          };
+          render();
+        }
+      });
+
+      svg.addEventListener("pointerup", () => {
+        if (!drag) return;
+        if (drag.kind === "vertex") {
+          statusEl.textContent = `segment ${drag.segmentIndex}, point ${drag.pointIndex} 이동 완료`;
+          drag = null;
+          emit("move_vertex");
+          render();
+          return;
+        }
+        if (drag.kind === "bbox" && draftBox) {
+          drag = null;
+          if (Math.abs(draftBox.xmax - draftBox.xmin) > 0.002 && Math.abs(draftBox.ymax - draftBox.ymin) > 0.002) {
+            state.boxes.push({
+              label: labelInput.value.trim() || "object",
+              confidence: 1,
+              ...draftBox,
+            });
+            statusEl.textContent = "bbox를 추가했습니다.";
+            draftBox = null;
+            emit("add_bbox");
+          } else {
+            statusEl.textContent = "bbox가 너무 작아 취소했습니다.";
+            draftBox = null;
+          }
+          render();
+        }
+      });
+
+      svg.addEventListener("dblclick", () => {
+        if (mode === "polygon") finishPolygon();
+      });
+
+      buttons.edit.addEventListener("click", () => setMode("edit"));
+      buttons.polygon.addEventListener("click", () => setMode("polygon"));
+      buttons.bbox.addEventListener("click", () => setMode("bbox"));
+      buttons.finish.addEventListener("click", finishPolygon);
+      buttons.cancel.addEventListener("click", cancelDraft);
+
+      window.addEventListener("message", (event) => {
+        if (!event.data || event.data.type !== Streamlit.RENDER_EVENT) return;
+        const args = event.data.args || {};
+        state = {
+          imageDataUrl: args.imageDataUrl || "",
+          width: Number(args.canvasWidth || 1),
+          height: Number(args.canvasHeight || 1),
+          segments: clone(args.segments || []),
+          boxes: clone(args.boxes || []),
+        };
+        render();
+      });
+
+      Streamlit.ready();
+      Streamlit.setFrameHeight(80);
+    </script>
+  </body>
+</html>
