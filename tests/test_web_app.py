@@ -44,9 +44,9 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(
                 [tab.label for tab in app.tabs],
-                ["대화형 작업", "형식 변환", "라벨 생성", "평가", "결과 리포트", "설정"],
+                ["대화형 작업", "형식 변환", "라벨 생성", "라벨 편집", "결과 리포트", "설정"],
             )
-            self.assertEqual(len(app.get("form")), 4)
+            self.assertEqual(len(app.get("form")), 3)
             self.assertEqual(len(app.chat_input), 1)
             self.assertIn("어떤 작업을 진행할까요?", app.chat_message[0].markdown[0].value)
             self.assertNotIn("`", app.chat_message[0].markdown[0].value)

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.core.models import BoundingBox, DetectionResult, TextRegion
+from src.core.models import BoundingBox, DetectionResult, Point, PolygonSegment, TextRegion
 from src.agents.insight_agent import DatasetInsightAgent
 from src.reporting import (
     ArtifactAuditor,
@@ -233,6 +233,41 @@ class ReportingTests(unittest.TestCase):
         formats = resolve_export_formats(result, ["yolo", "pascal_voc"], "ocr")
 
         self.assertEqual(formats, ["vision_json"])
+
+    def test_segmentation_polygon_exports_bbox_formats_from_polygon_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.jpg"
+            from PIL import Image
+
+            Image.new("RGB", (100, 100), color="white").save(image_path)
+            result = DetectionResult(
+                task_type="segmentation",
+                segments=[
+                    PolygonSegment(
+                        label="object",
+                        polygon=[
+                            Point(x=0.2, y=0.1),
+                            Point(x=0.8, y=0.3),
+                            Point(x=0.4, y=0.9),
+                        ],
+                    )
+                ],
+            )
+            writer = LabelExportWriter(str(root / "labels"), formats=["yolo", "pascal_voc"])
+
+            resolved = resolve_export_formats(result, writer.formats, result.task_type)
+            paths = writer.save(result, str(image_path), formats=resolved)
+            writer.finalize()
+
+            self.assertIn("yolo", paths)
+            self.assertIn("pascal_voc", paths)
+            yolo_line = Path(paths["yolo"]).read_text(encoding="utf-8").strip()
+            _, x_center, y_center, width, height = yolo_line.split()
+            self.assertAlmostEqual(float(x_center), 0.5, places=6)
+            self.assertAlmostEqual(float(y_center), 0.5, places=6)
+            self.assertAlmostEqual(float(width), 0.6, places=6)
+            self.assertAlmostEqual(float(height), 0.8, places=6)
 
     def test_writer_records_fallback_vision_json_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

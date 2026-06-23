@@ -577,7 +577,8 @@ def import_generic_json(input_path: str) -> List[Tuple[str, DetectionResult]]:
     data = json_io.load_file(input_path)
     grouped: Dict[str, DetectionResult] = {}
     for item in iter_dicts(data):
-        if not all(key in item for key in ["xmin", "ymin", "xmax", "ymax"]):
+        coords = _generic_box_coordinates(item)
+        if coords is None:
             continue
         image_name = (
             item.get("image")
@@ -591,14 +592,42 @@ def import_generic_json(input_path: str) -> List[Tuple[str, DetectionResult]]:
         result.boxes.append(
             BoundingBox(
                 label=label,
-                xmin=normalize_coordinate(item["xmin"]),
-                ymin=normalize_coordinate(item["ymin"]),
-                xmax=normalize_coordinate(item["xmax"]),
-                ymax=normalize_coordinate(item["ymax"]),
+                xmin=normalize_coordinate(coords[0]),
+                ymin=normalize_coordinate(coords[1]),
+                xmax=normalize_coordinate(coords[2]),
+                ymax=normalize_coordinate(coords[3]),
                 confidence=normalize_confidence(item.get("confidence", 1.0)),
             )
         )
     return list(grouped.items())
+
+
+def _generic_box_coordinates(item: Dict[str, Any]) -> Optional[Tuple[float, float, float, float]]:
+    if all(key in item for key in ["xmin", "ymin", "xmax", "ymax"]):
+        try:
+            return (
+                float(item["xmin"]),
+                float(item["ymin"]),
+                float(item["xmax"]),
+                float(item["ymax"]),
+            )
+        except (TypeError, ValueError):
+            return None
+    bbox = item.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return None
+    try:
+        x1, y1, third, fourth = (float(value) for value in bbox)
+    except (TypeError, ValueError):
+        return None
+    bbox_format = str(item.get("bbox_format") or item.get("format") or "").lower()
+    if bbox_format in {"xywh", "coco", "ltwh"}:
+        return x1, y1, x1 + third, y1 + fourth
+    if bbox_format in {"xyxy", "voc", "pascal_voc"}:
+        return x1, y1, third, fourth
+    if third > x1 and fourth > y1:
+        return x1, y1, third, fourth
+    return x1, y1, x1 + third, y1 + fourth
 
 
 def _import_with_format(
@@ -669,6 +698,8 @@ def _detect_label_file(path: str, image_dir: str) -> Tuple[Optional[str], Option
             data = json_io.load_file(path)
             if isinstance(data, dict) and {"images", "annotations", "categories"}.issubset(data):
                 return "coco", None
+            if any(isinstance(item, dict) and _generic_box_coordinates(item) is not None for item in iter_dicts(data)):
+                return "generic_json", None
             return None, "unrecognized_json_schema"
         if ext == ".csv":
             with open(path, "r", encoding="utf-8-sig", newline="") as f:

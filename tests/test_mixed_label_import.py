@@ -320,6 +320,27 @@ path: d:\\datasets\\yolo
                     line = handle.read().strip()
                 self.assertTrue(line.startswith("3 "), line)
 
+    def test_generic_json_import_accepts_bbox_key(self):
+        self._write(
+            "custom.json",
+            json.dumps({
+                "items": [
+                    {
+                        "image": "sample.jpg",
+                        "label": "car",
+                        "bbox": [0.1, 0.2, 0.5, 0.6],
+                    }
+                ]
+            }),
+        )
+
+        batch = import_labels_with_report(self.label_dir, self.image_dir, source_format="auto")
+
+        self.assertEqual(batch.records[0][0], "sample.jpg")
+        self.assertEqual(batch.records[0][1].boxes[0].label, "car")
+        self.assertEqual(batch.records[0][1].boxes[0].xmin, 0.1)
+        self.assertEqual(batch.records[0][1].boxes[0].xmax, 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

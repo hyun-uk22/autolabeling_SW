@@ -5,7 +5,24 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+from PIL import Image
 
+try:
+    from streamlit_drawable_canvas import st_canvas
+except Exception:  # pragma: no cover - optional Streamlit component
+    st_canvas = None
+
+from src.core.models import (
+    BoundingBox,
+    ClassificationLabel,
+    DetectionResult,
+    Keypoint,
+    Point,
+    PolygonSegment,
+    PoseInstance,
+    TextRegion,
+    TrackInstance,
+)
 from src.core.user_settings import (
     ENV_FIELDS,
     SECRET_FIELDS,
@@ -21,6 +38,7 @@ from src.core.workspace import (
 )
 from src.reporting import build_conversion_preflight
 from src.reporting.issue_reporter import categorize_issue
+from src.utils.format_converter import LabelExportWriter
 from src.utils.label_importer import find_image_path, import_labels_with_report
 from src.utils.label_validator import summarize_validation, validate_result
 from src.workflow.service import execute_workflow_plan
@@ -278,6 +296,168 @@ def editable_path_selectbox(label, candidates, state_key, help_text):
     return selected or current
 
 
+def split_issue_file_cell(value):
+    return [part.strip() for part in str(value or "").splitlines() if part.strip()]
+
+
+def unique_issue_files(values):
+    files = []
+    for value in values:
+        for file_name in split_issue_file_cell(value):
+            if file_name and file_name not in files:
+                files.append(file_name)
+    return files
+
+
+def editor_context_signature(context):
+    keys = ["label_path", "image_dir", "source_format", "classes_path", "task_type"]
+    return json.dumps({key: context.get(key, "") for key in keys}, ensure_ascii=False, sort_keys=True)
+
+
+def start_label_editor_issue_queue(workspace, files, context):
+    queue = unique_issue_files(files)
+    if not queue:
+        st.warning("라벨 편집으로 보낼 문제 파일이 없습니다.")
+        return
+    context = dict(context or {})
+    context.setdefault("source_format", "auto")
+    context.setdefault("task_type", "object_detection")
+    context.setdefault("output_dir", WORKSPACE_DEFAULTS["labels"])
+    for key, state_key in {
+        "label_path": "editor_label_path",
+        "image_dir": "editor_image_dir",
+        "source_format": "editor_source_format",
+        "classes_path": "editor_classes",
+        "task_type": "editor_task",
+        "output_dir": "editor_output",
+    }.items():
+        value = context.get(key)
+        if value:
+            st.session_state[state_key] = _relative_workspace_path(workspace, value) if Path(str(value)).is_absolute() else str(value)
+    st.session_state.editor_issue_queue = queue
+    st.session_state.editor_issue_index = 0
+    st.session_state.editor_issue_context = context
+    st.session_state.editor_loaded_context_signature = ""
+    st.session_state.editor_selected_image_select = queue[0]
+    st.session_state.open_label_editor = True
+    st.rerun()
+
+
+def render_issue_editor_launcher(files, context, key_prefix, title="문제 파일 라벨 편집"):
+    issue_files = unique_issue_files(files)
+    if not issue_files:
+        return
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        st.caption(
+            "이미지 파일이 연결되지 않은 라벨은 표 편집만 가능합니다. "
+            "bbox/polygon을 마우스로 수정하려면 라벨과 연결되는 원본 이미지 경로를 함께 지정하세요."
+        )
+        selected = st.multiselect(
+            "라벨 편집으로 보낼 파일",
+            issue_files,
+            default=issue_files,
+            key=f"{key_prefix}-issue-editor-files",
+            help="선택한 파일 순서대로 라벨 편집 탭에서 이전/다음 버튼으로 검토합니다.",
+        )
+        if st.button("선택 파일을 라벨 편집에서 열기", key=f"{key_prefix}-open-editor", icon=":material/edit:"):
+            start_label_editor_issue_queue(st.session_state.workspace, selected, context)
+
+
+def workflow_editor_context(output):
+    action = output.get("action")
+    if action == "convert":
+        label_path = output.get("input") or output.get("input_path") or ""
+        image_dir = output.get("img_dir") or output.get("image_dir") or ""
+        if not image_dir and label_path:
+            image_dir = str(Path(label_path).parent)
+        source_format = output.get("resolved_source_format") or output.get("source_format") or "auto"
+        if source_format in {"mixed", "unknown"}:
+            source_format = "auto"
+        return {
+            "label_path": label_path,
+            "image_dir": image_dir,
+            "source_format": source_format,
+            "classes_path": output.get("classes_path", ""),
+            "task_type": output.get("task_type", "object_detection"),
+            "output_dir": output.get("output_dir") or WORKSPACE_DEFAULTS["labels"],
+        }
+    report_path = output.get("summary_path") or output.get("report_path") or output.get("user_action_report_path") or ""
+    output_dir = str(Path(report_path).parent) if report_path else output.get("output_dir", WORKSPACE_DEFAULTS["labels"])
+    return {
+        "label_path": output_dir,
+        "image_dir": output.get("image_dir") or output.get("img_dir") or output.get("source_dir") or WORKSPACE_DEFAULTS["images"],
+        "source_format": "auto",
+        "classes_path": output.get("classes_path", ""),
+        "task_type": output.get("task_type", "object_detection"),
+        "output_dir": output_dir,
+    }
+
+
+def default_editor_save_formats(source_format, report=None):
+    if source_format in FORMAT_OPTIONS:
+        return [source_format]
+    formats = []
+    for name in (report or {}).get("formats", {}):
+        if name in FORMAT_OPTIONS and name not in formats:
+            formats.append(name)
+    return formats or ["vision_json"]
+
+
+def find_images_recursive(image_dir):
+    root = Path(image_dir)
+    if not root.exists():
+        return []
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+    return [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in image_exts
+    ]
+
+
+def generation_missing_info(
+    workspace,
+    image_dir,
+    label_output,
+    visualization_output,
+    formats,
+    prompt,
+    approve_expensive,
+    class_mapping,
+    class_list_text,
+):
+    missing = []
+    if not image_dir:
+        missing.append(("이미지 디렉터리", "라벨을 생성할 이미지 폴더를 입력하세요."))
+    else:
+        resolved_image_dir = resolve_workspace_path(workspace, image_dir)
+        if not Path(resolved_image_dir).exists():
+            missing.append(("이미지 디렉터리", f"경로를 찾을 수 없습니다: {resolved_image_dir}"))
+        elif not find_images_recursive(resolved_image_dir):
+            missing.append(("이미지 파일", "이미지 디렉터리 아래에서 JPG/PNG/WEBP/BMP 이미지를 찾지 못했습니다."))
+    if not label_output:
+        missing.append(("라벨 출력", "생성된 라벨을 저장할 경로를 입력하세요."))
+    if not visualization_output:
+        missing.append(("시각화 출력", "오버레이/미리보기 결과를 저장할 경로를 입력하세요."))
+    if not formats:
+        missing.append(("출력 포맷", "YOLO, COCO, Pascal VOC, vision_json 중 하나 이상을 선택하세요."))
+    if not prompt.strip() and not class_mapping and not class_list_text.strip():
+        missing.append(("검출 지시", "프롬프트, 클래스 매핑 파일, 또는 검출 클래스 목록 중 하나를 입력하세요."))
+    if not approve_expensive:
+        missing.append(("모델 호출 승인", "라벨 생성을 실행하려면 모델 호출 승인이 필요합니다."))
+    return missing
+
+
+def build_generation_prompt(prompt, class_list_text):
+    prompt = prompt.strip()
+    classes = [line.strip() for line in class_list_text.replace(",", "\n").splitlines() if line.strip()]
+    if not classes:
+        return prompt
+    class_instruction = "검출 대상 클래스는 다음 목록으로 제한하세요: " + ", ".join(classes)
+    return f"{prompt}\n{class_instruction}".strip() if prompt else class_instruction
+
+
 def class_mapping_candidates(workspace, input_path):
     root = Path(workspace).expanduser().resolve()
     try:
@@ -450,7 +630,7 @@ def render_workflow_report(result, key_prefix="report"):
             detailed = user_report.get("detailed_records", [])
             if detailed:
                 st.markdown("**검토가 필요한 데이터**")
-                st.dataframe([
+                detailed_rows = [
                     {
                         "파일": record.get("image", ""),
                         "상태": record.get("status", ""),
@@ -458,7 +638,13 @@ def render_workflow_report(result, key_prefix="report"):
                         "우선 조치": " / ".join(record.get("priority_actions", [])),
                     }
                     for record in detailed
-                ], width="stretch")
+                ]
+                st.dataframe(detailed_rows, width="stretch")
+                render_issue_editor_launcher(
+                    [row["파일"] for row in detailed_rows],
+                    workflow_editor_context(output),
+                    f"{key_prefix}-{index}",
+                )
 
         insight = output.get("dataset_insight", {})
         distribution = insight.get("distribution", {})
@@ -542,6 +728,731 @@ def parse_runs(value):
     return runs
 
 
+def rows_from_table(value):
+    if value is None:
+        return []
+    if hasattr(value, "to_dict"):
+        return value.to_dict("records")
+    return list(value)
+
+
+def to_float(value, default=0.0):
+    try:
+        if value in ("", None):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def to_int(value, default=0):
+    try:
+        if value in ("", None):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def clamp_unit(value):
+    return max(0.0, min(1.0, to_float(value)))
+
+
+def safe_state_key(value):
+    return "".join(ch if ch.isalnum() else "_" for ch in str(value))[:80]
+
+
+def normalize_segment_rows(rows):
+    grouped = {}
+    for row in rows_from_table(rows):
+        label = str(row.get("label", "")).strip()
+        if not label:
+            continue
+        segment_id = to_int(row.get("segment_id"), 0)
+        grouped.setdefault(segment_id, []).append({
+            "segment_id": segment_id,
+            "point_id": to_int(row.get("point_id"), len(grouped.get(segment_id, []))),
+            "label": label,
+            "x": clamp_unit(row.get("x")),
+            "y": clamp_unit(row.get("y")),
+            "confidence": clamp_unit(row.get("confidence", 1.0)),
+        })
+    normalized = []
+    for segment_id, points in sorted(grouped.items()):
+        for point_id, row in enumerate(sorted(points, key=lambda item: item["point_id"])):
+            row = dict(row)
+            row["point_id"] = point_id
+            normalized.append(row)
+    return normalized
+
+
+def merge_segment_rows(all_rows, segment_id, selected_rows):
+    merged = [row for row in all_rows if to_int(row.get("segment_id"), 0) != segment_id]
+    merged.extend(selected_rows)
+    return normalize_segment_rows(merged)
+
+
+def render_segmentation_point_editor(segment_rows, selected_image, image_path, image_exists):
+    state_key = f"editor_segments_{safe_state_key(selected_image)}"
+    source_key = f"{state_key}_source"
+    source_signature = json.dumps(normalize_segment_rows(segment_rows), ensure_ascii=False, sort_keys=True)
+    if st.session_state.get(source_key) != source_signature:
+        st.session_state[state_key] = normalize_segment_rows(segment_rows)
+        st.session_state[source_key] = source_signature
+
+    rows = normalize_segment_rows(st.session_state.get(state_key, []))
+    if not rows:
+        st.info("편집할 polygon point가 없습니다. Canvas에서 polygon을 추가하거나 아래 표에 point를 직접 추가하세요.")
+        edited = st.data_editor(rows, num_rows="dynamic", key=f"edit_segments_empty_{safe_state_key(selected_image)}")
+        return normalize_segment_rows(edited)
+
+    st.markdown("**Segmentation Point 정밀 편집**")
+    st.caption("Canvas는 polygon 전체 이동/대략 편집에 사용하고, point 단위 좌표/순서 수정은 이 표에서 처리하세요.")
+    segment_ids = sorted({to_int(row.get("segment_id"), 0) for row in rows})
+    labels = {
+        segment_id: next((row.get("label", "") for row in rows if to_int(row.get("segment_id"), 0) == segment_id), "")
+        for segment_id in segment_ids
+    }
+    selected_segment = st.selectbox(
+        "Polygon 선택",
+        segment_ids,
+        format_func=lambda value: f"segment_id={value} / label={labels.get(value, '')}",
+        key=f"segment_select_{safe_state_key(selected_image)}",
+    )
+    width, height = image_size_or_default(image_path) if image_exists else (1, 1)
+    coordinate_mode = st.radio(
+        "좌표 단위",
+        ["normalized", "pixel"],
+        horizontal=True,
+        key=f"segment_coord_mode_{safe_state_key(selected_image)}",
+        help="pixel 좌표는 현재 이미지 크기를 기준으로 저장 시 normalized 좌표로 변환됩니다.",
+    )
+    selected_rows = normalize_segment_rows([
+        row for row in rows if to_int(row.get("segment_id"), 0) == selected_segment
+    ])
+    point_options = [to_int(row.get("point_id"), 0) for row in selected_rows]
+    selected_point = st.selectbox(
+        "Point 선택",
+        point_options,
+        key=f"segment_point_select_{safe_state_key(selected_image)}",
+    )
+    point_index = point_options.index(selected_point) if selected_point in point_options else 0
+    op_cols = st.columns(4)
+    if op_cols[0].button("Point 추가", key=f"segment_point_add_{safe_state_key(selected_image)}"):
+        current = selected_rows[point_index]
+        next_row = selected_rows[(point_index + 1) % len(selected_rows)]
+        new_row = {
+            "segment_id": selected_segment,
+            "point_id": point_index + 1,
+            "label": current.get("label", "object"),
+            "x": (to_float(current.get("x")) + to_float(next_row.get("x"))) / 2,
+            "y": (to_float(current.get("y")) + to_float(next_row.get("y"))) / 2,
+            "confidence": current.get("confidence", 1.0),
+        }
+        selected_rows.insert(point_index + 1, new_row)
+        st.session_state[state_key] = merge_segment_rows(rows, selected_segment, selected_rows)
+        st.rerun()
+    if op_cols[1].button("Point 삭제", disabled=len(selected_rows) <= 3, key=f"segment_point_delete_{safe_state_key(selected_image)}"):
+        selected_rows.pop(point_index)
+        st.session_state[state_key] = merge_segment_rows(rows, selected_segment, selected_rows)
+        st.rerun()
+    if op_cols[2].button("순서 위로", disabled=point_index <= 0, key=f"segment_point_up_{safe_state_key(selected_image)}"):
+        selected_rows[point_index - 1], selected_rows[point_index] = selected_rows[point_index], selected_rows[point_index - 1]
+        st.session_state[state_key] = merge_segment_rows(rows, selected_segment, selected_rows)
+        st.rerun()
+    if op_cols[3].button("순서 아래로", disabled=point_index >= len(selected_rows) - 1, key=f"segment_point_down_{safe_state_key(selected_image)}"):
+        selected_rows[point_index + 1], selected_rows[point_index] = selected_rows[point_index], selected_rows[point_index + 1]
+        st.session_state[state_key] = merge_segment_rows(rows, selected_segment, selected_rows)
+        st.rerun()
+
+    if coordinate_mode == "pixel":
+        display_rows = [
+            {
+                "segment_id": row["segment_id"],
+                "point_id": row["point_id"],
+                "label": row["label"],
+                "x_px": round(row["x"] * width, 2),
+                "y_px": round(row["y"] * height, 2),
+                "confidence": row["confidence"],
+            }
+            for row in selected_rows
+        ]
+        edited_display = st.data_editor(
+            display_rows,
+            num_rows="dynamic",
+            disabled=["segment_id", "point_id"],
+            key=f"edit_segments_pixel_{safe_state_key(selected_image)}",
+        )
+        edited_selected = [
+            {
+                "segment_id": selected_segment,
+                "point_id": to_int(row.get("point_id"), index),
+                "label": str(row.get("label", "")).strip(),
+                "x": clamp_unit(to_float(row.get("x_px")) / max(width, 1)),
+                "y": clamp_unit(to_float(row.get("y_px")) / max(height, 1)),
+                "confidence": clamp_unit(row.get("confidence", 1.0)),
+            }
+            for index, row in enumerate(rows_from_table(edited_display))
+        ]
+    else:
+        edited_selected = st.data_editor(
+            selected_rows,
+            num_rows="dynamic",
+            disabled=["segment_id", "point_id"],
+            key=f"edit_segments_norm_{safe_state_key(selected_image)}",
+        )
+
+    return merge_segment_rows(rows, selected_segment, edited_selected)
+
+
+def result_to_editor_tables(result):
+    result = DetectionResult.model_validate(result)
+    return {
+        "classification": [{"label": item.label, "confidence": item.confidence} for item in result.classifications],
+        "boxes": [
+            {
+                "label": box.label,
+                "xmin": box.xmin,
+                "ymin": box.ymin,
+                "xmax": box.xmax,
+                "ymax": box.ymax,
+                "confidence": box.confidence,
+            }
+            for box in result.boxes
+        ],
+        "segments": [
+            {
+                "segment_id": segment_index,
+                "point_id": point_index,
+                "label": segment.label,
+                "x": point.x,
+                "y": point.y,
+                "confidence": segment.confidence,
+            }
+            for segment_index, segment in enumerate(result.segments)
+            for point_index, point in enumerate(segment.polygon)
+        ],
+        "poses": [
+            {
+                "pose_id": pose_index,
+                "label": pose.label,
+                "keypoint": point.name,
+                "x": point.x,
+                "y": point.y,
+                "visible": point.visible,
+                "confidence": point.confidence,
+                "pose_confidence": pose.confidence,
+            }
+            for pose_index, pose in enumerate(result.poses)
+            for point in pose.keypoints
+        ],
+        "texts": [
+            {
+                "text": item.text,
+                "xmin": item.xmin,
+                "ymin": item.ymin,
+                "xmax": item.xmax,
+                "ymax": item.ymax,
+                "confidence": item.confidence,
+            }
+            for item in result.texts
+        ],
+        "tracks": [
+            {
+                "track_id": item.track_id,
+                "frame_id": item.frame_id,
+                "label": item.label,
+                "xmin": item.xmin,
+                "ymin": item.ymin,
+                "xmax": item.xmax,
+                "ymax": item.ymax,
+                "confidence": item.confidence,
+            }
+            for item in result.tracks
+        ],
+    }
+
+
+def editor_tables_to_result(task_type, tables):
+    result = DetectionResult(task_type=task_type)
+    for row in rows_from_table(tables.get("classification")):
+        label = str(row.get("label", "")).strip()
+        if label:
+            result.classifications.append(ClassificationLabel(label=label, confidence=clamp_unit(row.get("confidence", 1.0))))
+    for row in rows_from_table(tables.get("boxes")):
+        label = str(row.get("label", "")).strip()
+        if label:
+            result.boxes.append(BoundingBox(
+                label=label,
+                xmin=clamp_unit(row.get("xmin")),
+                ymin=clamp_unit(row.get("ymin")),
+                xmax=clamp_unit(row.get("xmax")),
+                ymax=clamp_unit(row.get("ymax")),
+                confidence=clamp_unit(row.get("confidence", 1.0)),
+            ))
+    segments = {}
+    for row in rows_from_table(tables.get("segments")):
+        label = str(row.get("label", "")).strip()
+        if not label:
+            continue
+        segment_id = to_int(row.get("segment_id"), 0)
+        item = segments.setdefault(segment_id, {"label": label, "confidence": clamp_unit(row.get("confidence", 1.0)), "points": []})
+        item["points"].append((to_int(row.get("point_id"), len(item["points"])), Point(x=clamp_unit(row.get("x")), y=clamp_unit(row.get("y")))))
+    for item in segments.values():
+        points = [point for _, point in sorted(item["points"], key=lambda pair: pair[0])]
+        if len(points) >= 3:
+            result.segments.append(PolygonSegment(label=item["label"], polygon=points, confidence=item["confidence"]))
+    poses = {}
+    for row in rows_from_table(tables.get("poses")):
+        keypoint = str(row.get("keypoint", "")).strip()
+        if not keypoint:
+            continue
+        pose_id = to_int(row.get("pose_id"), 0)
+        item = poses.setdefault(pose_id, {
+            "label": str(row.get("label", "person")).strip() or "person",
+            "confidence": clamp_unit(row.get("pose_confidence", 1.0)),
+            "keypoints": [],
+        })
+        item["keypoints"].append(Keypoint(
+            name=keypoint,
+            x=clamp_unit(row.get("x")),
+            y=clamp_unit(row.get("y")),
+            visible=bool(row.get("visible", True)),
+            confidence=clamp_unit(row.get("confidence", 1.0)),
+        ))
+    for item in poses.values():
+        if item["keypoints"]:
+            result.poses.append(PoseInstance(label=item["label"], keypoints=item["keypoints"], confidence=item["confidence"]))
+    for row in rows_from_table(tables.get("texts")):
+        text = str(row.get("text", "")).strip()
+        if text:
+            result.texts.append(TextRegion(
+                text=text,
+                xmin=clamp_unit(row.get("xmin")),
+                ymin=clamp_unit(row.get("ymin")),
+                xmax=clamp_unit(row.get("xmax")),
+                ymax=clamp_unit(row.get("ymax")),
+                confidence=clamp_unit(row.get("confidence", 1.0)),
+            ))
+    for row in rows_from_table(tables.get("tracks")):
+        track_id = str(row.get("track_id", "")).strip()
+        label = str(row.get("label", "")).strip()
+        if track_id and label:
+            result.tracks.append(TrackInstance(
+                track_id=track_id,
+                frame_id=to_int(row.get("frame_id"), 0),
+                label=label,
+                xmin=clamp_unit(row.get("xmin")),
+                ymin=clamp_unit(row.get("ymin")),
+                xmax=clamp_unit(row.get("xmax")),
+                ymax=clamp_unit(row.get("ymax")),
+                confidence=clamp_unit(row.get("confidence", 1.0)),
+            ))
+    return result
+
+
+def load_editor_records(label_path, image_dir, source_format, classes_path=None):
+    batch = import_labels_with_report(label_path, image_dir, source_format=source_format, classes_path=classes_path)
+    return [{"image": image, "result": result.model_dump()} for image, result in batch.records], batch.report
+
+
+def image_size_or_default(image_path):
+    try:
+        with Image.open(image_path) as image:
+            return image.size
+    except Exception:
+        return 1, 1
+
+
+def fit_canvas_size(image_path, max_width=720):
+    try:
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except Exception:
+        return 1, 1, 1, 1
+    if width <= max_width:
+        return width, height, width, height
+    ratio = max_width / width
+    return width, height, int(width * ratio), int(height * ratio)
+
+
+def rect_canvas_object(label, xmin, ymin, xmax, ymax, width, height, stroke="#ef4444", editor_type="bbox", extra=None):
+    left = clamp_unit(xmin) * width
+    top = clamp_unit(ymin) * height
+    rect_width = max(1.0, (clamp_unit(xmax) - clamp_unit(xmin)) * width)
+    rect_height = max(1.0, (clamp_unit(ymax) - clamp_unit(ymin)) * height)
+    payload = {
+        "type": "rect",
+        "left": left,
+        "top": top,
+        "width": rect_width,
+        "height": rect_height,
+        "scaleX": 1,
+        "scaleY": 1,
+        "fill": "rgba(239, 68, 68, 0.12)",
+        "stroke": stroke,
+        "strokeWidth": 2,
+        "label": label,
+        "editor_type": editor_type,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def polygon_canvas_object(segment, width, height):
+    points = [{"x": point.x * width, "y": point.y * height} for point in segment.polygon]
+    return {
+        "type": "polygon",
+        "points": points,
+        "left": 0,
+        "top": 0,
+        "fill": "rgba(37, 99, 235, 0.15)",
+        "stroke": "#2563eb",
+        "strokeWidth": 2,
+        "label": segment.label,
+        "confidence": segment.confidence,
+        "editor_type": "segmentation",
+    }
+
+
+def canvas_objects_from_result(result, task_type, width, height):
+    result = DetectionResult.model_validate(result)
+    objects = []
+    if task_type in {"object_detection", "segmentation"}:
+        objects.extend(
+            rect_canvas_object(box.label, box.xmin, box.ymin, box.xmax, box.ymax, width, height, extra={"confidence": box.confidence})
+            for box in result.boxes
+        )
+    if task_type == "ocr":
+        objects.extend(
+            rect_canvas_object(item.text, item.xmin, item.ymin, item.xmax, item.ymax, width, height, stroke="#16a34a", editor_type="ocr", extra={"text": item.text, "confidence": item.confidence})
+            for item in result.texts
+        )
+    if task_type == "tracking":
+        objects.extend(
+            rect_canvas_object(item.label, item.xmin, item.ymin, item.xmax, item.ymax, width, height, stroke="#f97316", editor_type="tracking", extra={"track_id": item.track_id, "frame_id": item.frame_id, "confidence": item.confidence})
+            for item in result.tracks
+        )
+    if task_type == "segmentation":
+        objects.extend(polygon_canvas_object(segment, width, height) for segment in result.segments)
+    return {"version": "4.4.0", "objects": objects}
+
+
+def object_rect_bounds(obj, width, height):
+    left = to_float(obj.get("left"))
+    top = to_float(obj.get("top"))
+    rect_width = to_float(obj.get("width"), 1.0) * to_float(obj.get("scaleX"), 1.0)
+    rect_height = to_float(obj.get("height"), 1.0) * to_float(obj.get("scaleY"), 1.0)
+    xmin, xmax = sorted([left / max(width, 1), (left + rect_width) / max(width, 1)])
+    ymin, ymax = sorted([top / max(height, 1), (top + rect_height) / max(height, 1)])
+    return clamp_unit(xmin), clamp_unit(ymin), clamp_unit(xmax), clamp_unit(ymax)
+
+
+def object_polygon_points(obj, width, height):
+    left = to_float(obj.get("left"))
+    top = to_float(obj.get("top"))
+    scale_x = to_float(obj.get("scaleX"), 1.0)
+    scale_y = to_float(obj.get("scaleY"), 1.0)
+    points = obj.get("points") or []
+    result = []
+    for point in points:
+        x = (left + to_float(point.get("x")) * scale_x) / max(width, 1)
+        y = (top + to_float(point.get("y")) * scale_y) / max(height, 1)
+        result.append(Point(x=clamp_unit(x), y=clamp_unit(y)))
+    return result
+
+
+def result_with_canvas_objects(base_result, task_type, objects, default_label, default_text, default_track_id, width, height):
+    result = DetectionResult.model_validate(base_result)
+    if task_type == "object_detection":
+        result.boxes = []
+    elif task_type == "ocr":
+        result.texts = []
+    elif task_type == "tracking":
+        result.tracks = []
+    elif task_type == "segmentation":
+        result.boxes = []
+        result.segments = []
+
+    for index, obj in enumerate(objects or []):
+        obj_type = obj.get("type")
+        label = str(obj.get("label") or default_label or "object").strip()
+        confidence = clamp_unit(obj.get("confidence", 1.0))
+        if obj_type == "rect" and task_type in {"object_detection", "segmentation"}:
+            xmin, ymin, xmax, ymax = object_rect_bounds(obj, width, height)
+            result.boxes.append(BoundingBox(label=label, xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax, confidence=confidence))
+        elif obj_type == "rect" and task_type == "ocr":
+            xmin, ymin, xmax, ymax = object_rect_bounds(obj, width, height)
+            text = str(obj.get("text") or obj.get("label") or default_text or "text").strip()
+            result.texts.append(TextRegion(text=text, xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax, confidence=confidence))
+        elif obj_type == "rect" and task_type == "tracking":
+            xmin, ymin, xmax, ymax = object_rect_bounds(obj, width, height)
+            result.tracks.append(TrackInstance(
+                track_id=str(obj.get("track_id") or default_track_id or f"track_{index + 1}"),
+                frame_id=to_int(obj.get("frame_id"), 0),
+                label=label,
+                xmin=xmin,
+                ymin=ymin,
+                xmax=xmax,
+                ymax=ymax,
+                confidence=confidence,
+            ))
+        elif obj_type in {"polygon", "path"} and task_type == "segmentation":
+            points = object_polygon_points(obj, width, height)
+            if len(points) >= 3:
+                result.segments.append(PolygonSegment(label=label, polygon=points, confidence=confidence))
+    return result
+
+
+def render_label_editor_tab(workspace):
+    st.markdown('<div class="panel-title">라벨 편집</div>', unsafe_allow_html=True)
+    st.caption("classification, detection, OCR, segmentation, pose-estimation, tracking 라벨을 불러와 편집하고 다시 저장합니다.")
+    issue_context = st.session_state.get("editor_issue_context") or {}
+    issue_queue = st.session_state.get("editor_issue_queue") or []
+    if issue_context and issue_queue:
+        st.info(
+            f"문제 파일 {len(issue_queue)}개를 순차 편집하는 중입니다. "
+            "필요하면 아래 경로와 포맷을 조정한 뒤 다시 불러오세요."
+        )
+    label_path_candidates = workspace_dir_candidates(workspace, {"labels", "labeled"}, WORKSPACE_DEFAULTS["labels"])
+    image_dir_candidates = workspace_dir_candidates(workspace, {"raw", "images"}, WORKSPACE_DEFAULTS["images"])
+    if "editor_label_path" not in st.session_state:
+        st.session_state.editor_label_path = label_path_candidates[0]
+    if "editor_image_dir" not in st.session_state:
+        st.session_state.editor_image_dir = image_dir_candidates[0]
+
+    with st.container(border=True):
+        left, right = st.columns(2)
+        with left:
+            editor_label_path = editable_path_selectbox("편집할 라벨 경로", label_path_candidates, "editor_label_path", "라벨 파일 또는 라벨 폴더를 선택하세요.")
+            editor_source_format = st.selectbox("라벨 형식", SOURCE_OPTIONS, key="editor_source_format")
+            editor_classes = st.text_input("클래스 매핑 파일 (선택)", value="", key="editor_classes")
+        with right:
+            editor_image_dir = editable_path_selectbox("이미지 폴더 경로", image_dir_candidates, "editor_image_dir", "편집할 라벨과 연결되는 이미지 폴더입니다.")
+            editor_task = st.selectbox("편집 태스크", ["object_detection", "classification", "ocr", "segmentation", "pose_estimation", "tracking"], key="editor_task")
+            editor_output = st.text_input("저장 경로", value=WORKSPACE_DEFAULTS["labels"], key="editor_output")
+        load_clicked = st.button("라벨 불러오기", type="primary", icon=":material/edit:")
+
+    context = {
+        "label_path": editor_label_path,
+        "image_dir": editor_image_dir,
+        "source_format": editor_source_format,
+        "classes_path": editor_classes,
+        "task_type": editor_task,
+        "output_dir": editor_output,
+    }
+    context_signature = editor_context_signature(context)
+    auto_load_issue_context = bool(issue_context and issue_queue) and (
+        st.session_state.get("editor_loaded_context_signature") != context_signature
+    )
+    if load_clicked or auto_load_issue_context:
+        try:
+            records, report = load_editor_records(
+                resolve_workspace_path(workspace, editor_label_path),
+                resolve_workspace_path(workspace, editor_image_dir),
+                editor_source_format,
+                classes_path=resolve_workspace_path(workspace, editor_classes) if editor_classes else None,
+            )
+            st.session_state.editor_records = records
+            st.session_state.editor_report = report
+            st.session_state.editor_loaded_context_signature = context_signature
+            st.session_state.editor_selected_image = records[0]["image"] if records else ""
+            st.session_state.editor_save_formats = default_editor_save_formats(editor_source_format, report)
+            if load_clicked:
+                st.success(
+                    f"{len(records)}개 라벨 데이터를 불러왔습니다. "
+                    f"저장 포맷 기본값: {', '.join(st.session_state.editor_save_formats)}"
+                )
+        except Exception as exc:
+            message = f"라벨 불러오기 실패: {exc}"
+            if auto_load_issue_context:
+                st.warning(message)
+            else:
+                st.error(message)
+
+    records = st.session_state.get("editor_records", [])
+    if not records:
+        st.info("라벨을 불러오면 이미지별 라벨을 편집할 수 있습니다.")
+        return
+
+    image_names = [record["image"] for record in records]
+    if issue_queue:
+        queue_index = min(st.session_state.get("editor_issue_index", 0), len(issue_queue) - 1)
+        st.session_state.editor_issue_index = queue_index
+        queue_columns = st.columns([1, 1, 1, 3])
+        if queue_columns[0].button("이전 이슈", disabled=queue_index <= 0, key="editor_issue_prev"):
+            st.session_state.editor_issue_index = max(queue_index - 1, 0)
+            st.session_state.editor_selected_image_select = issue_queue[st.session_state.editor_issue_index]
+            st.rerun()
+        if queue_columns[1].button("다음 이슈", disabled=queue_index >= len(issue_queue) - 1, key="editor_issue_next"):
+            st.session_state.editor_issue_index = min(queue_index + 1, len(issue_queue) - 1)
+            st.session_state.editor_selected_image_select = issue_queue[st.session_state.editor_issue_index]
+            st.rerun()
+        if queue_columns[2].button("현재 파일 완료", key="editor_issue_done"):
+            completed = issue_queue.pop(queue_index)
+            st.session_state.editor_issue_queue = issue_queue
+            if issue_queue:
+                st.session_state.editor_issue_index = min(queue_index, len(issue_queue) - 1)
+                st.session_state.editor_selected_image_select = issue_queue[st.session_state.editor_issue_index]
+            else:
+                st.session_state.editor_issue_index = 0
+                st.session_state.editor_issue_context = {}
+            st.success(f"{completed} 파일을 편집 큐에서 제거했습니다.")
+            st.rerun()
+        queue_columns[3].caption(f"{queue_index + 1} / {len(issue_queue)}: {issue_queue[queue_index]}")
+        missing_from_records = [name for name in issue_queue if name not in image_names]
+        if missing_from_records:
+            st.warning(
+                "현재 불러온 라벨에서 일부 문제 파일을 찾지 못했습니다: "
+                + ", ".join(missing_from_records[:5])
+                + (" ..." if len(missing_from_records) > 5 else "")
+            )
+        if issue_queue[queue_index] in image_names:
+            st.session_state.editor_selected_image_select = issue_queue[queue_index]
+
+    selected_default = st.session_state.get("editor_selected_image_select") or st.session_state.get("editor_selected_image")
+    if selected_default not in image_names:
+        selected_default = image_names[0]
+        st.session_state.editor_selected_image_select = selected_default
+    selected_image = st.selectbox(
+        "편집 이미지",
+        image_names,
+        index=image_names.index(selected_default),
+        key="editor_selected_image_select",
+    )
+    record_index = image_names.index(selected_image)
+    record = records[record_index]
+    result = DetectionResult.model_validate(record["result"])
+    image_path = find_image_path(resolve_workspace_path(workspace, editor_image_dir), selected_image)
+    image_exists = Path(image_path).is_file()
+
+    preview_col, edit_col = st.columns([1, 1])
+    with preview_col:
+        st.markdown("**이미지 / 마우스 편집**")
+        if image_exists:
+            if st_canvas:
+                original_width, original_height, canvas_width, canvas_height = fit_canvas_size(image_path)
+                canvas_label = st.text_input("새 도형 기본 라벨", value="object", key="editor_canvas_label")
+                canvas_text = st.text_input("새 OCR 텍스트", value="text", key="editor_canvas_text")
+                canvas_track = st.text_input("새 Track ID", value="track_1", key="editor_canvas_track")
+                if editor_task in {"object_detection", "ocr", "tracking"}:
+                    mode_options = ["transform", "rect"]
+                    mode_help = "rect로 새 bbox를 그리고, transform으로 기존 bbox를 통째로 이동/리사이즈하세요."
+                elif editor_task == "segmentation":
+                    mode_options = ["transform", "polygon", "rect"]
+                    mode_help = "polygon으로 새 polygon을 그리고, rect로 bbox도 추가할 수 있습니다. transform으로 기존 도형을 이동/리사이즈하세요."
+                elif editor_task == "pose_estimation":
+                    mode_options = ["transform", "point"]
+                    mode_help = "pose는 표 편집이 기본이며, point 도형은 참고용으로 사용할 수 있습니다."
+                else:
+                    mode_options = ["transform"]
+                    mode_help = "classification은 이미지 단위 라벨이므로 표에서 수정하세요."
+                drawing_mode = st.selectbox("Canvas 모드", mode_options, help=mode_help, key="editor_canvas_mode")
+                with Image.open(image_path) as bg_image:
+                    bg_image = bg_image.convert("RGB").resize((canvas_width, canvas_height))
+                    canvas_result = st_canvas(
+                        fill_color="rgba(239, 68, 68, 0.12)",
+                        stroke_width=2,
+                        stroke_color="#ef4444",
+                        background_image=bg_image,
+                        update_streamlit=True,
+                        height=canvas_height,
+                        width=canvas_width,
+                        drawing_mode=drawing_mode,
+                        initial_drawing=canvas_objects_from_result(result, editor_task, canvas_width, canvas_height),
+                        key=f"canvas_{selected_image}_{editor_task}",
+                    )
+                st.caption(
+                    "도형을 선택해 통째로 이동하거나 크기를 조절할 수 있습니다. "
+                    "새 bbox/polygon을 그린 뒤 아래 버튼을 눌러 라벨에 반영하세요."
+                )
+                if st.button("Canvas 도형을 현재 라벨에 적용", icon=":material/select_check_box:"):
+                    objects = []
+                    if canvas_result and canvas_result.json_data:
+                        objects = canvas_result.json_data.get("objects", [])
+                    updated = result_with_canvas_objects(
+                        result,
+                        editor_task,
+                        objects,
+                        canvas_label,
+                        canvas_text,
+                        canvas_track,
+                        canvas_width,
+                        canvas_height,
+                    )
+                    record["result"] = updated.model_dump()
+                    records[record_index] = record
+                    st.session_state.editor_records = records
+                    st.success("Canvas 도형을 현재 이미지 라벨에 반영했습니다.")
+                    st.rerun()
+            else:
+                st.image(image_path, caption=selected_image, use_container_width=True)
+                st.warning("마우스 도형 편집을 사용하려면 `pip install streamlit-drawable-canvas`가 필요합니다. 현재는 표 편집만 사용할 수 있습니다.")
+        else:
+            st.warning("연결된 이미지 파일을 찾지 못했습니다. 표 편집은 계속 사용할 수 있습니다.")
+
+    with edit_col:
+        st.markdown("**라벨 테이블 편집**")
+        tables = result_to_editor_tables(result)
+        edited_tables = {}
+        if editor_task == "classification":
+            edited_tables["classification"] = st.data_editor(tables["classification"], num_rows="dynamic", key=f"edit_cls_{selected_image}")
+        elif editor_task == "ocr":
+            edited_tables["texts"] = st.data_editor(tables["texts"], num_rows="dynamic", key=f"edit_texts_{selected_image}")
+        elif editor_task == "segmentation":
+            edited_tables["segments"] = render_segmentation_point_editor(
+                tables["segments"],
+                selected_image,
+                image_path,
+                image_exists,
+            )
+        elif editor_task == "pose_estimation":
+            edited_tables["poses"] = st.data_editor(tables["poses"], num_rows="dynamic", key=f"edit_poses_{selected_image}")
+        elif editor_task == "tracking":
+            edited_tables["tracks"] = st.data_editor(tables["tracks"], num_rows="dynamic", key=f"edit_tracks_{selected_image}")
+        else:
+            edited_tables["boxes"] = st.data_editor(tables["boxes"], num_rows="dynamic", key=f"edit_boxes_{selected_image}")
+        if st.button("현재 이미지 라벨 적용", icon=":material/save:"):
+            merged_tables = result_to_editor_tables(result)
+            merged_tables.update(edited_tables)
+            record["result"] = editor_tables_to_result(editor_task, merged_tables).model_dump()
+            records[record_index] = record
+            st.session_state.editor_records = records
+            st.success("현재 이미지 라벨을 편집 상태에 반영했습니다.")
+
+    with st.container(border=True):
+        st.markdown("**전체 저장**")
+        if "editor_save_formats" not in st.session_state:
+            st.session_state.editor_save_formats = default_editor_save_formats(editor_source_format, st.session_state.get("editor_report", {}))
+        st.caption("기본 저장 포맷은 라벨을 불러올 때 감지한 원본 포맷을 따릅니다. 필요하면 여기에서 추가/변경할 수 있습니다.")
+        save_formats = st.multiselect("저장 포맷", FORMAT_OPTIONS, key="editor_save_formats")
+        if st.button("편집 라벨 저장", type="primary", icon=":material/save_as:"):
+            if not save_formats:
+                st.error("저장 포맷을 하나 이상 선택하세요.")
+            else:
+                try:
+                    output_dir = resolve_workspace_path(workspace, editor_output)
+                    writer = LabelExportWriter(output_dir, formats=save_formats)
+                    image_dir_abs = resolve_workspace_path(workspace, editor_image_dir)
+                    for item in records:
+                        image_path = find_image_path(image_dir_abs, item["image"])
+                        writer.save(DetectionResult.model_validate(item["result"]), image_path, formats=save_formats)
+                    artifacts = writer.finalize()
+                    if "manual_results" not in st.session_state:
+                        st.session_state.manual_results = {}
+                    st.session_state.manual_results["label_editor"] = {
+                        "action": "label_editor",
+                        "images": len(records),
+                        "formats": save_formats,
+                        "artifacts": artifacts,
+                        "output_dir": output_dir,
+                    }
+                    st.success(f"{len(records)}개 이미지의 편집 라벨을 저장했습니다: {output_dir}")
+                except Exception as exc:
+                    st.error(f"라벨 저장 실패: {exc}")
+
+
 def build_convert_preflight_preview(
     input_path,
     image_dir,
@@ -572,6 +1483,14 @@ def build_convert_preflight_preview(
         "validation": summarize_validation(validations),
         "preflight": build_conversion_preflight(batch.report, target_formats, validations),
         "records": validations,
+        "editor_context": {
+            "label_path": input_path,
+            "image_dir": image_dir,
+            "source_format": source_format,
+            "classes_path": classes_path or "",
+            "task_type": "object_detection",
+            "output_dir": WORKSPACE_DEFAULTS["labels"],
+        },
     }
 
 
@@ -649,6 +1568,11 @@ def render_convert_preflight_preview(preview):
     if detailed:
         st.markdown("**입력 데이터 문제 상세**")
         st.dataframe(detailed, width="stretch")
+        render_issue_editor_launcher(
+            [row["파일"] for row in detailed],
+            preview.get("editor_context", {}),
+            "convert-preflight",
+        )
 
 
 def preflight_detail_rows(preview):
@@ -1036,8 +1960,8 @@ if "workspace" not in st.session_state:
 
 workspace = st.session_state.workspace
 st.markdown(f'<div class="workspace-path">{html.escape(workspace)}</div>', unsafe_allow_html=True)
-chat_tab, convert_tab, generate_tab, evaluate_tab, result_tab, settings_tab = st.tabs(
-    ["대화형 작업", "형식 변환", "라벨 생성", "평가", "결과 리포트", "설정"]
+chat_tab, convert_tab, generate_tab, editor_tab, result_tab, settings_tab = st.tabs(
+    ["대화형 작업", "형식 변환", "라벨 생성", "라벨 편집", "결과 리포트", "설정"]
 )
 
 if st.session_state.pop("open_result_report", False):
@@ -1046,6 +1970,18 @@ if st.session_state.pop("open_result_report", False):
         <script>
         const labels = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
         const target = labels.find((el) => el.textContent.includes('결과 리포트'));
+        if (target) target.click();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+if st.session_state.pop("open_label_editor", False):
+    st.html(
+        """
+        <script>
+        const labels = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
+        const target = labels.find((el) => el.textContent.includes('라벨 편집'));
         if (target) target.click();
         </script>
         """,
@@ -1175,6 +2111,12 @@ with generate_tab:
             visualization_output = st.text_input("시각화 출력", value=WORKSPACE_DEFAULTS["visualized"])
             plugin_config = st.text_input("Plugin 설정 파일", value=WORKSPACE_DEFAULTS["plugin_config"])
             generation_classes = st.text_input("클래스 매핑 파일", value="", placeholder="data.yaml 또는 classes.txt")
+            generation_class_list = st.text_area(
+                "검출 클래스 목록 (선택)",
+                value="",
+                placeholder="person\ncar\ncat 또는 person, car, cat",
+                help="클래스 매핑 파일이 없거나 프롬프트에 대상 클래스가 명확하지 않을 때 입력하세요.",
+            )
         with right:
             st.markdown('<div class="form-section">생성 규칙</div>', unsafe_allow_html=True)
             task_type = st.selectbox("태스크", TASK_OPTIONS)
@@ -1198,13 +2140,25 @@ with generate_tab:
         approve_expensive = st.checkbox("고비용 모델 API 호출 승인")
         generate_submit = st.form_submit_button("라벨 생성 실행", type="primary", icon=":material/auto_awesome:")
     if generate_submit:
-        if not generation_images or not generation_output or not visualization_output or not generation_formats:
-            st.error("이미지, 라벨 출력, 시각화 출력 경로와 출력 포맷을 모두 지정하세요.")
-        elif not prompt.strip():
-            st.error("라벨 생성 프롬프트를 입력하세요.")
-        elif not approve_expensive:
-            st.error("모델 호출 승인이 필요합니다.")
+        missing_info = generation_missing_info(
+            workspace,
+            generation_images,
+            generation_output,
+            visualization_output,
+            generation_formats,
+            prompt,
+            approve_expensive,
+            generation_classes,
+            generation_class_list,
+        )
+        if missing_info:
+            st.error("라벨 생성을 실행하기 전에 추가 정보가 필요합니다.")
+            st.dataframe(
+                [{"필요 정보": item, "입력 안내": message} for item, message in missing_info],
+                width="stretch",
+            )
         else:
+            effective_prompt = build_generation_prompt(prompt, generation_class_list)
             generate_plan = {
                 "request_summary": "Streamlit automatic label generation",
                 "operations": [{
@@ -1217,7 +2171,7 @@ with generate_tab:
                     "threshold": threshold,
                     "insight_imbalance_ratio": generation_insight_ratio,
                     "inference_count": int(inference_count),
-                    "prompt": prompt,
+                    "prompt": effective_prompt,
                     "generation_strategy": "specialist_first",
                     "specialist_consistency_runs": 0,
                     "specialist_advisor_mode": "none",
@@ -1232,36 +2186,8 @@ with generate_tab:
                 result_key="generate",
                 first_pass_plan_key="last_generate_first_pass_plan",
             )
-with evaluate_tab:
-    st.markdown('<div class="panel-title">실험 결과 평가</div>', unsafe_allow_html=True)
-    with st.form("evaluate_form"):
-        ground_truth = st.text_input("Ground truth 디렉터리", value=WORKSPACE_DEFAULTS["ground_truth"])
-        report_output = st.text_input("리포트 출력", value=WORKSPACE_DEFAULTS["reports"])
-        run_lines = st.text_area(
-            "실험 경로",
-            placeholder="baseline=D:/runs/baseline\ncascade=D:/runs/cascade",
-        )
-        evaluate_submit = st.form_submit_button("평가 실행", type="primary", icon=":material/analytics:")
-    if evaluate_submit:
-        try:
-            runs = parse_runs(run_lines)
-            if not report_output:
-                raise ValueError("리포트 출력 경로를 입력하세요.")
-        except ValueError as exc:
-            st.error(str(exc))
-        else:
-            run_plan({
-                "request_summary": "Streamlit experiment evaluation",
-                "operations": [{
-                    "action": "evaluate",
-                    "gt_dir": resolve_workspace_path(workspace, ground_truth) if ground_truth else None,
-                    "out_dir": resolve_workspace_path(workspace, report_output),
-                    "runs": {
-                        name: resolve_workspace_path(workspace, path)
-                        for name, path in runs.items()
-                    },
-                }],
-            }, result_key="evaluate")
+with editor_tab:
+    render_label_editor_tab(workspace)
 with settings_tab:
     st.markdown('<div class="panel-title">사용자 설정</div>', unsafe_allow_html=True)
     settings = read_user_settings()

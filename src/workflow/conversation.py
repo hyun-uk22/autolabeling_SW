@@ -132,10 +132,22 @@ def _json_format(path: Path) -> Optional[str]:
     if isinstance(data, list) and data and all(isinstance(item, dict) for item in data[:10]):
         return "generic_json"
     if isinstance(data, dict) and any(
-        key in data for key in ("image", "image_name", "file_name", "boxes", "segments", "objects")
+        key in data for key in ("image", "image_name", "file_name", "boxes", "bbox", "segments", "objects")
     ):
         return "generic_json"
+    if any(isinstance(item, dict) and "bbox" in item for item in iter_dicts(data)):
+        return "generic_json"
     return None
+
+
+def iter_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_dicts(child)
 
 
 def _looks_like_label_csv(path: Path) -> bool:
@@ -219,13 +231,16 @@ def _select_image_for_label(
     images: List[Dict[str, Any]],
     label: Dict[str, Any],
     root: Path,
+    formats: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     if not images:
-        raise ValueError(
-            "Workspace에서 라벨과 연결할 이미지 디렉터리를 찾지 못했습니다. "
-            f"라벨 후보는 `{label['relative_path']}`에서 찾았지만 COCO/VOC 변환에는 원본 이미지 크기가 필요합니다. "
-            "`data/raw`, `data/images`, `images` 중 하나에 원본 이미지를 두거나 프롬프트에 이미지 경로를 함께 지정하세요."
-        )
+        return {
+            "path": label["path"] if Path(label["path"]).is_dir() else str(Path(label["path"]).parent),
+            "relative_path": label["relative_path"],
+            "file_count": 0,
+            "missing": True,
+            "requires_image_size": bool(set(formats or []) & {"coco", "pascal_voc"}),
+        }
     return max(images, key=lambda image: _image_candidate_score(image, label, root))
 
 
@@ -729,7 +744,7 @@ def build_conversation_plan(
             explicit_path,
             requested_source_format,
         )
-        selected_images = _select_image_for_label(inventory["image_directories"], selected, root)
+        selected_images = _select_image_for_label(inventory["image_directories"], selected, root, formats)
         duplicate_iou = overrides.get("duplicate_iou")
         if duplicate_iou is None:
             duplicate_iou = _numeric_option(request, "iou")
@@ -741,6 +756,16 @@ def build_conversation_plan(
             warnings.append(
                 f"이미지 후보 {len(inventory['image_directories'])}개 중 {selected_images['relative_path']}을 라벨과 연결했습니다."
             )
+        if selected_images.get("missing"):
+            if selected_images.get("requires_image_size"):
+                warnings.append(
+                    "원본 이미지 디렉터리를 찾지 못했습니다. COCO/Pascal VOC 출력은 이미지 크기가 필요하므로 "
+                    "실행은 가능하지만 해당 포맷 출력이 누락되고 리포트에 missing_image가 기록될 수 있습니다."
+                )
+            else:
+                warnings.append(
+                    "원본 이미지 디렉터리를 찾지 못했습니다. YOLO/Vision JSON처럼 이미지 크기가 필요 없는 출력은 계속 진행합니다."
+                )
         operation = OperationPlan(
             action="convert",
             input_path=selected["path"],

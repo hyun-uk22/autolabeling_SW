@@ -1,2 +1,3 @@
 # Install requirements.txt first.
 streamlit>=1.40,<2
+streamlit-drawable-canvas

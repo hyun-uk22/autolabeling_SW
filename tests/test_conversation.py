@@ -100,6 +100,71 @@ class ConversationWorkflowTests(unittest.TestCase):
             self.assertEqual(Path(operation["img_dir"]), image_dir)
             self.assertTrue(any("이미지 후보" in warning for warning in proposal["warnings"]))
 
+    def test_conversion_to_yolo_can_plan_without_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "data" / "labeled"
+            label_dir.mkdir(parents=True)
+            (label_dir / "sample.xml").write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<annotation>
+  <filename>sample.jpg</filename>
+  <size><width>100</width><height>80</height><depth>3</depth></size>
+  <object><name>car</name><bndbox><xmin>10</xmin><ymin>10</ymin><xmax>50</xmax><ymax>50</ymax></bndbox></object>
+</annotation>
+""",
+                encoding="utf-8",
+            )
+
+            proposal = build_conversation_plan(
+                "현재 데이터셋의 라벨링 형식을 yolo26에서 사용할 수 있게 바꿔줘",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["formats"], ["yolo"])
+            self.assertEqual(Path(operation["input_path"]), label_dir)
+            self.assertEqual(Path(operation["img_dir"]), label_dir)
+            self.assertTrue(any("이미지 크기가 필요 없는 출력" in warning for warning in proposal["warnings"]))
+
+    def test_conversion_to_coco_without_images_warns_instead_of_failing_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "data" / "labeled"
+            label_dir.mkdir(parents=True)
+            (label_dir / "classes.txt").write_text("car\n", encoding="utf-8")
+            (label_dir / "sample.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+
+            proposal = build_conversation_plan(
+                "현재 데이터셋의 라벨링 형식을 COCO형식으로 바꿔줘",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["formats"], ["coco"])
+            self.assertEqual(Path(operation["img_dir"]), label_dir)
+            self.assertTrue(any("COCO/Pascal VOC 출력은 이미지 크기가 필요" in warning for warning in proposal["warnings"]))
+
+    def test_conversion_discovers_custom_json_with_bbox_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "data" / "labeled"
+            label_dir.mkdir(parents=True)
+            (label_dir / "custom.json").write_text(
+                json.dumps({"items": [{"image": "sample.jpg", "label": "car", "bbox": [0.1, 0.1, 0.4, 0.4]}]}),
+                encoding="utf-8",
+            )
+
+            proposal = build_conversation_plan(
+                "현재 데이터셋의 라벨링 형식을 yolo 형식으로 바꿔줘. json 안에 bbox 가 있어",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(Path(operation["input_path"]), label_dir / "custom.json")
+            self.assertEqual(operation["formats"], ["yolo"])
+            self.assertEqual(operation["source_format"], "auto")
+
     def test_rule_parser_runs_before_llm_intent_router(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

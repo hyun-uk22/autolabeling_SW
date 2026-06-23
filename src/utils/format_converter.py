@@ -32,12 +32,66 @@ def normalize_label_formats(value: str | Iterable[str]) -> List[str]:
     return list(dict.fromkeys(requested))
 
 
+def segment_to_bbox(segment) -> Optional[BoundingBox]:
+    points = [point for point in segment.polygon if point is not None]
+    if len(points) < 3:
+        return None
+    xs = [max(0.0, min(1.0, float(point.x))) for point in points]
+    ys = [max(0.0, min(1.0, float(point.y))) for point in points]
+    if not xs or not ys:
+        return None
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    if xmin >= xmax or ymin >= ymax:
+        return None
+    return BoundingBox(
+        label=segment.label,
+        xmin=xmin,
+        ymin=ymin,
+        xmax=xmax,
+        ymax=ymax,
+        confidence=segment.confidence,
+    )
+
+
+def result_with_segment_bboxes(result: DetectionResult) -> DetectionResult:
+    if not result.segments:
+        return result
+    converted = result.model_copy(deep=True)
+    existing = {
+        (
+            box.label,
+            round(box.xmin, 6),
+            round(box.ymin, 6),
+            round(box.xmax, 6),
+            round(box.ymax, 6),
+        )
+        for box in converted.boxes
+    }
+    for segment in converted.segments:
+        box = segment_to_bbox(segment)
+        if box is None:
+            continue
+        key = (
+            box.label,
+            round(box.xmin, 6),
+            round(box.ymin, 6),
+            round(box.xmax, 6),
+            round(box.ymax, 6),
+        )
+        if key not in existing:
+            converted.boxes.append(box)
+            existing.add(key)
+    return converted
+
+
 def resolve_export_formats(
     result: DetectionResult,
     requested_formats: str | Iterable[str],
     task_type: Optional[str] = None,
 ) -> List[str]:
     requested = normalize_label_formats(requested_formats)
+    result = result_with_segment_bboxes(result)
     selected: List[str] = []
     has_boxes = bool(result.boxes)
     has_segments = bool(result.segments)
@@ -311,6 +365,7 @@ class LabelExportWriter:
         image_path: str,
         formats: Optional[str | Iterable[str]] = None,
     ) -> Dict[str, str]:
+        result = result_with_segment_bboxes(result)
         image_name = os.path.basename(image_path)
         selected_formats = normalize_label_formats(formats) if formats is not None else self.formats
         if "custom" in selected_formats and not self.custom_template:
