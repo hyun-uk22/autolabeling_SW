@@ -1,5 +1,4 @@
 import csv
-import csv
 import json
 import re
 from collections import Counter, defaultdict

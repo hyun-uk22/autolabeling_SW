@@ -256,6 +256,76 @@ class ReportingTests(unittest.TestCase):
             self.assertIn("vision_json", artifacts)
             self.assertTrue(Path(artifacts["vision_json"]).exists())
 
+    def test_conversion_exports_yolo_even_when_source_image_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "labels"
+            image_dir = root / "images"
+            output_dir = root / "converted"
+            label_dir.mkdir()
+            image_dir.mkdir()
+            (label_dir / "classes.txt").write_text("car\n", encoding="utf-8")
+            (label_dir / "missing.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+            operation = OperationPlan(
+                action="convert",
+                input_path=str(label_dir),
+                img_dir=str(image_dir),
+                out_dir=str(output_dir),
+                source_format="yolo",
+                formats=["yolo"],
+            )
+            runtime = WorkflowRuntime()
+
+            loaded = runtime.load_conversion(operation, operation.source_format)
+            validations = runtime.validate_conversion(operation, loaded["records"])
+            output = runtime.export_conversion(
+                operation,
+                loaded["records"],
+                validations,
+                loaded["resolved_source_format"],
+                loaded["input_summary"],
+            )
+
+            self.assertEqual(output["records_read"], 1)
+            self.assertEqual(output["records_converted"], 1)
+            self.assertTrue((output_dir / "missing.txt").is_file())
+            self.assertIn("missing_images", [item["code"] for item in output["preflight"]["notices"]])
+
+    def test_conversion_does_not_fail_when_coco_requires_missing_image_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "labels"
+            image_dir = root / "images"
+            output_dir = root / "converted"
+            label_dir.mkdir()
+            image_dir.mkdir()
+            (label_dir / "classes.txt").write_text("car\n", encoding="utf-8")
+            (label_dir / "missing.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+            operation = OperationPlan(
+                action="convert",
+                input_path=str(label_dir),
+                img_dir=str(image_dir),
+                out_dir=str(output_dir),
+                source_format="yolo",
+                formats=["coco"],
+            )
+            runtime = WorkflowRuntime()
+
+            loaded = runtime.load_conversion(operation, operation.source_format)
+            validations = runtime.validate_conversion(operation, loaded["records"])
+            output = runtime.export_conversion(
+                operation,
+                loaded["records"],
+                validations,
+                loaded["resolved_source_format"],
+                loaded["input_summary"],
+            )
+
+            self.assertEqual(output["records_read"], 1)
+            self.assertEqual(output["records_converted"], 0)
+            self.assertTrue((output_dir / "conversion_report.json").is_file())
+            self.assertTrue(any("missing_image" in issue for record in output["exports"] for issue in record["issues"]))
+
 
 if __name__ == "__main__":
     unittest.main()

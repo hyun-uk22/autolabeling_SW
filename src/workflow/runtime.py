@@ -24,6 +24,7 @@ from ..reporting import (
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
 from ..utils.format_converter import LabelExportWriter, resolve_export_formats
 from ..utils.geometry import calculate_iou, compute_result_consistency, consistency_metric_name
+from ..utils import json_io
 from ..utils.label_importer import (
     extract_class_names_from_text,
     find_image_path,
@@ -554,9 +555,9 @@ class WorkflowRuntime:
                 "consistency_score": result.consistency_score,
                 "mean_confidence": result.mean_confidence,
                 "uncertainty_score": result.uncertainty_score,
-                "plugin_scores": json.dumps(result.plugin_scores, ensure_ascii=False),
-                "plugin_records": json.dumps(record.get("plugin_records", []), ensure_ascii=False),
-                "first_pass_report": json.dumps(first_pass_report, ensure_ascii=False),
+                "plugin_scores": json_io.dumps(result.plugin_scores, ensure_ascii=False),
+                "plugin_records": json_io.dumps(record.get("plugin_records", []), ensure_ascii=False),
+                "first_pass_report": json_io.dumps(first_pass_report, ensure_ascii=False),
                 "first_pass_total_labels": first_pass_report.get("total_labels"),
                 "first_pass_mean_confidence": (first_pass_report.get("confidence") or {}).get("mean"),
                 "first_pass_low_confidence_count": (first_pass_report.get("confidence") or {}).get("low_confidence_count"),
@@ -565,14 +566,14 @@ class WorkflowRuntime:
                 "specialist_result_consistency": specialist_consistency.get("result_consistency"),
                 "specialist_bbox_agreement": bbox_agreement.get("agreement"),
                 "specialist_mean_matched_iou": bbox_agreement.get("mean_matched_iou"),
-                "specialist_rerun_records": json.dumps(specialist_consistency.get("records", []), ensure_ascii=False),
-                "specialist_rerun_patch": json.dumps(specialist_consistency.get("patch", {}), ensure_ascii=False),
-                "validation_issues": json.dumps(record.get("issues", []), ensure_ascii=False),
+                "specialist_rerun_records": json_io.dumps(specialist_consistency.get("records", []), ensure_ascii=False),
+                "specialist_rerun_patch": json_io.dumps(specialist_consistency.get("patch", {}), ensure_ascii=False),
+                "validation_issues": json_io.dumps(record.get("issues", []), ensure_ascii=False),
                 "low_api_attempts": record.get("low_api_attempts", 0),
                 "high_api_attempts": record.get("high_api_attempts", 0),
                 "elapsed_sec": record.get("elapsed_sec", 0.0),
                 "label_path": label_paths.get("yolo") or next(iter(label_paths.values()), ""),
-                "label_paths": json.dumps(label_paths, ensure_ascii=False),
+                "label_paths": json_io.dumps(label_paths, ensure_ascii=False),
                 "visualization_path": vis_path,
             })
         artifacts = writer.finalize()
@@ -586,7 +587,7 @@ class WorkflowRuntime:
                 writer_csv.writerows(metric_rows)
             with open(metrics_jsonl, "w", encoding="utf-8") as f:
                 for row in metric_rows:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    f.write(json_io.dumps(row, ensure_ascii=False) + "\n")
         evaluation = None
         if operation.gt_dir and os.path.isdir(operation.gt_dir) and "yolo" in writer.used_formats:
             evaluation = evaluate_yolo_dirs(operation.out_dir, operation.gt_dir, operation.eval_iou)
@@ -694,10 +695,8 @@ class WorkflowRuntime:
         user_action_path = os.path.join(operation.out_dir, "user_action_report.json")
         summary["summary_path"] = summary_path
         summary["user_action_report_path"] = user_action_path
-        with open(user_action_path, "w", encoding="utf-8") as f:
-            json.dump(user_action_report, f, ensure_ascii=False, indent=2)
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
+        json_io.dump_file(user_action_report, user_action_path, ensure_ascii=False, indent=2)
+        json_io.dump_file(summary, summary_path, ensure_ascii=False, indent=2)
         return summary
 
     def load_conversion(self, operation: OperationPlan, source_format: str) -> Dict[str, Any]:
@@ -758,8 +757,7 @@ class WorkflowRuntime:
         for record in records:
             issues = validation_map.get(record["image"], [])
             blocking = any(
-                issue.startswith("missing_image:")
-                or issue.startswith("image_open_failed:")
+                issue.startswith("image_open_failed:")
                 or issue == "invalid_image_size"
                 for issue in issues
             )
@@ -770,6 +768,13 @@ class WorkflowRuntime:
             resolved_formats = resolve_export_formats(result, writer.formats, operation.task_type or result.task_type)
             paths = writer.save(result, image_path, formats=resolved_formats)
             export_issues = auditor.audit_record(paths)
+            missing_formats = sorted(set(resolved_formats) - set(paths))
+            if missing_formats:
+                reason = "missing_image" if any(issue.startswith("missing_image:") for issue in issues) else "missing_required_metadata"
+                export_issues.extend(
+                    f"{fmt}:{reason}:{image_path}"
+                    for fmt in missing_formats
+                )
             export_records.append({
                 "image": record["image"],
                 "paths": paths,
@@ -821,10 +826,8 @@ class WorkflowRuntime:
         user_action_path = os.path.join(operation.out_dir, "user_action_report.json")
         report["report_path"] = report_path
         report["user_action_report_path"] = user_action_path
-        with open(user_action_path, "w", encoding="utf-8") as f:
-            json.dump(user_action_report, f, ensure_ascii=False, indent=2)
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
+        json_io.dump_file(user_action_report, user_action_path, ensure_ascii=False, indent=2)
+        json_io.dump_file(report, report_path, ensure_ascii=False, indent=2)
         return report
 
     def conversion_schema_candidates(self, operation: OperationPlan) -> List[str]:
@@ -919,8 +922,7 @@ class WorkflowRuntime:
         }
         os.makedirs(out_dir, exist_ok=True)
         report_path = os.path.join(out_dir, "dataset_layout.json")
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        json_io.dump_file(metadata, report_path, ensure_ascii=False, indent=2)
 
         return {
             **metadata,
@@ -932,6 +934,5 @@ class WorkflowRuntime:
     def save_history(self, output_dir: str, history: List[Dict[str, Any]]) -> str:
         os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, "workflow_history.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
+        json_io.dump_file(history, path, ensure_ascii=False, indent=2)
         return path

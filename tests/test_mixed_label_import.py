@@ -6,7 +6,7 @@ import unittest
 from PIL import Image
 
 from src.utils.format_converter import LabelExportWriter
-from src.utils.label_importer import extract_class_names_from_text, import_labels, import_labels_with_report
+from src.utils.label_importer import extract_class_names_from_text, find_image_path, import_labels, import_labels_with_report
 from src.utils.label_validator import validate_result
 
 
@@ -106,6 +106,29 @@ class MixedLabelImportTests(unittest.TestCase):
         self.assertAlmostEqual(box.xmin, 0.891204)
         self.assertEqual(box.xmax, 1.0)
         self.assertFalse(validate_result(records[0][1]))
+
+    def test_find_image_path_searches_nested_image_directories(self):
+        nested_dir = os.path.join(self.image_dir, "nested", "leaf")
+        os.makedirs(nested_dir)
+        nested_image = os.path.join(nested_dir, "deep_sample.jpg")
+        Image.new("RGB", (80, 60), "white").save(nested_image)
+
+        resolved = find_image_path(self.image_dir, "deep_sample.jpg")
+
+        self.assertEqual(os.path.abspath(resolved), os.path.abspath(nested_image))
+
+    def test_nested_image_lookup_prevents_missing_image_validation_issue(self):
+        nested_dir = os.path.join(self.image_dir, "nested", "leaf")
+        os.makedirs(nested_dir)
+        Image.new("RGB", (80, 60), "white").save(os.path.join(nested_dir, "deep_sample.jpg"))
+        self._write("deep_sample.txt", "0 0.500000 0.500000 0.200000 0.200000\n")
+        self._write("classes.txt", "car\n")
+
+        records = import_labels(self.label_dir, self.image_dir, source_format="yolo")
+        image_name, result = records[0]
+        image_path = find_image_path(self.image_dir, image_name)
+
+        self.assertFalse(validate_result(result, image_path))
 
     def test_yolo_data_yaml_takes_priority_over_classes_txt(self):
         self._write("classes.txt", "wrong0\nwrong1\nwrong2\nwrong3\n")

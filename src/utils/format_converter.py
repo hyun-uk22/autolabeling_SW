@@ -1,4 +1,3 @@
-import json
 import os
 import xml.etree.ElementTree as ET
 from typing import Dict, Iterable, List, Optional
@@ -6,6 +5,7 @@ from typing import Dict, Iterable, List, Optional
 from PIL import Image
 
 from ..core.models import BoundingBox, DetectionResult
+from . import json_io
 
 SUPPORTED_LABEL_FORMATS = {"yolo", "pascal_voc", "coco", "custom", "vision_json"}
 BOX_FORMATS = {"yolo", "pascal_voc"}
@@ -66,9 +66,14 @@ def resolve_export_formats(
     return list(dict.fromkeys(selected))
 
 
-def get_image_size(image_path: str) -> tuple[int, int]:
-    with Image.open(image_path) as img:
-        return img.size
+def get_image_size(image_path: str, default: Optional[tuple[int, int]] = None) -> tuple[int, int]:
+    try:
+        with Image.open(image_path) as img:
+            return img.size
+    except (FileNotFoundError, OSError):
+        if default is not None:
+            return default
+        raise
 
 
 def normalized_to_pixel_box(box: BoundingBox, width: int, height: int) -> dict:
@@ -129,7 +134,7 @@ def point_to_pixel(point, width: int, height: int) -> dict:
     }
 
 def result_to_export_dict(result: DetectionResult, image_path: str) -> dict:
-    width, height = get_image_size(image_path)
+    width, height = get_image_size(image_path, default=(0, 0))
     return {
         "image_name": os.path.basename(image_path),
         "image_path": image_path,
@@ -314,9 +319,10 @@ class LabelExportWriter:
         paths = {}
         if "yolo" in selected_formats:
             paths["yolo"] = save_as_yolo(result, image_name, self.output_dir, self.class_list)
-        if "pascal_voc" in selected_formats:
+        image_available = os.path.exists(image_path)
+        if "pascal_voc" in selected_formats and image_available:
             paths["pascal_voc"] = save_as_pascal_voc(result, image_path, self.output_dir, self.class_list)
-        if "coco" in selected_formats:
+        if "coco" in selected_formats and image_available:
             self._add_coco_image(result, image_path)
             paths["coco"] = os.path.join(self.output_dir, "coco_annotations.json")
         if "vision_json" in selected_formats:
@@ -348,14 +354,13 @@ class LabelExportWriter:
                 "annotations": self.coco_annotations,
                 "categories": categories,
             }
-            with open(coco_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            json_io.dump_file(data, coco_path, ensure_ascii=False, indent=2)
             paths["coco"] = coco_path
         if "vision_json" in self.used_formats:
             jsonl_path = os.path.join(self.output_dir, "vision_annotations.jsonl")
             with open(jsonl_path, "w", encoding="utf-8") as f:
                 for record in self.vision_json_records:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    f.write(json_io.dumps(record, ensure_ascii=False) + "\n")
             paths["vision_json"] = jsonl_path
         return paths
 
@@ -424,7 +429,7 @@ class LabelExportWriter:
             self._next_annotation_id += 1
 
     def _save_custom(self, result: DetectionResult, image_path: str) -> str:
-        width, height = get_image_size(image_path)
+        width, height = get_image_size(image_path, default=(0, 0))
         image_name = os.path.basename(image_path)
         objects = self._export_objects(result, width, height)
         payload = {
@@ -437,10 +442,10 @@ class LabelExportWriter:
             "mean_confidence": result.mean_confidence if result.mean_confidence is not None else "",
             "uncertainty_score": result.uncertainty_score if result.uncertainty_score is not None else "",
             "object_count": len(objects),
-            "objects_json": json.dumps(objects, ensure_ascii=False),
-            "boxes_json": json.dumps([obj["normalized"] for obj in objects], ensure_ascii=False),
-            "labels_json": json.dumps([obj["label"] for obj in objects], ensure_ascii=False),
-            "result_json": json.dumps(result_to_export_dict(result, image_path), ensure_ascii=False),
+            "objects_json": json_io.dumps(objects, ensure_ascii=False),
+            "boxes_json": json_io.dumps([obj["normalized"] for obj in objects], ensure_ascii=False),
+            "labels_json": json_io.dumps([obj["label"] for obj in objects], ensure_ascii=False),
+            "result_json": json_io.dumps(result_to_export_dict(result, image_path), ensure_ascii=False),
         }
         content = self.custom_template.format(**payload)
         custom_path = os.path.join(

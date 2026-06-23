@@ -6,10 +6,12 @@ import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..core.llm_client import normalize_confidence, normalize_coordinate
 from ..core.models import BoundingBox, DetectionResult, Point, PolygonSegment
+from . import json_io
 
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -49,15 +51,50 @@ class LabelImportBatch:
     report: Dict[str, Any]
 
 
+@lru_cache(maxsize=128)
+def _image_path_index(image_dir: str) -> Dict[str, str]:
+    index: Dict[str, str] = {}
+    if not os.path.isdir(image_dir):
+        return index
+    for root, dirs, files in os.walk(image_dir):
+        dirs.sort()
+        for filename in sorted(files):
+            if not filename.lower().endswith(IMAGE_EXTS):
+                continue
+            path = os.path.join(root, filename)
+            index.setdefault(filename.lower(), path)
+            index.setdefault(os.path.splitext(filename)[0].lower(), path)
+    return index
+
+
+def _lookup_indexed_image(image_dir: str, image_name: str) -> Optional[str]:
+    basename = os.path.basename(image_name)
+    stem = os.path.splitext(basename)[0]
+    index = _image_path_index(image_dir)
+    return index.get(basename.lower()) or index.get(stem.lower())
+
+
 def find_image_path(image_dir: str, image_name: str) -> str:
+    image_dir = os.path.abspath(image_dir)
     candidate = os.path.join(image_dir, image_name)
     if os.path.exists(candidate):
         return candidate
-    stem = os.path.splitext(image_name)[0]
+
+    basename = os.path.basename(image_name)
+    stem = os.path.splitext(basename)[0]
     for ext in IMAGE_EXTS:
         candidate = os.path.join(image_dir, stem + ext)
         if os.path.exists(candidate):
             return candidate
+
+    indexed = _lookup_indexed_image(image_dir, image_name)
+    if indexed:
+        return indexed
+
+    _image_path_index.cache_clear()
+    indexed = _lookup_indexed_image(image_dir, image_name)
+    if indexed:
+        return indexed
     return os.path.join(image_dir, image_name)
 
 
@@ -80,8 +117,7 @@ def infer_label_format(input_path: str) -> str:
     if ext == ".txt":
         return "yolo"
     if ext == ".json":
-        with open(input_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = json_io.load_file(input_path)
         if isinstance(data, dict) and {"images", "annotations", "categories"}.issubset(data.keys()):
             return "coco"
         return "generic_json"
@@ -311,8 +347,7 @@ def _classes_for_source(source: LabelSource, classes_path: Optional[str]) -> Lis
     if source.format == "yolo":
         return load_yolo_classes(source.path, classes_path, source.search_root)
     if source.format == "coco":
-        with open(source.path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = json_io.load_file(source.path)
         categories = sorted(data.get("categories", []), key=lambda item: item.get("id", 0))
         return [item.get("name", str(item.get("id"))) for item in categories]
     if source.format == "pascal_voc":
@@ -443,8 +478,7 @@ def import_pascal_voc(input_path: str) -> List[Tuple[str, DetectionResult]]:
 
 
 def import_coco(input_path: str) -> List[Tuple[str, DetectionResult]]:
-    with open(input_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = json_io.load_file(input_path)
 
     images = {item["id"]: item for item in data.get("images", [])}
     categories = {item["id"]: item.get("name", str(item["id"])) for item in data.get("categories", [])}
@@ -492,7 +526,7 @@ def import_vision_json(input_path: str) -> List[Tuple[str, DetectionResult]]:
             for line in f:
                 if not line.strip():
                     continue
-                data = json.loads(line)
+                data = json_io.loads(line)
                 result = DetectionResult(task_type=data.get("task_type", "object_detection"))
                 for item in data.get("boxes", []):
                     norm = item.get("normalized", item)
@@ -540,8 +574,7 @@ def iter_dicts(value):
 
 
 def import_generic_json(input_path: str) -> List[Tuple[str, DetectionResult]]:
-    with open(input_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = json_io.load_file(input_path)
     grouped: Dict[str, DetectionResult] = {}
     for item in iter_dicts(data):
         if not all(key in item for key in ["xmin", "ymin", "xmax", "ymax"]):
@@ -628,13 +661,12 @@ def _detect_label_file(path: str, image_dir: str) -> Tuple[Optional[str], Option
                 first = next((line for line in f if line.strip()), None)
             if first is None:
                 return "vision_json", None
-            data = json.loads(first)
+            data = json_io.loads(first)
             if isinstance(data, dict) and ("image_name" in data or "task_type" in data):
                 return "vision_json", None
             return None, "unrecognized_jsonl_schema"
         if ext == ".json":
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = json_io.load_file(path)
             if isinstance(data, dict) and {"images", "annotations", "categories"}.issubset(data):
                 return "coco", None
             return None, "unrecognized_json_schema"
@@ -900,9 +932,9 @@ def merge_label_records(
 
         for field in ("poses", "texts", "tracks"):
             target_items = getattr(merged, field)
-            signatures = {json.dumps(item.model_dump(), sort_keys=True) for item in target_items}
+            signatures = {json_io.dumps(item.model_dump(), sort_keys=True) for item in target_items}
             for item in getattr(result, field):
-                signature = json.dumps(item.model_dump(), sort_keys=True)
+                signature = json_io.dumps(item.model_dump(), sort_keys=True)
                 if signature in signatures:
                     duplicates_removed += 1
                     continue

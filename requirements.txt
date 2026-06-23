@@ -5,6 +5,7 @@ boto3
 pydantic>=2.7.4,<3
 python-dotenv
 numpy<2
+orjson
 opencv-python
 pillow
 matplotlib

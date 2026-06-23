@@ -5,7 +5,6 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from src.core.user_settings import (
     ENV_FIELDS,
@@ -1042,7 +1041,7 @@ chat_tab, convert_tab, generate_tab, evaluate_tab, result_tab, settings_tab = st
 )
 
 if st.session_state.pop("open_result_report", False):
-    components.html(
+    st.html(
         """
         <script>
         const labels = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
@@ -1050,7 +1049,7 @@ if st.session_state.pop("open_result_report", False):
         if (target) target.click();
         </script>
         """,
-        height=0,
+        unsafe_allow_javascript=True,
     )
 
 with chat_tab:
