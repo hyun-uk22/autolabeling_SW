@@ -80,6 +80,7 @@ checkpoints/
 runs/
 .cache/
 .huggingface/
+.paddlex_cache/
 wandb/
 mlruns/
 lightning_logs/
@@ -124,3 +125,4 @@ autolabeling_SW/
 sam2_b.pt
 
 metrics/
+presentation_architecture_updated.svg

@@ -29,7 +29,7 @@ Return JSON only with this shape:
       "plugin_fail_fast": false,
       "gt_dir": "optional ground truth directory",
       "runs": {"method": "run directory"},
-      "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json",
+      "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json|custom_mapping",
       "threshold": 0.75,
       "eval_iou": 0.5,
       "insight_imbalance_ratio": 3.0,

@@ -7,3 +7,7 @@ ultralytics
 timm
 paddleocr
 easyocr
+mmpose
+mmcv>=2.0.0
+mmengine
+mmdet

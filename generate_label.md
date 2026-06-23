@@ -655,7 +655,7 @@ orchestrator는 설정 순서대로 plugin을 순회하고 현재 `task_type`을
 | `sam` | `sam2_b.pt` (`ultralytics_sam2`) | seed bbox 기반 polygon mask 생성 |
 | `pose` | `yolo11n-pose.pt` | pose keypoint |
 | `ocr` | PaddleOCR | text detection/recognition |
-| `tracking` | `yolo11n.pt` + ByteTrack | frame sequence tracking |
+| `tracking` | `yolo26n.pt` + ByteTrack | frame sequence tracking |
 
 모델 파일은 repository에 포함되지 않으며 태스크 시작 시 plugin prepare 단계에서 library가 다운로드할 수 있다. 기본 배포 설정은 별도 Hugging Face 승인이 필요 없는 `ultralytics_sam2` backend와 `sam2_b.pt`를 사용한다.
 

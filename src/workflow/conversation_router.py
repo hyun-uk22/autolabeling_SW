@@ -20,7 +20,7 @@ answer it and do not perform any operation. Return JSON only with this shape:
   "confidence": 0.0,
     "parameters": {
     "target_formats": ["yolo|pascal_voc|coco|vision_json"],
-    "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json",
+    "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json|custom_mapping",
     "source_path": "optional workspace-relative path",
     "task_type": "classification|object_detection|segmentation|pose_estimation|ocr|tracking|all",
     "threshold": 0.75,
@@ -47,7 +47,7 @@ ACTION_INTENTS = {
     "evaluate_labels": "evaluate",
 }
 ALLOWED_FORMATS = {"yolo", "pascal_voc", "coco", "vision_json"}
-ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json"}
+ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json", "custom_mapping"}
 ALLOWED_TASKS = {
     "classification", "object_detection", "segmentation", "pose_estimation", "ocr", "tracking", "all",
 }

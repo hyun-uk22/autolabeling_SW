@@ -12,10 +12,11 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "tasks": ["classification"],
         "weight": 1.0,
         "config": {
-            "model": "openai/clip-vit-base-patch32",
+            "model": "google/siglip-base-patch16-224",
             "device": "auto",
             "labels": ["person", "animal", "vehicle", "document", "indoor", "outdoor"],
             "top_k": 3,
+            "prompt_template": "a photo of a {label}",
         },
     },
     {
@@ -67,9 +68,25 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "tasks": ["pose_estimation"],
         "weight": 1.0,
         "config": {
-            "model": "yolo11n-pose.pt",
+            "model": "yolo26l-pose.pt",
             "device": "auto",
             "keypoint_threshold": 0.25,
+        },
+    },
+    {
+        "name": "vitpose",
+        "enabled": False,
+        "tasks": ["pose_estimation"],
+        "weight": 1.2,
+        "config": {
+            "pose_config": "configs/body_2d_keypoint/topdown_heatmap/coco/td-hm_ViTPose-large_8xb64-210e_coco-256x192.py",
+            "pose_checkpoint": "vitpose-l.pth",
+            "det_config": "demo/mmdetection_cfg/rtmdet_m_640-8xb32_coco-person.py",
+            "det_checkpoint": "https://download.openmmlab.com/mmpose/v1/projects/rtmpose/rtmdet_m_8xb32-100e_coco-obj365-person-235e8209.pth",
+            "device": "auto",
+            "keypoint_threshold": 0.5,
+            "det_threshold": 0.5,
+            "label": "person",
         },
     },
     {
@@ -79,6 +96,9 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "weight": 1.0,
         "config": {
             "backend": "paddleocr",
+            "ocr_version": "PP-OCRv5",
+            "text_detection_model_name": "PP-OCRv5_mobile_det",
+            "text_recognition_model_name": "korean_PP-OCRv5_mobile_rec",
             "lang": "korean",
             "languages": ["ko", "en"],
             "gpu": "auto",
@@ -90,7 +110,7 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "tasks": ["tracking"],
         "weight": 1.0,
         "config": {
-            "model": "yolo11n.pt",
+            "model": "yolo26n.pt",
             "tracker": "bytetrack.yaml",
             "device": "auto",
         },
@@ -203,6 +223,7 @@ def create_default_registry() -> PluginRegistry:
         TransformersClassificationPlugin,
         UltralyticsPosePlugin,
         UltralyticsTrackingPlugin,
+        ViTPosePlugin,
     )
 
     registry = PluginRegistry()
@@ -211,6 +232,7 @@ def create_default_registry() -> PluginRegistry:
     registry.register("grounded_sam2", GroundedSAM2Plugin)
     registry.register("sam", SAMPlugin)
     registry.register("pose", UltralyticsPosePlugin)
+    registry.register("vitpose", ViTPosePlugin)
     registry.register("ocr", OCRPlugin)
     registry.register("tracking", UltralyticsTrackingPlugin)
     return registry

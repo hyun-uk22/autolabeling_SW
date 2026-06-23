@@ -29,11 +29,13 @@ class PluginRegistryTests(unittest.TestCase):
         self.assertEqual(plugins[2].config["sam_model"], "sam2_b.pt")
         self.assertEqual(plugins[2].config["device"], "auto")
         self.assertTrue(plugins[3].supports("pose_estimation"))
+        self.assertEqual(plugins[3].config["model"], "yolo26l-pose.pt")
         self.assertTrue(plugins[4].supports("ocr"))
         self.assertEqual(plugins[4].config["backend"], "paddleocr")
         self.assertEqual(plugins[4].config["lang"], "korean")
         self.assertEqual(plugins[4].config["gpu"], "auto")
         self.assertTrue(plugins[5].supports("tracking"))
+        self.assertEqual(plugins[5].config["model"], "yolo26n.pt")
 
     def test_empty_generation_plugin_config_keeps_required_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -106,6 +108,31 @@ class PluginRegistryTests(unittest.TestCase):
         sam = plugins[names.index("sam")]
         self.assertEqual(sam.config["backend"], "official_sam3")
         self.assertEqual(sam.config["model"], "facebook/sam3")
+
+    def test_vitpose_can_be_enabled_as_optional_pose_plugin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "plugins.json"
+            config.write_text(
+                json.dumps({
+                    "plugins": [{
+                        "name": "vitpose",
+                        "enabled": True,
+                        "config": {
+                            "pose_checkpoint": "vitpose-l.pth",
+                            "device": "cpu",
+                        },
+                    }]
+                }),
+                encoding="utf-8",
+            )
+
+            plugins = load_generation_plugins(str(config))
+
+        names = [plugin.plugin_name for plugin in plugins]
+        self.assertIn("vitpose", names)
+        vitpose = plugins[names.index("vitpose")]
+        self.assertTrue(vitpose.supports("pose_estimation"))
+        self.assertEqual(vitpose.config["pose_checkpoint"], "vitpose-l.pth")
 
     def test_auto_device_prefers_cuda_and_falls_back_to_cpu(self):
         fake_cuda = types.SimpleNamespace(is_available=lambda: True)

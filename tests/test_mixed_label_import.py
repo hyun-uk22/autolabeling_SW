@@ -366,6 +366,44 @@ path: d:\\datasets\\yolo
         self.assertEqual(batch.records[0][1].boxes[0].xmin, 0.1)
         self.assertEqual(batch.records[0][1].boxes[0].xmax, 0.5)
 
+    def test_custom_mapping_import_uses_mapping_spec_for_unrecognized_json(self):
+        self._write(
+            "vendor/custom_label.json",
+            json.dumps({
+                "asset": {"name": "mapped.jpg", "w": 200, "h": 100},
+                "instances": [
+                    {"categoryText": "lion", "rectPixels": [20, 10, 60, 30]},
+                ],
+            }),
+        )
+        spec = {
+            "format": "json",
+            "image_name_path": "$.asset.name",
+            "image_width_path": "$.asset.w",
+            "image_height_path": "$.asset.h",
+            "objects_path": "$.instances[*]",
+            "label_path": "@.categoryText",
+            "bbox_path": "@.rectPixels",
+            "bbox_format": "xywh",
+            "bbox_unit": "pixel",
+        }
+
+        batch = import_labels_with_report(
+            os.path.join(self.label_dir, "vendor"),
+            self.image_dir,
+            source_format="custom_mapping",
+            custom_mapping_spec=json.dumps(spec),
+        )
+
+        self.assertEqual(batch.report["formats"], {"custom_mapping": 1})
+        self.assertEqual(batch.records[0][0], "mapped.jpg")
+        box = batch.records[0][1].boxes[0]
+        self.assertEqual(box.label, "lion")
+        self.assertAlmostEqual(box.xmin, 0.1)
+        self.assertAlmostEqual(box.ymin, 0.1)
+        self.assertAlmostEqual(box.xmax, 0.4)
+        self.assertAlmostEqual(box.ymax, 0.4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ..core.llm_client import normalize_confidence, normalize_coordinate
 from ..core.models import BoundingBox, DetectionResult, Point, PolygonSegment
 from . import json_io
+from .custom_label_mapper import CUSTOM_MAPPING_FORMAT, import_custom_mapping
 
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -23,6 +24,7 @@ SOURCE_PRIORITY = {
     "vision_json": 30,
     "csv": 20,
     "generic_json": 10,
+    CUSTOM_MAPPING_FORMAT: 5,
 }
 CLASS_LIST_PRIORITY = {
     "yolo": 100,
@@ -31,6 +33,7 @@ CLASS_LIST_PRIORITY = {
     "vision_json": 60,
     "csv": 50,
     "generic_json": 40,
+    CUSTOM_MAPPING_FORMAT: 30,
 }
 
 
@@ -636,6 +639,7 @@ def _import_with_format(
     source_format: str,
     classes_path: Optional[str] = None,
     search_root: Optional[str] = None,
+    custom_mapping_spec: Optional[Any] = None,
 ) -> List[Tuple[str, DetectionResult]]:
     fmt = source_format
     if fmt == "yolo":
@@ -650,6 +654,8 @@ def _import_with_format(
         return import_csv(input_path)
     if fmt == "generic_json":
         return import_generic_json(input_path)
+    if fmt == CUSTOM_MAPPING_FORMAT:
+        return import_custom_mapping(input_path, image_dir, custom_mapping_spec)
     raise ValueError(f"Unsupported source format: {fmt}")
 
 
@@ -1003,9 +1009,20 @@ def import_labels_with_report(
     source_format: str = "auto",
     classes_path: Optional[str] = None,
     duplicate_iou: float = 0.85,
+    custom_mapping_spec: Optional[Any] = None,
 ) -> LabelImportBatch:
     discovery = {"files_scanned": 1, "skipped_files": []}
-    if os.path.isdir(input_path):
+    if os.path.isdir(input_path) and source_format == CUSTOM_MAPPING_FORMAT:
+        files_scanned = 0
+        for _, _, names in os.walk(input_path):
+            files_scanned += len(names)
+        discovery = {"files_scanned": files_scanned, "skipped_files": []}
+        sources = [LabelSource(
+            path=input_path,
+            format=CUSTOM_MAPPING_FORMAT,
+            search_root=os.path.abspath(input_path),
+        )]
+    elif os.path.isdir(input_path):
         sources, discovery = discover_label_sources(input_path, image_dir)
         if source_format != "auto":
             sources = [source for source in sources if source.format == source_format]
@@ -1026,6 +1043,7 @@ def import_labels_with_report(
                 source.format,
                 classes_path=classes_path,
                 search_root=source.search_root,
+                custom_mapping_spec=custom_mapping_spec,
             )
             source_classes = _classes_for_source(source, classes_path)
             metadata = _source_metadata(source, classes_path)
@@ -1085,10 +1103,12 @@ def import_labels(
     image_dir: str,
     source_format: str = "auto",
     classes_path: Optional[str] = None,
+    custom_mapping_spec: Optional[Any] = None,
 ) -> List[Tuple[str, DetectionResult]]:
     return import_labels_with_report(
         input_path,
         image_dir,
         source_format=source_format,
         classes_path=classes_path,
+        custom_mapping_spec=custom_mapping_spec,
     ).records

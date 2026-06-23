@@ -1,6 +1,7 @@
 import html
 import json
 import copy
+import os
 import uuid
 from pathlib import Path
 
@@ -65,6 +66,11 @@ from src.core.workspace import (
 from src.reporting import build_conversion_preflight
 from src.reporting.issue_reporter import categorize_issue
 from src.utils.format_converter import LabelExportWriter
+from src.utils.custom_label_mapper import (
+    CUSTOM_MAPPING_FORMAT,
+    infer_custom_mapping_spec_from_sample,
+    sample_custom_label_file,
+)
 from src.utils.label_importer import find_image_path, import_labels_with_report
 from src.utils.label_validator import summarize_validation, validate_result
 from src.workflow.service import execute_workflow_plan
@@ -223,7 +229,7 @@ st.markdown(
 
 
 FORMAT_OPTIONS = ["yolo", "pascal_voc", "coco", "vision_json"]
-SOURCE_OPTIONS = ["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "generic_json"]
+SOURCE_OPTIONS = ["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "generic_json", CUSTOM_MAPPING_FORMAT]
 TASK_OPTIONS = ["object_detection", "classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"]
 STATUS_LABELS = {
     "blocked": "확인 필요",
@@ -1366,6 +1372,21 @@ def result_with_new_canvas_polygons(base_result, objects, default_label, width, 
     return result, added
 
 
+def move_editor_selection(image_names, current_image, offset):
+    if not image_names:
+        return None
+    try:
+        current_index = image_names.index(current_image)
+    except ValueError:
+        current_index = 0
+    next_index = max(0, min(len(image_names) - 1, current_index + offset))
+    return image_names[next_index]
+
+
+def request_editor_selection(image_name):
+    st.session_state.editor_pending_selected_image = image_name
+
+
 def render_label_editor_tab(workspace):
     st.markdown('<div class="panel-title">라벨 편집</div>', unsafe_allow_html=True)
     st.caption("classification, detection, OCR, segmentation, pose-estimation, tracking 라벨을 불러와 편집하고 다시 저장합니다.")
@@ -1472,6 +1493,9 @@ def render_label_editor_tab(workspace):
         if issue_queue[queue_index] in image_names:
             st.session_state.editor_selected_image_select = issue_queue[queue_index]
 
+    pending_selected = st.session_state.pop("editor_pending_selected_image", None)
+    if pending_selected:
+        st.session_state.editor_selected_image_select = pending_selected
     selected_default = st.session_state.get("editor_selected_image_select") or st.session_state.get("editor_selected_image")
     if selected_default not in image_names:
         selected_default = image_names[0]
@@ -1483,6 +1507,14 @@ def render_label_editor_tab(workspace):
         key="editor_selected_image_select",
     )
     record_index = image_names.index(selected_image)
+    nav_prev_col, nav_status_col, nav_next_col = st.columns([1, 2, 1])
+    if nav_prev_col.button("이전 이미지", disabled=record_index <= 0, key="editor_prev_image"):
+        request_editor_selection(move_editor_selection(image_names, selected_image, -1))
+        st.rerun()
+    nav_status_col.caption(f"{record_index + 1} / {len(image_names)}")
+    if nav_next_col.button("다음 이미지", disabled=record_index >= len(image_names) - 1, key="editor_next_image"):
+        request_editor_selection(move_editor_selection(image_names, selected_image, 1))
+        st.rerun()
     record = records[record_index]
     result = DetectionResult.model_validate(record["result"])
     image_path = find_image_path(resolve_workspace_path(workspace, editor_image_dir), selected_image)
@@ -1666,21 +1698,32 @@ def render_label_editor_tab(workspace):
             edited_tables["tracks"] = st.data_editor(tables["tracks"], num_rows="dynamic", key=f"edit_tracks_{selected_image}")
         else:
             edited_tables["boxes"] = st.data_editor(tables["boxes"], num_rows="dynamic", key=f"edit_boxes_{selected_image}")
-        if st.button("현재 이미지 라벨 적용", icon=":material/save:"):
+        apply_col, apply_next_col = st.columns(2)
+        apply_current = apply_col.button("현재 이미지 라벨 적용", icon=":material/save:")
+        apply_and_next = apply_next_col.button(
+            "적용 후 다음 이미지",
+            icon=":material/arrow_forward:",
+            disabled=record_index >= len(image_names) - 1,
+        )
+        if apply_current or apply_and_next:
             merged_tables = result_to_editor_tables(result)
             merged_tables.update(edited_tables)
             record["result"] = editor_tables_to_result(editor_task, merged_tables).model_dump()
             records[record_index] = record
             st.session_state.editor_records = records
+            if apply_and_next:
+                request_editor_selection(move_editor_selection(image_names, selected_image, 1))
+                st.success("현재 이미지 라벨을 반영하고 다음 이미지로 이동합니다.")
+                st.rerun()
             st.success("현재 이미지 라벨을 편집 상태에 반영했습니다.")
 
     with st.container(border=True):
-        st.markdown("**전체 저장**")
+        st.markdown("**전체 라벨 파일 저장**")
         if "editor_save_formats" not in st.session_state:
             st.session_state.editor_save_formats = default_editor_save_formats(editor_source_format, st.session_state.get("editor_report", {}))
-        st.caption("기본 저장 포맷은 라벨을 불러올 때 감지한 원본 포맷을 따릅니다. 필요하면 여기에서 추가/변경할 수 있습니다.")
+        st.caption("현재 편집 세션에 불러온 모든 이미지 라벨을 파일로 저장합니다. 이미지 이동은 위 `이전/다음 이미지` 버튼을 사용하세요.")
         save_formats = st.multiselect("저장 포맷", FORMAT_OPTIONS, key="editor_save_formats")
-        if st.button("편집 라벨 저장", type="primary", icon=":material/save_as:"):
+        if st.button("전체 편집 라벨 저장", type="primary", icon=":material/save_as:"):
             if not save_formats:
                 st.error("저장 포맷을 하나 이상 선택하세요.")
             else:
@@ -1701,7 +1744,7 @@ def render_label_editor_tab(workspace):
                         "artifacts": artifacts,
                         "output_dir": output_dir,
                     }
-                    st.success(f"{len(records)}개 이미지의 편집 라벨을 저장했습니다: {output_dir}")
+                    st.success(f"불러온 전체 {len(records)}개 이미지의 편집 라벨을 저장했습니다: {output_dir}")
                 except Exception as exc:
                     st.error(f"라벨 저장 실패: {exc}")
 
@@ -1713,6 +1756,7 @@ def build_convert_preflight_preview(
     target_formats,
     classes_path=None,
     duplicate_iou=0.85,
+    custom_mapping_spec=None,
 ):
     batch = import_labels_with_report(
         input_path,
@@ -1720,6 +1764,7 @@ def build_convert_preflight_preview(
         source_format=source_format,
         classes_path=classes_path,
         duplicate_iou=duplicate_iou,
+        custom_mapping_spec=custom_mapping_spec,
     )
     validations = []
     for image_name, result in batch.records:
@@ -1743,6 +1788,7 @@ def build_convert_preflight_preview(
             "classes_path": classes_path or "",
             "task_type": "object_detection",
             "output_dir": WORKSPACE_DEFAULTS["labels"],
+            "custom_label_mapping": custom_mapping_spec or "",
         },
     }
 
@@ -1895,6 +1941,7 @@ def build_chat_preflight_preview(proposal):
         operation.get("formats", []),
         classes_path=operation.get("classes_path"),
         duplicate_iou=operation.get("duplicate_iou", 0.85),
+        custom_mapping_spec=operation.get("custom_label_mapping"),
     )
 
 
@@ -2263,6 +2310,8 @@ with convert_tab:
         st.session_state.convert_input_path = label_path_candidates[0]
     if "convert_image_dir" not in st.session_state:
         st.session_state.convert_image_dir = image_dir_candidates[0]
+    if "convert_custom_mapping_text" not in st.session_state:
+        st.session_state.convert_custom_mapping_text = ""
     with st.container(border=True):
         st.markdown('<span class="path-panel-marker"></span>', unsafe_allow_html=True)
         st.markdown('<div class="form-section">데이터 경로</div>', unsafe_allow_html=True)
@@ -2315,11 +2364,44 @@ with convert_tab:
                 key="convert_insight_ratio",
             )
             strict = st.checkbox("입력 데이터 문제가 있는 데이터 제외")
+        custom_mapping_text = ""
+        if source_format == CUSTOM_MAPPING_FORMAT:
+            st.markdown("**커스텀 라벨 매핑**")
+            st.caption(
+                "샘플 JSON 라벨 1개를 분석해 안전한 매핑 스펙을 만들고, 내부 파서가 그 스펙만 사용해 변환합니다. "
+                "LLM이 생성한 코드는 실행하지 않습니다."
+            )
+            custom_mapping_text = st.text_area(
+                "커스텀 매핑 스펙(JSON)",
+                key="convert_custom_mapping_text",
+                height=240,
+                help="커스텀 JSON 라벨의 image/object/label/bbox 경로를 정의합니다. 비어 있으면 변환 실행 전에 먼저 분석이 필요합니다.",
+            )
+        analyze_custom_submit = st.form_submit_button("커스텀 포맷 분석", icon=":material/schema:")
         preflight_submit = st.form_submit_button("변환 사전 점검", icon=":material/rule:")
         convert_submit = st.form_submit_button("변환 실행", type="primary", icon=":material/sync_alt:")
+    if analyze_custom_submit:
+        if source_format != CUSTOM_MAPPING_FORMAT:
+            st.info("입력 파일 형식을 custom_mapping으로 선택한 뒤 커스텀 포맷 분석을 실행하세요.")
+        elif not input_path:
+            st.error("입력 라벨 경로를 지정하세요.")
+        else:
+            try:
+                with st.status("커스텀 라벨 샘플 분석 중", expanded=True) as status:
+                    sample_path = sample_custom_label_file(resolve_workspace_path(workspace, input_path))
+                    st.write(f"샘플 파일: {sample_path}")
+                    model_name = os.getenv("CUSTOM_LABEL_MAPPER_MODEL") or os.getenv("LOW_MODEL") or os.getenv("PLANNER_MODEL")
+                    spec = infer_custom_mapping_spec_from_sample(sample_path, model_name=model_name)
+                    st.session_state.convert_custom_mapping_text = json.dumps(spec, ensure_ascii=False, indent=2)
+                    status.update(label="커스텀 매핑 스펙 생성 완료", state="complete", expanded=False)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"커스텀 포맷 분석 실패: {exc}")
     if preflight_submit:
         if not input_path or not image_dir or not target_formats:
             st.error("입력 라벨 경로, 이미지 디렉터리, 출력 포맷을 지정하세요.")
+        elif source_format == CUSTOM_MAPPING_FORMAT and not custom_mapping_text.strip():
+            st.error("custom_mapping 변환에는 커스텀 매핑 스펙(JSON)이 필요합니다. 먼저 커스텀 포맷 분석을 실행하세요.")
         else:
             try:
                 st.session_state.convert_preflight_preview = build_convert_preflight_preview(
@@ -2329,6 +2411,7 @@ with convert_tab:
                     target_formats,
                     classes_path=optional_class_mapping_path(workspace, convert_classes),
                     duplicate_iou=duplicate_iou,
+                    custom_mapping_spec=custom_mapping_text if source_format == CUSTOM_MAPPING_FORMAT else None,
                 )
             except Exception as exc:
                 st.error(f"사전 점검 실패: {exc}")
@@ -2337,6 +2420,8 @@ with convert_tab:
     if convert_submit:
         if not input_path or not image_dir or not output_dir or not target_formats:
             st.error("입력, 이미지, 출력 경로와 출력 포맷을 모두 지정하세요.")
+        elif source_format == CUSTOM_MAPPING_FORMAT and not custom_mapping_text.strip():
+            st.error("custom_mapping 변환에는 커스텀 매핑 스펙(JSON)이 필요합니다. 먼저 커스텀 포맷 분석을 실행하세요.")
         else:
             run_plan({
                 "request_summary": "Streamlit label conversion",
@@ -2348,6 +2433,7 @@ with convert_tab:
                     "source_format": source_format,
                     "formats": target_formats,
                     "classes_path": optional_class_mapping_path(workspace, convert_classes),
+                    "custom_label_mapping": custom_mapping_text if source_format == CUSTOM_MAPPING_FORMAT else None,
                     "duplicate_iou": duplicate_iou,
                     "insight_imbalance_ratio": convert_insight_ratio,
                     "strict": strict,

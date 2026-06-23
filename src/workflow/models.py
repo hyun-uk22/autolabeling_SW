@@ -19,6 +19,7 @@ class OperationPlan(BaseModel):
     formats: List[str] = Field(default_factory=lambda: ["yolo"])
     classes_path: Optional[str] = None
     custom_label_template: Optional[str] = None
+    custom_label_mapping: Optional[str] = None
     custom_label_extension: str = ".json"
     prompt: str = "Detect and classify all prominent objects in this image. Output strictly as JSON."
     generation_strategy: GenerationStrategy = "specialist_first"

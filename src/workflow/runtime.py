@@ -709,6 +709,7 @@ class WorkflowRuntime:
             source_format=source_format,
             classes_path=operation.classes_path,
             duplicate_iou=operation.duplicate_iou,
+            custom_mapping_spec=operation.custom_label_mapping,
         )
         detected_formats = list(batch.report.get("formats", {}))
         resolved_source_format = source_format

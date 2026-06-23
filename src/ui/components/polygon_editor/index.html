@@ -59,9 +59,10 @@
         background: #0f172a;
         touch-action: none;
         user-select: none;
+        overflow: visible;
       }
       polygon {
-        cursor: move;
+        pointer-events: none;
       }
       rect.box {
         cursor: move;
@@ -69,6 +70,12 @@
       circle.vertex {
         cursor: grab;
         filter: drop-shadow(0 1px 2px rgba(0,0,0,.35));
+      }
+      circle.vertex-hit {
+        cursor: grab;
+        fill: transparent;
+        stroke: transparent;
+        pointer-events: all;
       }
       circle.vertex:hover,
       circle.vertex.active {
@@ -287,6 +294,12 @@
           }
 
           (segment.polygon || []).forEach((point, pointIndex) => {
+            const hitCircle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            hitCircle.classList.add("vertex-hit");
+            hitCircle.setAttribute("cx", point.x * state.width);
+            hitCircle.setAttribute("cy", point.y * state.height);
+            hitCircle.setAttribute("r", "18");
+
             const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
             circle.classList.add("vertex");
             circle.setAttribute("cx", point.x * state.width);
@@ -295,14 +308,21 @@
             circle.setAttribute("fill", "#f97316");
             circle.setAttribute("stroke", "#ffffff");
             circle.setAttribute("stroke-width", "2");
-            circle.addEventListener("pointerdown", (event) => {
+            hitCircle.addEventListener("pointerdown", (event) => {
               if (mode !== "edit") return;
               event.preventDefault();
-              circle.setPointerCapture(event.pointerId);
+              hitCircle.setPointerCapture(event.pointerId);
               drag = { kind: "vertex", segmentIndex, pointIndex, pointerId: event.pointerId };
               circle.classList.add("active");
               statusEl.textContent = `segment ${segmentIndex}, point ${pointIndex} 이동 중`;
             });
+            hitCircle.addEventListener("pointerenter", () => circle.classList.add("active"));
+            hitCircle.addEventListener("pointerleave", () => {
+              if (!drag || drag.kind !== "vertex" || drag.segmentIndex !== segmentIndex || drag.pointIndex !== pointIndex) {
+                circle.classList.remove("active");
+              }
+            });
+            svg.appendChild(hitCircle);
             svg.appendChild(circle);
           });
         });
@@ -358,7 +378,9 @@
       }
 
       svg.addEventListener("pointerdown", (event) => {
-        if (event.target.classList && event.target.classList.contains("vertex")) return;
+        if (event.target.classList && (
+          event.target.classList.contains("vertex") || event.target.classList.contains("vertex-hit")
+        )) return;
         if (mode === "polygon") {
           draftPolygon.push(normalizedPoint(event));
           statusEl.textContent = `polygon point ${draftPolygon.length}개 추가됨`;

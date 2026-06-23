@@ -269,7 +269,7 @@ class ConvertPage(OperationPage):
         self.image_dir.setText(WORKSPACE_DEFAULTS["images"])
         self.output_dir.setText(WORKSPACE_DEFAULTS["converted"])
         self.source_format = QComboBox()
-        self.source_format.addItems(["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "generic_json"])
+        self.source_format.addItems(["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "generic_json", "custom_mapping"])
         self.formats = FormatSelector()
         self.duplicate_iou = QDoubleSpinBox()
         self.duplicate_iou.setRange(0.01, 1.0)

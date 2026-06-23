@@ -58,6 +58,7 @@ SOURCE_FORMAT_ALIASES = {
     **FORMAT_ALIASES,
     "csv": ("csv",),
     "generic_json": ("generic json", "generic_json", "일반 json"),
+    "custom_mapping": ("custom mapping", "custom_mapping", "custom json", "커스텀 json", "커스텀 포맷", "사용자 정의 포맷"),
     "mask_image": ("mask image", "mask images", "mask", "마스크 이미지", "마스크"),
 }
 MODEL_DATASET_ALIASES = {

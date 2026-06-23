@@ -25,7 +25,7 @@ Allowed response shape:
   "reason": "short Korean reason",
   "updates": {
     "formats": ["yolo|pascal_voc|coco|vision_json"],
-    "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json",
+    "source_format": "auto|yolo|pascal_voc|coco|vision_json|csv|generic_json|custom_mapping",
     "input_path": "path",
     "img_dir": "path",
     "out_dir": "path",
@@ -71,7 +71,7 @@ ALLOWED_UPDATE_FIELDS = {
     "repo_path",
 }
 ALLOWED_FORMATS = {"yolo", "pascal_voc", "coco", "vision_json"}
-ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json", "mask_image"}
+ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json", "custom_mapping", "mask_image"}
 ALLOWED_TASKS = {
     "classification",
     "object_detection",

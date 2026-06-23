@@ -137,25 +137,74 @@ class TransformersClassificationPlugin(VisionTaskPlugin):
     def __init__(self, config=None):
         super().__init__(config)
         self._pipeline = None
+        self._processor = None
+        self._model = None
+        self._torch = None
+
+    def _is_siglip(self) -> bool:
+        model_id = str(self.config.get("model", "google/siglip-base-patch16-224")).lower()
+        return "siglip" in model_id
 
     def _load(self):
-        if self._pipeline is None:
+        if self._pipeline is not None or self._model is not None:
+            return
+        model_id = self.config.get("model", "google/siglip-base-patch16-224")
+        if self._is_siglip():
+            try:
+                import torch
+                from transformers import SiglipModel, SiglipProcessor
+            except ImportError as exc:
+                raise RuntimeError("Install requirements-specialists.txt to use the SigLIP classification plugin") from exc
+            self._processor = SiglipProcessor.from_pretrained(model_id)
+            self._model = SiglipModel.from_pretrained(model_id)
+            self._model.to(_device(self.config))
+            self._model.eval()
+            self._torch = torch
+        else:
             try:
                 from transformers import pipeline
             except ImportError as exc:
                 raise RuntimeError("Install requirements-specialists.txt to use the classification plugin") from exc
             self._pipeline = pipeline(
                 "zero-shot-image-classification",
-                model=self.config.get("model", "openai/clip-vit-base-patch32"),
+                model=model_id,
                 device=_pipeline_device(_device(self.config)),
             )
+
+    def _siglip_predictions(self, image, labels):
+        template = str(self.config.get("prompt_template", "a photo of a {label}"))
+        texts = [template.format(label=label) for label in labels]
+        try:
+            inputs = self._processor(text=texts, images=image, padding="max_length", return_tensors="pt")
+        except TypeError:
+            inputs = self._processor(text=texts, images=image, return_tensors="pt")
+        inputs = {
+            key: value.to(_device(self.config)) if hasattr(value, "to") else value
+            for key, value in inputs.items()
+        }
+        with self._torch.no_grad():
+            outputs = self._model(**inputs)
+        logits = getattr(outputs, "logits_per_image", None)
+        if logits is None:
+            image_embeds = self._torch.nn.functional.normalize(outputs.image_embeds, dim=-1)
+            text_embeds = self._torch.nn.functional.normalize(outputs.text_embeds, dim=-1)
+            logits = image_embeds @ text_embeds.T
+        scores = self._torch.softmax(logits[0], dim=-1).detach().cpu().tolist()
+        return [
+            {"label": label, "score": float(score)}
+            for label, score in sorted(zip(labels, scores), key=lambda item: item[1], reverse=True)
+        ]
 
     def refine(self, image_path, prompt, seed_result):
         self._load()
         labels = list(configured_labels(self.config, seed_result))
         if not labels:
             raise ValueError("classification plugin requires config.labels or VLM candidate labels")
-        predictions = self._pipeline(Image.open(image_path).convert("RGB"), candidate_labels=labels)
+        image = Image.open(image_path).convert("RGB")
+        if self._is_siglip():
+            predictions = self._siglip_predictions(image, labels)
+        else:
+            predictions = self._pipeline(image, candidate_labels=labels)
         limit = int(self.config.get("top_k", 5))
         result = DetectionResult(task_type="classification")
         for item in predictions[:limit]:
@@ -165,7 +214,11 @@ class TransformersClassificationPlugin(VisionTaskPlugin):
         return PluginOutput(
             result=result,
             score=result.classifications[0].confidence if result.classifications else 0.0,
-            metadata={"model": self.config.get("model", "openai/clip-vit-base-patch32")},
+            metadata={
+                "model": self.config.get("model", "google/siglip-base-patch16-224"),
+                "backend": "siglip" if self._is_siglip() else "zero-shot-image-classification",
+                "device": _device(self.config),
+            },
         )
 
 
@@ -488,7 +541,7 @@ class UltralyticsPosePlugin(VisionTaskPlugin):
                 from ultralytics import YOLO
             except ImportError as exc:
                 raise RuntimeError("Install requirements-specialists.txt to use the pose plugin") from exc
-            self._model = YOLO(self.config.get("model", "yolo11n-pose.pt"))
+            self._model = YOLO(self.config.get("model", "yolo26l-pose.pt"))
 
     def refine(self, image_path, prompt, seed_result):
         self._load()
@@ -522,7 +575,130 @@ class UltralyticsPosePlugin(VisionTaskPlugin):
                         confidence=float(box_conf[pose_index]) if pose_index < len(box_conf) else 1.0,
                     )
                 )
-        return PluginOutput(result=result, score=_mean(pose.confidence for pose in result.poses), metadata={"model": self.config.get("model", "yolo11n-pose.pt"), "device": _device(self.config)})
+        return PluginOutput(result=result, score=_mean(pose.confidence for pose in result.poses), metadata={"model": self.config.get("model", "yolo26l-pose.pt"), "device": _device(self.config)})
+
+
+class ViTPosePlugin(VisionTaskPlugin):
+    plugin_name = "vitpose"
+    supported_tasks = {"pose_estimation"}
+
+    COCO_KEYPOINTS = [
+        "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+        "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+        "left_wrist", "right_wrist", "left_hip", "right_hip",
+        "left_knee", "right_knee", "left_ankle", "right_ankle",
+    ]
+    MPII_KEYPOINTS = [
+        "right_ankle", "right_knee", "right_hip", "left_hip",
+        "left_knee", "left_ankle", "pelvis", "thorax",
+        "upper_neck", "head_top", "right_wrist", "right_elbow",
+        "right_shoulder", "left_shoulder", "left_elbow", "left_wrist",
+    ]
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self._model = None
+        self._detector = None
+
+    def _get_keypoint_names(self, prompt: str) -> List[str]:
+        prompt_lower = prompt.lower() if prompt else ""
+        if "mpii" in prompt_lower:
+            return self.MPII_KEYPOINTS
+        return self.COCO_KEYPOINTS
+
+    def _load(self):
+        if self._model is not None:
+            return
+        try:
+            from mmdet.apis import init_detector
+            from mmpose.apis import init_model
+        except ImportError as exc:
+            raise RuntimeError("Install requirements-specialists.txt to use the ViTPose plugin") from exc
+
+        device = _device(self.config)
+        pose_config = self.config.get(
+            "pose_config",
+            "configs/body_2d_keypoint/topdown_heatmap/coco/td-hm_ViTPose-large_8xb64-210e_coco-256x192.py",
+        )
+        pose_checkpoint = self.config.get("pose_checkpoint", "vitpose-l.pth")
+        det_config = self.config.get("det_config", "demo/mmdetection_cfg/rtmdet_m_640-8xb32_coco-person.py")
+        det_checkpoint = self.config.get(
+            "det_checkpoint",
+            "https://download.openmmlab.com/mmpose/v1/projects/rtmpose/rtmdet_m_8xb32-100e_coco-obj365-person-235e8209.pth",
+        )
+        self._detector = init_detector(det_config, det_checkpoint, device=device)
+        self._model = init_model(pose_config, pose_checkpoint, device=device)
+
+    def refine(self, image_path, prompt, seed_result):
+        self._load()
+        try:
+            import mmcv
+            from mmdet.apis import inference_detector
+            from mmpose.apis import inference_topdown
+        except ImportError as exc:
+            raise RuntimeError("Install requirements-specialists.txt to use the ViTPose plugin") from exc
+
+        image = mmcv.imread(image_path)
+        height, width = image.shape[:2]
+        det_results = inference_detector(self._detector, image)
+        pred_instances = det_results.pred_instances
+
+        bboxes = []
+        if hasattr(pred_instances, "bboxes") and hasattr(pred_instances, "scores"):
+            det_threshold = float(self.config.get("det_threshold", 0.5))
+            for bbox, score in zip(pred_instances.bboxes, pred_instances.scores):
+                if score > det_threshold:
+                    bboxes.append({"bbox": bbox.cpu().numpy()})
+
+        if not bboxes:
+            return PluginOutput(
+                result=DetectionResult(task_type="pose_estimation"),
+                score=0.0,
+                metadata={"model": "vitpose", "device": _device(self.config), "message": "No person detected"},
+            )
+
+        pose_results = inference_topdown(self._model, image, bboxes)
+        keypoint_names = self._get_keypoint_names(prompt)
+        keypoint_threshold = float(self.config.get("keypoint_threshold", 0.5))
+        result = DetectionResult(task_type="pose_estimation")
+
+        for pose_result in pose_results:
+            if not hasattr(pose_result, "pred_instances"):
+                continue
+            pred = pose_result.pred_instances
+            keypoints_data = pred.keypoints[0] if len(pred.keypoints) > 0 else None
+            keypoint_scores = pred.keypoint_scores[0] if len(pred.keypoint_scores) > 0 else None
+            if keypoints_data is None:
+                continue
+
+            keypoints = []
+            for index, (x, y) in enumerate(keypoints_data):
+                confidence = float(keypoint_scores[index]) if keypoint_scores is not None else 1.0
+                keypoints.append(Keypoint(
+                    name=keypoint_names[index] if index < len(keypoint_names) else f"keypoint_{index}",
+                    x=float(x) / width,
+                    y=float(y) / height,
+                    visible=confidence > keypoint_threshold,
+                    confidence=confidence,
+                ))
+            pose_confidence = float(keypoint_scores.mean()) if keypoint_scores is not None else 1.0
+            result.poses.append(PoseInstance(
+                label=self.config.get("label", "person"),
+                keypoints=keypoints,
+                confidence=pose_confidence,
+            ))
+
+        keypoint_format = "MPII" if "mpii" in (prompt or "").lower() else "COCO"
+        return PluginOutput(
+            result=result,
+            score=_mean(pose.confidence for pose in result.poses),
+            metadata={
+                "model": self.config.get("pose_checkpoint", "vitpose-l.pth"),
+                "device": _device(self.config),
+                "keypoint_format": keypoint_format,
+                "num_poses": len(result.poses),
+            },
+        )
 
 
 class OCRPlugin(VisionTaskPlugin):
@@ -555,10 +731,19 @@ class OCRPlugin(VisionTaskPlugin):
 
         use_gpu = _easyocr_gpu(self.config)
         lang = _paddleocr_lang(self.config)
+        ocr_version = self.config.get("ocr_version", "PP-OCRv5")
+        text_detection_model_name = self.config.get("text_detection_model_name")
+        text_recognition_model_name = self.config.get("text_recognition_model_name")
+        version_kwargs = {"lang": lang, "ocr_version": ocr_version}
+        if text_detection_model_name:
+            version_kwargs["text_detection_model_name"] = text_detection_model_name
+        if text_recognition_model_name:
+            version_kwargs["text_recognition_model_name"] = text_recognition_model_name
         attempts = [
-            {"use_angle_cls": True, "lang": lang, "use_gpu": use_gpu, "show_log": False},
-            {"use_angle_cls": True, "lang": lang, "use_gpu": use_gpu},
-            {"use_textline_orientation": True, "lang": lang},
+            {"use_angle_cls": True, **version_kwargs, "use_gpu": use_gpu, "show_log": False},
+            {"use_angle_cls": True, **version_kwargs, "use_gpu": use_gpu},
+            {"use_textline_orientation": True, **version_kwargs},
+            version_kwargs,
             {"lang": lang},
         ]
         last_error = None
@@ -666,6 +851,9 @@ class OCRPlugin(VisionTaskPlugin):
                 "backend": self.backend,
                 "languages": self.config.get("languages", ["ko", "en"]),
                 "lang": _paddleocr_lang(self.config) if self.backend == "paddleocr" else None,
+                "ocr_version": self.config.get("ocr_version", "PP-OCRv5") if self.backend == "paddleocr" else None,
+                "text_detection_model_name": self.config.get("text_detection_model_name") if self.backend == "paddleocr" else None,
+                "text_recognition_model_name": self.config.get("text_recognition_model_name") if self.backend == "paddleocr" else None,
                 "gpu": _easyocr_gpu(self.config),
             },
         )
@@ -689,7 +877,7 @@ class UltralyticsTrackingPlugin(VisionTaskPlugin):
                 from ultralytics import YOLO
             except ImportError as exc:
                 raise RuntimeError("Install requirements-specialists.txt to use the tracking plugin") from exc
-            self._model = YOLO(self.config.get("model", "yolo11n.pt"))
+            self._model = YOLO(self.config.get("model", "yolo26n.pt"))
 
     def refine(self, image_path, prompt, seed_result):
         self._load()
@@ -724,4 +912,4 @@ class UltralyticsTrackingPlugin(VisionTaskPlugin):
                     )
                 )
         self._frame_id += 1
-        return PluginOutput(result=result, score=_mean(item.confidence for item in result.tracks), metadata={"model": self.config.get("model", "yolo11n.pt"), "frame_id": self._frame_id - 1, "device": _device(self.config)})
+        return PluginOutput(result=result, score=_mean(item.confidence for item in result.tracks), metadata={"model": self.config.get("model", "yolo26n.pt"), "frame_id": self._frame_id - 1, "device": _device(self.config)})
