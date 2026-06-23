@@ -27,6 +27,10 @@ def _operation(state: WorkflowState) -> OperationPlan:
     return OperationPlan.model_validate(state["active_operation"])
 
 
+def _image_path(operation: OperationPlan, image_name: str) -> str:
+    return os.path.join(operation.img_dir, image_name)
+
+
 def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
     builder = StateGraph(WorkflowState)
 
@@ -146,7 +150,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
 
     def generate_draft(state: WorkflowState) -> Dict[str, Any]:
         operation = _operation(state)
-        image_path = f"{operation.img_dir}/{state['current_image']}"
+        image_path = _image_path(operation, state["current_image"])
         try:
             output = runtime.generate_drafts(image_path, operation)
             return {
@@ -169,7 +173,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
         operation = _operation(state)
         raw_result = state.get("current_result") or {}
         result = DetectionResult.model_validate(raw_result) if raw_result else DetectionResult(task_type=operation.task_type)
-        image_path = f"{operation.img_dir}/{state['current_image']}"
+        image_path = _image_path(operation, state["current_image"])
         output = runtime.run_specialists(image_path, operation, result)
         current_status = state.get("current_status", "SpecialistFirst")
         if (
@@ -191,7 +195,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
     def decide_high(state: WorkflowState) -> Dict[str, Any]:
         operation = _operation(state)
         result = DetectionResult.model_validate(state["current_result"])
-        image_path = f"{operation.img_dir}/{state['current_image']}"
+        image_path = _image_path(operation, state["current_image"])
         issues = validate_result(result, image_path)
         required, reason = runtime.needs_high_verification(
             operation,
@@ -234,7 +238,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
 
     def high_verify(state: WorkflowState) -> Dict[str, Any]:
         operation = _operation(state)
-        image_path = f"{operation.img_dir}/{state['current_image']}"
+        image_path = _image_path(operation, state["current_image"])
         result = DetectionResult.model_validate(state["current_result"])
         output = runtime.run_high_verification(image_path, operation, result)
         return {
@@ -248,7 +252,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
     def validate_generated(state: WorkflowState) -> Dict[str, Any]:
         operation = _operation(state)
         result = DetectionResult.model_validate(state["current_result"])
-        image_path = f"{operation.img_dir}/{state['current_image']}"
+        image_path = _image_path(operation, state["current_image"])
         issues = validate_result(result, image_path)
         can_repair = bool(issues) and state.get("retries", 0) < operation.max_retries
         return {

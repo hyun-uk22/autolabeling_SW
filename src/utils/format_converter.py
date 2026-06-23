@@ -8,6 +8,7 @@ from PIL import Image
 from ..core.models import BoundingBox, DetectionResult
 
 SUPPORTED_LABEL_FORMATS = {"yolo", "pascal_voc", "coco", "custom", "vision_json"}
+BOX_FORMATS = {"yolo", "pascal_voc"}
 
 
 def normalize_label_formats(value: str | Iterable[str]) -> List[str]:
@@ -29,6 +30,40 @@ def normalize_label_formats(value: str | Iterable[str]) -> List[str]:
             f"Supported formats: {', '.join(sorted(SUPPORTED_LABEL_FORMATS))}, all"
         )
     return list(dict.fromkeys(requested))
+
+
+def resolve_export_formats(
+    result: DetectionResult,
+    requested_formats: str | Iterable[str],
+    task_type: Optional[str] = None,
+) -> List[str]:
+    requested = normalize_label_formats(requested_formats)
+    selected: List[str] = []
+    has_boxes = bool(result.boxes)
+    has_segments = bool(result.segments)
+    has_lossless_only_labels = bool(
+        result.classifications or result.texts or result.poses or result.tracks
+    )
+    effective_task = task_type or result.task_type
+    needs_lossless = (
+        effective_task in {"classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"}
+        or has_segments
+        or has_lossless_only_labels
+    )
+
+    for fmt in requested:
+        if fmt in BOX_FORMATS and not has_boxes:
+            continue
+        if fmt == "coco" and not (has_boxes or has_segments):
+            continue
+        selected.append(fmt)
+
+    if needs_lossless and "vision_json" not in selected:
+        selected.append("vision_json")
+    if not selected and (has_boxes or has_segments or has_lossless_only_labels):
+        selected.append("vision_json")
+
+    return list(dict.fromkeys(selected))
 
 
 def get_image_size(image_path: str) -> tuple[int, int]:
@@ -260,24 +295,34 @@ class LabelExportWriter:
         self.coco_images = []
         self.coco_annotations = []
         self.vision_json_records = []
+        self.used_formats = set()
         self._next_image_id = 1
         self._next_annotation_id = 1
         os.makedirs(output_dir, exist_ok=True)
 
-    def save(self, result: DetectionResult, image_path: str) -> Dict[str, str]:
+    def save(
+        self,
+        result: DetectionResult,
+        image_path: str,
+        formats: Optional[str | Iterable[str]] = None,
+    ) -> Dict[str, str]:
         image_name = os.path.basename(image_path)
+        selected_formats = normalize_label_formats(formats) if formats is not None else self.formats
+        if "custom" in selected_formats and not self.custom_template:
+            raise ValueError("--custom_label_template is required when using the custom label format")
+        self.used_formats.update(selected_formats)
         paths = {}
-        if "yolo" in self.formats:
+        if "yolo" in selected_formats:
             paths["yolo"] = save_as_yolo(result, image_name, self.output_dir, self.class_list)
-        if "pascal_voc" in self.formats:
+        if "pascal_voc" in selected_formats:
             paths["pascal_voc"] = save_as_pascal_voc(result, image_path, self.output_dir, self.class_list)
-        if "coco" in self.formats:
+        if "coco" in selected_formats:
             self._add_coco_image(result, image_path)
             paths["coco"] = os.path.join(self.output_dir, "coco_annotations.json")
-        if "vision_json" in self.formats:
+        if "vision_json" in selected_formats:
             self.vision_json_records.append(result_to_export_dict(result, image_path))
             paths["vision_json"] = os.path.join(self.output_dir, "vision_annotations.jsonl")
-        if "custom" in self.formats:
+        if "custom" in selected_formats:
             paths["custom"] = self._save_custom(result, image_path)
         return paths
 
@@ -288,9 +333,9 @@ class LabelExportWriter:
             with open(classes_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(self.class_list))
             paths["classes"] = classes_path
-            if "yolo" in self.formats:
+            if "yolo" in self.used_formats:
                 paths["data_yaml"] = save_yolo_data_yaml(self.output_dir, self.class_list)
-        if "coco" in self.formats:
+        if "coco" in self.used_formats:
             coco_path = os.path.join(self.output_dir, "coco_annotations.json")
             categories = [
                 {"id": idx + 1, "name": label, "supercategory": "object"}
@@ -306,7 +351,7 @@ class LabelExportWriter:
             with open(coco_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             paths["coco"] = coco_path
-        if "vision_json" in self.formats:
+        if "vision_json" in self.used_formats:
             jsonl_path = os.path.join(self.output_dir, "vision_annotations.jsonl")
             with open(jsonl_path, "w", encoding="utf-8") as f:
                 for record in self.vision_json_records:

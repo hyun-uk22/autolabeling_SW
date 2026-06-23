@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 
-from src.utils.format_converter import LabelExportWriter
+from src.utils.format_converter import LabelExportWriter, resolve_export_formats
 from src.utils.label_importer import find_image_path, import_labels_with_report
 from src.utils.label_validator import summarize_validation, validate_result
 from src.reporting import build_conversion_preflight, build_user_action_report
@@ -68,7 +68,8 @@ def main():
         ]
         if blocking_issues or (args.strict and issues):
             continue
-        writer.save(result, image_path)
+        resolved_formats = resolve_export_formats(result, writer.formats, result.task_type)
+        writer.save(result, image_path, formats=resolved_formats)
         converted += 1
 
     artifacts = writer.finalize()
@@ -92,6 +93,7 @@ def main():
         "source_format": args.source_format,
         "input_summary": import_batch.report,
         "target_formats": writer.formats,
+        "resolved_target_formats": list(dict.fromkeys(writer.used_formats or writer.formats)),
         "records_read": len(records),
         "records_converted": converted,
         "preflight": preflight,

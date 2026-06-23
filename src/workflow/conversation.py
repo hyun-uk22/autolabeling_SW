@@ -41,6 +41,14 @@ PREFERRED_IMAGE_PATHS = (
     "img",
     "JPEGImages",
 )
+TASK_PATH_HINTS = {
+    "classification": ("classification", "classify", "image_classification", "cls"),
+    "object_detection": ("detection", "object_detection", "detect", "det"),
+    "segmentation": ("segmentation", "segment", "seg"),
+    "pose_estimation": ("pose_estimation", "pose", "keypoint", "keypoints"),
+    "ocr": ("ocr", "text", "text_recognition", "receipt", "document"),
+    "tracking": ("tracking", "track", "video"),
+}
 FORMAT_ALIASES = {
     "coco": ("ms coco", "mscoco", "coco", "코코"),
     "pascal_voc": ("pascal voc", "pascal_voc", "voc", "파스칼"),
@@ -381,10 +389,20 @@ def _image_directory_from_path(path: Path, root: Path) -> Dict[str, Any]:
     directory = path if path.is_dir() else path.parent
     if not directory.is_dir():
         raise ValueError(f"지정한 이미지 경로가 디렉터리가 아닙니다: {_relative(directory, root)}")
+
+    def allowed_image(item: Path) -> bool:
+        if not item.is_file() or item.suffix.lower() not in IMAGE_EXTENSIONS:
+            return False
+        try:
+            item.relative_to(root)
+        except ValueError:
+            return True
+        return not _is_ignored(item, root)
+
     image_files = [
         item
-        for item in directory.iterdir()
-        if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
+        for item in directory.rglob("*")
+        if allowed_image(item)
     ]
     if not image_files:
         raise ValueError(f"지정한 경로에서 라벨링할 이미지를 찾지 못했습니다: {_relative(directory, root)}")
@@ -399,6 +417,7 @@ def _select_image_directory(
     images: List[Dict[str, Any]],
     root: Path,
     explicit_path: Optional[Path],
+    task_type: str = "object_detection",
 ) -> Dict[str, Any]:
     selected = images
     if explicit_path:
@@ -412,7 +431,30 @@ def _select_image_directory(
         if not matching:
             raise ValueError(f"지정한 경로에서 라벨링할 이미지를 찾지 못했습니다: {_relative(explicit_path, root)}")
         selected = matching
-    return selected[0]
+
+    hints = TASK_PATH_HINTS.get(task_type, ())
+
+    def score(image: Dict[str, Any]) -> tuple:
+        relative = image["relative_path"].lower().replace("\\", "/")
+        parts = set(Path(relative).parts)
+        task_rank = 0
+        for index, hint in enumerate(hints):
+            normalized_hint = hint.lower()
+            if normalized_hint in parts:
+                task_rank = len(hints) + 2 - index
+                break
+            if normalized_hint in relative:
+                task_rank = len(hints) + 1 - index
+                break
+        preferred_rank = 0
+        for index, prefix in enumerate(PREFERRED_IMAGE_PATHS):
+            normalized_prefix = prefix.lower()
+            if relative == normalized_prefix or relative.startswith(normalized_prefix + "/"):
+                preferred_rank = len(PREFERRED_IMAGE_PATHS) - index
+                break
+        return task_rank, preferred_rank, image["file_count"], -len(relative)
+
+    return max(selected, key=score)
 
 
 def _numeric_option(request: str, name: str) -> Optional[float]:
@@ -508,6 +550,7 @@ def build_conversation_plan(
             if source_path
             else _explicit_workspace_path(request, root, allow_external=True)
         )
+        task_type = overrides.get("task_type") or _task_type(request)
         images = inventory["image_directories"]
         if explicit_path:
             selected_images = _image_directory_from_path(explicit_path, root)
@@ -517,8 +560,7 @@ def build_conversation_plan(
                     "Workspace에서 라벨링할 이미지를 찾지 못했습니다. "
                     "이미지를 workspace의 data/raw에 넣거나 프롬프트에 `path: 이미지_폴더`를 지정하세요."
                 )
-            selected_images = _select_image_directory(images, root, explicit_path)
-        task_type = overrides.get("task_type") or _task_type(request)
+            selected_images = _select_image_directory(images, root, explicit_path, task_type)
         formats = overrides.get("target_formats") or _target_formats(request) or (["yolo"] if task_type == "object_detection" else ["vision_json"])
         threshold = overrides.get("threshold")
         if threshold is None:

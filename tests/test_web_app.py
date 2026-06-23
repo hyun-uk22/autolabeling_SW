@@ -26,8 +26,10 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(len(app.tabs), 6)
             self.assertEqual(len(app.chat_input), 1)
-            self.assertEqual(app.text_input[0].value, "data/labeled")
-            self.assertEqual(app.text_input[1].value, "data/raw")
+            self.assertEqual(app.selectbox[0].label, "라벨 폴더 선택")
+            self.assertEqual(app.selectbox[0].value, "data/labeled")
+            self.assertEqual(app.selectbox[1].label, "이미지 폴더 선택")
+            self.assertEqual(app.selectbox[1].value, "data/raw")
 
     def test_app_renders_all_workflow_tabs_without_exceptions(self):
         from streamlit.testing.v1 import AppTest
@@ -168,15 +170,15 @@ class StreamlitAppTests(unittest.TestCase):
 
             self.assertEqual(len(app.exception), 0)
             metric_labels = [metric.label for metric in app.metric]
-            self.assertIn("읽은 레코드", metric_labels)
+            self.assertIn("읽은 데이터", metric_labels)
             self.assertIn("완료율", metric_labels)
-            self.assertGreaterEqual(len(app.dataframe), 3)
-            self.assertTrue(any("변환 전 확인 사항" in item.value for item in app.markdown))
+            self.assertGreaterEqual(len(app.dataframe), 2)
+            self.assertFalse(any("변환 전 확인 사항" in item.value for item in app.markdown))
             self.assertGreaterEqual(len(app.get("download_button")), 1)
 
             app.run(timeout=30)
             self.assertEqual(len(app.exception), 0)
-            self.assertIn("읽은 레코드", [metric.label for metric in app.metric])
+            self.assertIn("읽은 데이터", [metric.label for metric in app.metric])
             self.assertGreaterEqual(len(app.get("download_button")), 1)
 
 

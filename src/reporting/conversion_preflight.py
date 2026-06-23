@@ -38,8 +38,8 @@ def build_conversion_preflight(
         notices.append(_notice(
             "critical",
             "no_records",
-            "변환할 수 있는 라벨 레코드가 없습니다.",
-            "입력 라벨 파일이 비어 있거나 지원 schema인지 확인하세요.",
+            "변환할 수 있는 라벨 데이터가 없습니다.",
+            "입력 라벨 파일이 비어 있거나 지원 파일 형식인지 확인하세요.",
         ))
 
     failed_files = summary.get("failed_files", [])
@@ -57,8 +57,8 @@ def build_conversion_preflight(
         notices.append(_notice(
             "info",
             "skipped_unrecognized_files",
-            f"{len(skipped_files)}개 파일은 지원 라벨 schema로 판별되지 않아 건너뛰었습니다.",
-            "의도한 라벨 파일이면 포맷을 명시하거나 schema를 지원 형식에 맞게 정리하세요.",
+            f"{len(skipped_files)}개 파일은 지원 라벨 파일 형식으로 판별되지 않아 건너뛰었습니다.",
+            "의도한 라벨 파일이면 입력 파일 형식을 명시하거나 파일 구조를 지원 형식에 맞게 정리하세요.",
             count=len(skipped_files),
         ))
 
@@ -106,7 +106,7 @@ def build_conversion_preflight(
             notices.append(_notice(
                 "warning",
                 "missing_images",
-                f"이미지 파일을 찾지 못한 레코드가 {issue_counts['missing_image']}개 있습니다.",
+                f"이미지 파일을 찾지 못한 데이터가 {issue_counts['missing_image']}개 있습니다.",
                 "라벨 파일만 점검하는 경우 계속 진행할 수 있지만, COCO/Pascal VOC처럼 이미지 크기가 필요한 출력은 이미지 디렉터리 연결 후 다시 실행하세요.",
                 count=issue_counts["missing_image"],
             ))
@@ -115,7 +115,7 @@ def build_conversion_preflight(
             notices.append(_notice(
                 "critical",
                 "invalid_images",
-                f"이미지 크기를 읽을 수 없는 레코드가 {count}개 있습니다.",
+                f"이미지 크기를 읽을 수 없는 데이터가 {count}개 있습니다.",
                 "손상 이미지 또는 지원하지 않는 이미지 형식을 교체하세요.",
                 count=count,
             ))

@@ -55,7 +55,7 @@
 | `object_detection` | `boxes` | Grounding DINO | YOLO/VOC/COCO/Vision JSONL |
 | `segmentation` | `segments` | Grounding DINO + SAM | COCO/Vision JSONL |
 | `pose_estimation` | `poses` | Ultralytics pose | Vision JSONL/custom |
-| `ocr` | `texts` | EasyOCR | Vision JSONL/custom |
+| `ocr` | `texts` | PaddleOCR | Vision JSONL/custom |
 | `tracking` | `tracks` | Grounding DINO + ByteTrack | Vision JSONL/custom |
 | `all` | 전체 필드 | 설정된 모든 plugin | Vision JSONL/COCO/custom |
 
@@ -651,10 +651,10 @@ orchestrator는 설정 순서대로 plugin을 순회하고 현재 `task_type`을
 | plugin | 기본 모델/엔진 | 역할 |
 | --- | --- | --- |
 | `classification` | `openai/clip-vit-base-patch32` | zero-shot classification |
-| `grounding_dino` | `IDEA-Research/grounding-dino-tiny` | text-conditioned bbox |
+| `grounding_dino` | `IDEA-Research/grounding-dino-base` | text-conditioned bbox |
 | `sam` | `sam2_b.pt` (`ultralytics_sam2`) | seed bbox 기반 polygon mask 생성 |
 | `pose` | `yolo11n-pose.pt` | pose keypoint |
-| `ocr` | EasyOCR | text detection/recognition |
+| `ocr` | PaddleOCR | text detection/recognition |
 | `tracking` | `yolo11n.pt` + ByteTrack | frame sequence tracking |
 
 모델 파일은 repository에 포함되지 않으며 태스크 시작 시 plugin prepare 단계에서 library가 다운로드할 수 있다. 기본 배포 설정은 별도 Hugging Face 승인이 필요 없는 `ultralytics_sam2` backend와 `sam2_b.pt`를 사용한다.

@@ -22,7 +22,7 @@ from ..reporting import (
     build_user_action_report,
 )
 from ..utils.evaluation import build_experiment_report, evaluate_yolo_dirs, save_experiment_report
-from ..utils.format_converter import LabelExportWriter
+from ..utils.format_converter import LabelExportWriter, resolve_export_formats
 from ..utils.geometry import calculate_iou, compute_result_consistency, consistency_metric_name
 from ..utils.label_importer import (
     extract_class_names_from_text,
@@ -155,10 +155,15 @@ class WorkflowRuntime:
         os.makedirs(operation.img_dir, exist_ok=True)
         os.makedirs(operation.out_dir, exist_ok=True)
         os.makedirs(operation.vis_dir, exist_ok=True)
-        images = sorted(
-            name for name in os.listdir(operation.img_dir)
-            if name.lower().endswith((".png", ".jpg", ".jpeg"))
-        )
+        image_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+        images = []
+        for root, _, names in os.walk(operation.img_dir):
+            for name in names:
+                if not name.lower().endswith(image_exts):
+                    continue
+                path = os.path.join(root, name)
+                images.append(os.path.relpath(path, operation.img_dir))
+        images = sorted(images)
         low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
         messages = []
         self._ensure_plugins(operation)
@@ -235,8 +240,8 @@ class WorkflowRuntime:
         if not self.plugin_orchestrator:
             return parameters
         for plugin in self.plugin_orchestrator.plugins:
-            if plugin.plugin_name == "grounding_dino":
-                parameters["grounding_dino"] = {
+            if plugin.plugin_name in {"grounding_dino", "grounded_sam2"}:
+                parameters[plugin.plugin_name] = {
                     "box_threshold": float(plugin.config.get("box_threshold", 0.45)),
                     "text_threshold": float(plugin.config.get("text_threshold", 0.30)),
                     "nms_iou": float(plugin.config.get("nms_iou", 0.60)),
@@ -361,13 +366,15 @@ class WorkflowRuntime:
         def adjusted(current: float, delta_key: str) -> float:
             return max(0.0, min(1.0, current + float(patch.get(delta_key, 0.0))))
 
+        config = {
+            "box_threshold": adjusted(0.45, "box_threshold_delta"),
+            "text_threshold": adjusted(0.30, "text_threshold_delta"),
+            "nms_iou": adjusted(0.60, "nms_iou_delta"),
+            "min_confidence": adjusted(0.20, "min_confidence_delta"),
+        }
         return {
-            "grounding_dino": {
-                "box_threshold": adjusted(0.45, "box_threshold_delta"),
-                "text_threshold": adjusted(0.30, "text_threshold_delta"),
-                "nms_iou": adjusted(0.60, "nms_iou_delta"),
-                "min_confidence": adjusted(0.20, "min_confidence_delta"),
-            }
+            "grounding_dino": dict(config),
+            "grounded_sam2": dict(config),
         }
 
     def _augmented_image_path(self, image_path: str, patch: Dict[str, Any]) -> Tuple[str, Optional[str]]:
@@ -506,8 +513,6 @@ class WorkflowRuntime:
         records: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         formats = operation.formats
-        if formats == ["yolo"] and operation.task_type != "object_detection":
-            formats = ["vision_json"]
         writer = LabelExportWriter(
             operation.out_dir,
             formats=formats,
@@ -522,7 +527,8 @@ class WorkflowRuntime:
             result = DetectionResult.model_validate(record["result"])
             exported_results.append(result)
             image_path = os.path.join(operation.img_dir, record["image"])
-            label_paths = writer.save(result, image_path)
+            resolved_formats = resolve_export_formats(result, formats, operation.task_type)
+            label_paths = writer.save(result, image_path, formats=resolved_formats)
             export_records.append({
                 "image": record["image"],
                 "paths": label_paths,
@@ -582,7 +588,7 @@ class WorkflowRuntime:
                 for row in metric_rows:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         evaluation = None
-        if operation.gt_dir and os.path.isdir(operation.gt_dir) and "yolo" in formats:
+        if operation.gt_dir and os.path.isdir(operation.gt_dir) and "yolo" in writer.used_formats:
             evaluation = evaluate_yolo_dirs(operation.out_dir, operation.gt_dir, operation.eval_iou)
         validation_records = [
             {"image": record["image"], "issues": record.get("issues", [])}
@@ -634,7 +640,7 @@ class WorkflowRuntime:
             "images": len(records),
             "task_type": operation.task_type,
             "consistency_metric": consistency_metric_name(operation.task_type),
-            "formats": formats,
+            "formats": list(dict.fromkeys(writer.used_formats or formats)),
             "total_labels": sum(row["objects"] for row in metric_rows),
             "total_elapsed_sec": total_elapsed,
             "low_api_attempts": low_attempts,
@@ -761,7 +767,8 @@ class WorkflowRuntime:
                 continue
             image_path = find_image_path(operation.img_dir, record["image"])
             result = DetectionResult.model_validate(record["result"])
-            paths = writer.save(result, image_path)
+            resolved_formats = resolve_export_formats(result, writer.formats, operation.task_type or result.task_type)
+            paths = writer.save(result, image_path, formats=resolved_formats)
             export_issues = auditor.audit_record(paths)
             export_records.append({
                 "image": record["image"],

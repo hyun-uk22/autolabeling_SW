@@ -475,6 +475,40 @@ path: {test_images}
             self.assertEqual(operation["specialist_consistency_runs"], 0)
             self.assertEqual(operation["specialist_advisor_mode"], "none")
 
+    def test_generation_prefers_task_matching_image_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            classification = root / "datasets" / "classification" / "csv" / "data"
+            ocr = root / "datasets" / "ocr" / "csv" / "data"
+            classification.mkdir(parents=True)
+            ocr.mkdir(parents=True)
+            for index in range(3):
+                Image.new("RGB", (10, 10), "white").save(classification / f"class_{index}.jpg")
+            Image.new("RGB", (10, 10), "white").save(ocr / "ocr_0.jpg")
+
+            proposal = build_conversation_plan("OCR 데이터셋에 대해서만 라벨 생성해줘", root)
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["task_type"], "ocr")
+            self.assertEqual(Path(operation["img_dir"]).resolve(), ocr.resolve())
+
+    def test_explicit_generation_path_counts_nested_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_root = root / "datasets" / "ocr"
+            nested = image_root / "csv" / "data"
+            nested.mkdir(parents=True)
+            Image.new("RGB", (10, 10), "white").save(nested / "ocr_0.jpg")
+
+            proposal = build_conversation_plan(
+                "path: datasets/ocr\nOCR 데이터셋에 대해서만 라벨 생성해줘",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(Path(operation["img_dir"]).resolve(), image_root.resolve())
+            self.assertIn("이미지 1개", proposal["summary"])
+
     def test_llm_plan_patch_updates_allowed_fields_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

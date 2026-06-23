@@ -13,7 +13,7 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "weight": 1.0,
         "config": {
             "model": "openai/clip-vit-base-patch32",
-            "device": "cpu",
+            "device": "auto",
             "labels": ["person", "animal", "vehicle", "document", "indoor", "outdoor"],
             "top_k": 3,
         },
@@ -21,11 +21,28 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
     {
         "name": "grounding_dino",
         "enabled": True,
-        "tasks": ["object_detection", "segmentation", "tracking"],
+        "tasks": ["object_detection"],
         "weight": 1.2,
         "config": {
-            "model": "IDEA-Research/grounding-dino-tiny",
-            "device": "cpu",
+            "model": "IDEA-Research/grounding-dino-base",
+            "device": "auto",
+            "box_threshold": 0.45,
+            "text_threshold": 0.30,
+            "merge_iou": 0.35,
+            "nms_iou": 0.60,
+            "min_confidence": 0.20,
+        },
+    },
+    {
+        "name": "grounded_sam2",
+        "enabled": True,
+        "tasks": ["segmentation"],
+        "weight": 1.5,
+        "config": {
+            "grounding_model": "IDEA-Research/grounding-dino-base",
+            "sam_backend": "ultralytics_sam2",
+            "sam_model": "sam2_b.pt",
+            "device": "auto",
             "box_threshold": 0.45,
             "text_threshold": 0.30,
             "merge_iou": 0.35,
@@ -35,13 +52,13 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
     },
     {
         "name": "sam",
-        "enabled": True,
-        "tasks": ["object_detection", "segmentation"],
+        "enabled": False,
+        "tasks": ["segmentation"],
         "weight": 1.0,
         "config": {
             "backend": "ultralytics_sam2",
             "model": "sam2_b.pt",
-            "device": "cpu",
+            "device": "auto",
         },
     },
     {
@@ -51,7 +68,7 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "weight": 1.0,
         "config": {
             "model": "yolo11n-pose.pt",
-            "device": "cpu",
+            "device": "auto",
             "keypoint_threshold": 0.25,
         },
     },
@@ -61,8 +78,10 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "tasks": ["ocr"],
         "weight": 1.0,
         "config": {
+            "backend": "paddleocr",
+            "lang": "korean",
             "languages": ["ko", "en"],
-            "gpu": False,
+            "gpu": "auto",
         },
     },
     {
@@ -73,7 +92,7 @@ DEFAULT_GENERATION_PLUGIN_CONFIGS: List[Dict[str, Any]] = [
         "config": {
             "model": "yolo11n.pt",
             "tracker": "bytetrack.yaml",
-            "device": "cpu",
+            "device": "auto",
         },
     },
 ]
@@ -134,8 +153,6 @@ def _merge_generation_plugin_specs(config_path: Optional[str]) -> List[Dict[str,
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         for item in data.get("plugins", []):
-            if not item.get("enabled", True):
-                continue
             name = item["name"]
             if name in specs_by_name:
                 merged = dict(specs_by_name[name])
@@ -143,6 +160,12 @@ def _merge_generation_plugin_specs(config_path: Optional[str]) -> List[Dict[str,
                     **dict(merged.get("config") or {}),
                     **dict(item.get("config") or {}),
                 }
+                if "enabled" in item:
+                    merged["enabled"] = item["enabled"]
+                elif not merged.get("enabled", True):
+                    merged["enabled"] = True
+                if item.get("tasks"):
+                    merged["tasks"] = item["tasks"]
                 if "weight" in item:
                     merged["weight"] = item["weight"]
                 if item.get("class"):
@@ -164,7 +187,7 @@ def load_generation_plugins(
     labels = [str(label).strip() for label in (candidate_labels or []) if str(label).strip()]
     if labels:
         for spec in specs:
-            if spec.get("name") in {"grounding_dino", "sam"}:
+            if spec.get("name") in {"grounding_dino", "sam", "grounded_sam2"}:
                 config = dict(spec.get("config") or {})
                 config["labels"] = list(dict.fromkeys(labels))
                 spec["config"] = config
@@ -173,8 +196,9 @@ def load_generation_plugins(
 
 def create_default_registry() -> PluginRegistry:
     from .builtin import (
-        EasyOCRPlugin,
+        GroundedSAM2Plugin,
         GroundingDINOPlugin,
+        OCRPlugin,
         SAMPlugin,
         TransformersClassificationPlugin,
         UltralyticsPosePlugin,
@@ -184,8 +208,9 @@ def create_default_registry() -> PluginRegistry:
     registry = PluginRegistry()
     registry.register("classification", TransformersClassificationPlugin)
     registry.register("grounding_dino", GroundingDINOPlugin)
+    registry.register("grounded_sam2", GroundedSAM2Plugin)
     registry.register("sam", SAMPlugin)
     registry.register("pose", UltralyticsPosePlugin)
-    registry.register("ocr", EasyOCRPlugin)
+    registry.register("ocr", OCRPlugin)
     registry.register("tracking", UltralyticsTrackingPlugin)
     return registry

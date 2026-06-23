@@ -128,6 +128,15 @@ st.markdown(
     }
     label[data-testid="stWidgetLabel"] p { color: #394351; font-size: 12px; font-weight: 650; }
     div[data-testid="stFormSubmitButton"] { display: flex; justify-content: flex-end; padding-top: 8px; }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.path-panel-marker),
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.path-panel-marker) > div,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.path-panel-marker) [data-testid="stVerticalBlock"] {
+        background: var(--surface);
+        border-radius: 7px;
+    }
+    .path-panel-marker {
+        display: none;
+    }
     div[data-testid="stFormSubmitButton"] > div { display: flex; justify-content: flex-end; width: 100%; }
     div[data-testid="stFormSubmitButton"] button { margin-left: auto; }
     .stButton > button, .stFormSubmitButton > button {
@@ -172,6 +181,88 @@ st.markdown(
 FORMAT_OPTIONS = ["yolo", "pascal_voc", "coco", "vision_json"]
 SOURCE_OPTIONS = ["auto", "yolo", "pascal_voc", "coco", "vision_json", "csv", "generic_json"]
 TASK_OPTIONS = ["object_detection", "classification", "segmentation", "pose_estimation", "ocr", "tracking", "all"]
+STATUS_LABELS = {
+    "blocked": "확인 필요",
+    "needs_attention": "주의 필요",
+    "warning": "주의",
+    "partial_success": "일부 완료",
+    "needs_review": "검토 필요",
+    "success": "정상",
+    "ok": "정상",
+    "completed": "완료",
+    "completed_with_errors": "오류 있음",
+    "failed": "실패",
+}
+ISSUE_REASON_LABELS = {
+    "empty_result": "라벨 파일을 읽었지만 변환할 객체 라벨이 없습니다.",
+    "missing_image": "라벨과 연결되는 원본 이미지 파일을 찾지 못했습니다.",
+    "image_open_failed": "이미지 파일을 열 수 없습니다. 파일이 손상됐거나 지원하지 않는 형식일 수 있습니다.",
+    "invalid_image_size": "이미지 크기를 읽을 수 없거나 크기 값이 올바르지 않습니다.",
+    "missing_label": "객체의 클래스명이 비어 있습니다.",
+    "coordinate_out_of_range": "좌표값이 유효 범위를 벗어났습니다.",
+    "invalid_box_order": "박스 좌표 순서가 올바르지 않습니다.",
+    "confidence_out_of_range": "confidence 값이 0~1 범위를 벗어났습니다.",
+    "import_failed_files": "라벨 후보 파일을 읽는 중 오류가 발생했습니다.",
+    "skipped_unrecognized_files": "지원하는 라벨 파일 형식으로 판별되지 않아 건너뛰었습니다.",
+    "unrecognized_csv_schema": "CSV 파일 구조가 지원하는 라벨 파일 형식과 다릅니다.",
+    "unrecognized_json_schema": "JSON 파일 구조가 지원하는 라벨 파일 형식과 다릅니다.",
+    "unrecognized_jsonl_schema": "JSONL 파일 구조가 지원하는 라벨 파일 형식과 다릅니다.",
+    "unrecognized_txt_schema": "TXT 파일 구조가 YOLO 라벨 형식과 다릅니다.",
+    "unrecognized_xml_schema": "XML 파일 구조가 Pascal VOC 라벨 형식과 다릅니다.",
+    "schema_read_failed": "파일 내용을 읽거나 해석하는 중 오류가 발생했습니다.",
+}
+
+
+def display_status(value):
+    return STATUS_LABELS.get(str(value), str(value or "-"))
+
+
+def display_issue_reason(code, fallback=""):
+    text = str(code or "")
+    key = text.split(":", 1)[0]
+    return ISSUE_REASON_LABELS.get(key, fallback or text or "-")
+
+
+def _relative_workspace_path(workspace, path):
+    root = Path(workspace).expanduser().resolve()
+    target = Path(path).expanduser().resolve()
+    try:
+        return target.relative_to(root).as_posix()
+    except ValueError:
+        return str(target)
+
+
+def workspace_dir_candidates(workspace, names, fallback):
+    root = Path(workspace).expanduser().resolve()
+    wanted = {name.lower() for name in names}
+    ignored = {
+        ".git",
+        ".streamlit",
+        "__pycache__",
+        "artifacts",
+        "converted",
+        "outputs",
+        "reports",
+        "runs",
+        "visualized",
+        "visualizations",
+    }
+    candidates = []
+    if root.exists():
+        for path in root.rglob("*"):
+            if not path.is_dir():
+                continue
+            parts = {part.lower() for part in path.parts}
+            if parts & ignored:
+                continue
+            if path.name.lower() in wanted:
+                candidates.append(_relative_workspace_path(root, path))
+    candidates = sorted(dict.fromkeys(candidates), key=lambda value: (len(value), value.lower()))
+    if candidates:
+        if fallback not in candidates:
+            candidates.append(fallback)
+        return candidates
+    return [fallback]
 
 
 def _plan_actions(plan):
@@ -245,6 +336,11 @@ def render_workflow_report(result, key_prefix="report"):
             action,
         )
         st.markdown(f"### {action_label} 결과 리포트")
+        st.caption(
+            "입력 데이터 문제: 입력/변환 전후 검증 단계에서 발견된 문제 수 · "
+            "결과 파일 문제: 저장된 결과물에서 발견된 문제 수 · "
+            "검토 필요: 문제가 있는 실제 데이터 파일 수"
+        )
         if action == "generate":
             performance = output.get("performance", {})
             columns = st.columns(4)
@@ -277,25 +373,13 @@ def render_workflow_report(result, key_prefix="report"):
         elif action == "convert":
             validation = output.get("validation", {})
             columns = st.columns(4)
-            columns[0].metric("읽은 레코드", output.get("records_read", 0))
+            columns[0].metric("읽은 데이터", output.get("records_read", 0))
             columns[1].metric("변환 완료", output.get("records_converted", 0))
-            columns[2].metric("검증 이슈", validation.get("failed_records", 0))
+            columns[2].metric("입력 데이터 문제", validation.get("failed_records", 0))
             columns[3].metric(
-                "출력 이슈",
+                "결과 파일 문제",
                 output.get("export_validation", {}).get("failed_records", 0),
             )
-            preflight = output.get("preflight", {})
-            if preflight.get("notices"):
-                st.markdown("**변환 전 확인 사항**")
-                st.dataframe([
-                    {
-                        "심각도": notice.get("severity", ""),
-                        "항목": notice.get("code", ""),
-                        "내용": notice.get("message", ""),
-                        "필요 조치": notice.get("user_action", ""),
-                    }
-                    for notice in preflight.get("notices", [])
-                ], width="stretch")
         elif action == "evaluate":
             rows = output.get("rows", [])
             st.metric("평가 실행", len(rows))
@@ -309,7 +393,7 @@ def render_workflow_report(result, key_prefix="report"):
             columns[0].metric("완료율", f"{user_report.get('completion_rate', 0.0):.1f}%")
             columns[1].metric("정상", summary.get("clean", 0))
             columns[2].metric("검토 필요", summary.get("needs_review", 0))
-            columns[3].metric("Artifact 이슈", summary.get("artifact_issues", 0))
+            columns[3].metric("결과 파일 문제", summary.get("artifact_issues", 0))
             for action_text in user_report.get("recommended_actions", []):
                 st.info(action_text)
             detailed = user_report.get("detailed_records", [])
@@ -358,17 +442,34 @@ def render_manual_result(result, result_key):
         })
 
 
+def render_recent_result_summary(label, result):
+    outputs = result.get("operation_outputs", [])
+    output = outputs[0] if outputs else {}
+    report_path = output.get("report_path") or output.get("summary_path") or output.get("user_action_report_path")
+    output_dir = str(Path(report_path).parent) if report_path else "-"
+    action = output.get("action", "")
+    formats = ", ".join(output.get("target_formats") or output.get("formats") or [])
+    summary = f"최근 작업: {label}"
+    if action == "convert" and formats:
+        summary += f" | 출력 포맷: {formats}"
+    if output_dir != "-":
+        summary += f" | 출력 경로: {output_dir}"
+    st.caption(summary)
+
+
 def run_plan(plan, auto_approve=False, result_key="workflow", first_pass_plan_key=None):
     try:
         result = execute_plan(plan, auto_approve=auto_approve)
         if "manual_results" not in st.session_state:
             st.session_state.manual_results = {}
         st.session_state.manual_results[result_key] = result
+        st.session_state.last_manual_result_key = result_key
         if first_pass_plan_key:
             st.session_state[first_pass_plan_key] = (
                 plan if has_generate_operation(plan) else None
             )
-        render_manual_result(result, result_key)
+        st.session_state.open_result_report = True
+        st.rerun()
     except Exception as exc:
         st.error(f"작업 실패: {exc}")
 
@@ -423,20 +524,68 @@ def build_convert_preflight_preview(
     }
 
 
+def preflight_user_summary(preview):
+    preflight = preview.get("preflight", {})
+    validation = preview.get("validation", {})
+    summary = preview.get("input_summary", {})
+    status = preflight.get("status", "unknown")
+    total = summary.get("records_after_merge", 0)
+    failed = validation.get("failed_records", 0)
+    convertible = max(total - failed, 0)
+    notices = preflight.get("notices", [])
+    critical_count = sum(1 for notice in notices if notice.get("severity") == "critical")
+    warning_count = sum(1 for notice in notices if notice.get("severity") == "warning")
+
+    if status == "blocked" or total == 0 or critical_count:
+        return (
+            "error",
+            "실행 전에 수정이 필요합니다.",
+            "변환 가능한 라벨을 찾지 못했거나 필수 정보가 부족합니다. 아래 확인사항을 먼저 해결한 뒤 다시 사전 점검을 실행하세요.",
+        )
+    if failed:
+        return (
+            "warning",
+            "주의가 필요하지만 실행할 수 있습니다.",
+            f"{total}개 데이터 중 {convertible}개는 변환 가능하고, {failed}개는 검토가 필요합니다.",
+        )
+    if warning_count:
+        return (
+            "warning",
+            "주의사항이 있지만 실행할 수 있습니다.",
+            f"{total}개 데이터를 변환할 수 있습니다. 일부 중복, 충돌, 건너뛴 파일이 있을 수 있으니 아래 확인사항만 검토하세요.",
+        )
+    return (
+        "success",
+        "바로 실행할 수 있습니다.",
+        f"{total}개 데이터에서 변환을 막는 문제가 발견되지 않았습니다.",
+    )
+
+
+def render_preflight_user_summary(preview):
+    alert, title, body = preflight_user_summary(preview)
+    message = f"**{title}**\n\n{body}"
+    if alert == "error":
+        st.error(message)
+    elif alert == "warning":
+        st.warning(message)
+    else:
+        st.success(message)
+
+
 def render_convert_preflight_preview(preview):
     preflight = preview.get("preflight", {})
     validation = preview.get("validation", {})
     summary = preview.get("input_summary", {})
-    columns = st.columns(4)
+    columns = st.columns(3)
     columns[0].metric("발견 소스", summary.get("sources_discovered", 0))
     columns[1].metric("변환 대상", summary.get("records_after_merge", 0))
-    columns[2].metric("검증 이슈", validation.get("failed_records", 0))
-    columns[3].metric("상태", preflight.get("status", "unknown"))
+    columns[2].metric("입력 데이터 문제", validation.get("failed_records", 0))
+    render_preflight_user_summary(preview)
     if preflight.get("notices"):
         st.markdown("**실행 전 확인 사항**")
         st.dataframe([
             {
-                "심각도": notice.get("severity", ""),
+                "심각도": display_status(notice.get("severity", "")),
                 "항목": notice.get("code", ""),
                 "내용": notice.get("message", ""),
                 "필요 조치": notice.get("user_action", ""),
@@ -447,8 +596,8 @@ def render_convert_preflight_preview(preview):
         st.success("변환 전에 확인된 필수 누락 정보가 없습니다.")
     detailed = preflight_detail_rows(preview)
     if detailed:
-        with st.expander("검증 이슈 상세"):
-            st.dataframe(detailed, width="stretch")
+        st.markdown("**입력 데이터 문제 상세**")
+        st.dataframe(detailed, width="stretch")
 
 
 def preflight_detail_rows(preview):
@@ -474,12 +623,12 @@ def preflight_detail_rows(preview):
         path = item.get("path", "")
         add_detail(Path(path).name, "import_failed_files", path)
         if item.get("error") and item["error"] not in grouped[path]["원인"]:
-            grouped[path]["원인"].append(item["error"])
+            grouped[path]["원인"].append(display_issue_reason("import_failed_files", item["error"]))
     for item in summary.get("skipped_files", []):
         path = item.get("path", "")
         add_detail(Path(path).name, "skipped_unrecognized_files", path)
         if item.get("reason") and item["reason"] not in grouped[path]["원인"]:
-            grouped[path]["원인"].append(item["reason"])
+            grouped[path]["원인"].append(display_issue_reason(item["reason"], item["reason"]))
     for record in preview.get("records", []):
         label_paths = record.get("label_paths", [])
         for issue in record.get("issues", []):
@@ -487,14 +636,21 @@ def preflight_detail_rows(preview):
             if label_paths:
                 for label_path in label_paths:
                     add_detail(record.get("image", ""), detail.get("code", ""), label_path)
+                    reason = display_issue_reason(detail.get("code"), detail.get("message", ""))
+                    if reason not in grouped[label_path]["원인"]:
+                        grouped[label_path]["원인"].append(reason)
             else:
                 add_detail(record.get("image", ""), detail.get("code", ""), "")
+                key = record.get("image", "")
+                reason = display_issue_reason(detail.get("code"), detail.get("message", ""))
+                if reason not in grouped[key]["원인"]:
+                    grouped[key]["원인"].append(reason)
     return [
         {
             "파일": row["파일"],
             "항목": "\n".join(row["항목"]),
-            "라벨 파일 경로": row["라벨 파일 경로"],
             "원인": "\n".join(row["원인"]),
+            "라벨 파일 경로": row["라벨 파일 경로"],
         }
         for row in grouped.values()
     ]
@@ -609,10 +765,36 @@ def complete_chat_rerun(result, workspace):
 
 def render_result_report(workspace):
     st.markdown('<div class="panel-title">결과 리포트</div>', unsafe_allow_html=True)
+    manual_results = st.session_state.get("manual_results", {})
+    manual_key = st.session_state.get("last_manual_result_key")
+    if manual_key and manual_key in manual_results:
+        manual_label = {
+            "convert": "라벨 형식 변환",
+            "generate": "자동 라벨 생성",
+            "evaluate": "실험 결과 평가",
+        }.get(manual_key, manual_key)
+        render_recent_result_summary(manual_label, manual_results[manual_key])
+        render_manual_result(manual_results[manual_key], manual_key)
+        if manual_key == "generate":
+            def complete_generate_rerun(result):
+                if "manual_results" not in st.session_state:
+                    st.session_state.manual_results = {}
+                st.session_state.manual_results["generate"] = result
+                st.session_state.last_manual_result_key = "generate"
+                st.session_state.open_result_report = True
+
+            render_selective_rerun_controls(
+                st.session_state.get("last_generate_first_pass_plan"),
+                "generate",
+                complete_generate_rerun,
+            )
+        return
+
     result = st.session_state.get("last_chat_result")
     if not result:
-        st.info("아직 대화형 작업 결과가 없습니다.")
+        st.info("아직 작업 결과가 없습니다.")
         return
+    render_recent_result_summary("대화형 작업", result)
     render_workflow_report(result, key_prefix="chat")
     render_selective_rerun_controls(
         st.session_state.get("last_chat_first_pass_plan"),
@@ -816,12 +998,46 @@ with result_tab:
 
 with convert_tab:
     st.markdown('<div class="panel-title">라벨 형식 변환</div>', unsafe_allow_html=True)
+    label_path_candidates = workspace_dir_candidates(
+        workspace,
+        {"labels", "labeled"},
+        WORKSPACE_DEFAULTS["labels"],
+    )
+    image_dir_candidates = workspace_dir_candidates(
+        workspace,
+        {"raw", "images"},
+        WORKSPACE_DEFAULTS["images"],
+    )
+    direct_option = "직접 입력..."
+    label_path_options = [*label_path_candidates, direct_option]
+    image_dir_options = [*image_dir_candidates, direct_option]
+    with st.container(border=True):
+        st.markdown('<span class="path-panel-marker"></span>', unsafe_allow_html=True)
+        st.markdown('<div class="form-section">데이터 경로</div>', unsafe_allow_html=True)
+        path_left, path_right = st.columns(2)
+        with path_left:
+            selected_label_path = st.selectbox("라벨 폴더 선택", label_path_options)
+            input_path = (
+                st.text_input("라벨 폴더 직접 입력", value=WORKSPACE_DEFAULTS["labels"])
+                if selected_label_path == direct_option
+                else selected_label_path
+            )
+            st.caption(
+                "라벨 파일이 들어 있는 폴더만 지정하세요. "
+                "결과 폴더(converted/reports/visualized)가 섞이면 불필요한 파일도 검사될 수 있습니다."
+            )
+        with path_right:
+            selected_image_dir = st.selectbox("이미지 폴더 선택", image_dir_options)
+            image_dir = (
+                st.text_input("이미지 폴더 직접 입력", value=WORKSPACE_DEFAULTS["images"])
+                if selected_image_dir == direct_option
+                else selected_image_dir
+            )
+            st.caption("라벨 파일명과 같은 원본 이미지가 들어 있는 폴더를 지정하세요.")
     with st.form("convert_form"):
         left, right = st.columns(2)
         with left:
-            st.markdown('<div class="form-section">데이터 경로</div>', unsafe_allow_html=True)
-            input_path = st.text_input("입력 라벨 경로", value=WORKSPACE_DEFAULTS["labels"])
-            image_dir = st.text_input("이미지 디렉터리", value=WORKSPACE_DEFAULTS["images"])
+            st.markdown('<div class="form-section">출력 설정</div>', unsafe_allow_html=True)
             output_dir = st.text_input("출력 디렉터리", value=WORKSPACE_DEFAULTS["converted"])
             convert_classes = st.text_input(
                 "클래스 매핑 파일",
@@ -830,7 +1046,7 @@ with convert_tab:
             )
         with right:
             st.markdown('<div class="form-section">변환 규칙</div>', unsafe_allow_html=True)
-            source_format = st.selectbox("입력 포맷", SOURCE_OPTIONS)
+            source_format = st.selectbox("입력 파일 형식", SOURCE_OPTIONS)
             target_formats = st.multiselect("출력 포맷", FORMAT_OPTIONS, default=["yolo"])
             duplicate_iou = st.slider("중복 IoU", 0.01, 1.0, 0.85, 0.01)
             convert_insight_ratio = st.slider(
@@ -841,7 +1057,7 @@ with convert_tab:
                 0.1,
                 key="convert_insight_ratio",
             )
-            strict = st.checkbox("검증 이슈가 있는 레코드 제외")
+            strict = st.checkbox("입력 데이터 문제가 있는 데이터 제외")
         preflight_submit = st.form_submit_button("변환 사전 점검", icon=":material/rule:")
         convert_submit = st.form_submit_button("변환 실행", type="primary", icon=":material/sync_alt:")
     if preflight_submit:
@@ -880,9 +1096,6 @@ with convert_tab:
                     "strict": strict,
                 }],
             }, result_key="convert")
-    elif st.session_state.get("manual_results", {}).get("convert"):
-        render_manual_result(st.session_state.manual_results["convert"], "convert")
-
 with generate_tab:
     st.markdown('<div class="panel-title">자동 라벨 생성</div>', unsafe_allow_html=True)
     with st.form("generate_form"):
@@ -951,20 +1164,6 @@ with generate_tab:
                 result_key="generate",
                 first_pass_plan_key="last_generate_first_pass_plan",
             )
-    elif st.session_state.get("manual_results", {}).get("generate"):
-        render_manual_result(st.session_state.manual_results["generate"], "generate")
-    if st.session_state.get("manual_results", {}).get("generate"):
-        def complete_generate_rerun(result):
-            if "manual_results" not in st.session_state:
-                st.session_state.manual_results = {}
-            st.session_state.manual_results["generate"] = result
-
-        render_selective_rerun_controls(
-            st.session_state.get("last_generate_first_pass_plan"),
-            "generate",
-            complete_generate_rerun,
-        )
-
 with evaluate_tab:
     st.markdown('<div class="panel-title">실험 결과 평가</div>', unsafe_allow_html=True)
     with st.form("evaluate_form"):
@@ -995,9 +1194,6 @@ with evaluate_tab:
                     },
                 }],
             }, result_key="evaluate")
-    elif st.session_state.get("manual_results", {}).get("evaluate"):
-        render_manual_result(st.session_state.manual_results["evaluate"], "evaluate")
-
 with settings_tab:
     st.markdown('<div class="panel-title">사용자 설정</div>', unsafe_allow_html=True)
     settings = read_user_settings()

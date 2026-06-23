@@ -1,4 +1,7 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from src.core.models import BoundingBox, DetectionResult
 from src.plugins.base import PluginOutput, VisionTaskPlugin
@@ -89,6 +92,29 @@ class SpecialistConsistencyTests(unittest.TestCase):
         self.assertIn("\"low_confidence_count\": 1", prompt)
         self.assertIn("Do not create labels or boxes", prompt)
         self.assertIn("Do not change, add, remove, translate, or synonymize classes", prompt)
+
+    def test_prepare_generation_discovers_nested_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_root = root / "datasets" / "ocr"
+            (image_root / "csv" / "data").mkdir(parents=True)
+            (image_root / "csv" / "data" / "a.jpg").write_bytes(b"image")
+            (image_root / "extra" / "b.png").parent.mkdir(parents=True)
+            (image_root / "extra" / "b.png").write_bytes(b"image")
+            operation = OperationPlan(
+                action="generate",
+                img_dir=str(image_root),
+                out_dir=str(root / "out"),
+                vis_dir=str(root / "vis"),
+            )
+
+            with patch("src.workflow.runtime.load_generation_plugins", return_value=[]):
+                prepared = WorkflowRuntime().prepare_generation(operation)
+
+            self.assertEqual(
+                prepared["images"],
+                [str(Path("csv") / "data" / "a.jpg"), str(Path("extra") / "b.png")],
+            )
 
 
 if __name__ == "__main__":

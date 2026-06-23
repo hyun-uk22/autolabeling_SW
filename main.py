@@ -10,7 +10,7 @@ from src.core.llm_client import VisionLLMClient
 from src.core.models import DetectionResult
 from src.agents.verification_agent import HierarchicalVerificationAgent
 from src.agents.insight_agent import DatasetInsightAgent
-from src.utils.format_converter import LabelExportWriter, normalize_label_formats
+from src.utils.format_converter import LabelExportWriter, normalize_label_formats, resolve_export_formats
 from src.utils.visualize import visualize_boxes
 from src.utils.evaluation import evaluate_yolo_dirs
 from src.plugins.orchestrator import TaskPluginOrchestrator
@@ -458,7 +458,8 @@ def main():
             insighter.add_result(result)
             
             # Save Labels & Visualizations
-            label_paths = label_writer.save(result, img_path)
+            resolved_formats = resolve_export_formats(result, label_writer.formats, args.task_type)
+            label_paths = label_writer.save(result, img_path, formats=resolved_formats)
             vis_path = visualize_boxes(img_path, result, args.vis_dir)
             
             elapsed = time.time() - start_time

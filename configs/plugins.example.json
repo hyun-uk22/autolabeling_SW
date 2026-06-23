@@ -7,7 +7,7 @@
       "weight": 1.0,
       "config": {
         "model": "openai/clip-vit-base-patch32",
-        "device": "cpu",
+        "device": "auto",
         "labels": ["person", "animal", "vehicle", "document", "indoor", "outdoor"],
         "top_k": 3
       }
@@ -15,24 +15,39 @@
     {
       "name": "grounding_dino",
       "enabled": true,
-      "tasks": ["object_detection", "segmentation", "tracking"],
+      "tasks": ["object_detection"],
       "weight": 1.2,
       "config": {
-        "model": "IDEA-Research/grounding-dino-tiny",
-        "device": "cpu",
+        "model": "IDEA-Research/grounding-dino-base",
+        "device": "auto",
         "box_threshold": 0.35,
         "text_threshold": 0.25
       }
     },
     {
-      "name": "sam",
+      "name": "grounded_sam2",
       "enabled": true,
-      "tasks": ["object_detection", "segmentation"],
+      "tasks": ["segmentation"],
+      "weight": 1.5,
+      "config": {
+        "grounding_model": "IDEA-Research/grounding-dino-base",
+        "sam_backend": "ultralytics_sam2",
+        "sam_model": "sam2_b.pt",
+        "device": "auto",
+        "box_threshold": 0.35,
+        "text_threshold": 0.25,
+        "mask_threshold": 0.5
+      }
+    },
+    {
+      "name": "sam",
+      "enabled": false,
+      "tasks": ["segmentation"],
       "weight": 1.0,
       "config": {
         "backend": "ultralytics_sam2",
         "model": "sam2_b.pt",
-        "device": "cpu"
+        "device": "auto"
       }
     },
     {
@@ -42,7 +57,7 @@
       "weight": 1.0,
       "config": {
         "model": "yolo11n-pose.pt",
-        "device": "cpu",
+        "device": "auto",
         "keypoint_threshold": 0.25
       }
     },
@@ -52,8 +67,10 @@
       "tasks": ["ocr"],
       "weight": 1.0,
       "config": {
+        "backend": "paddleocr",
+        "lang": "korean",
         "languages": ["ko", "en"],
-        "gpu": false
+        "gpu": "auto"
       }
     },
     {
@@ -64,7 +81,7 @@
       "config": {
         "model": "yolo11n.pt",
         "tracker": "bytetrack.yaml",
-        "device": "cpu"
+        "device": "auto"
       }
     }
   ]

@@ -16,11 +16,63 @@ from ..core.models import (
 from .base import PluginOutput, VisionTaskPlugin, configured_labels
 
 
+def _resolve_device(device: str | None = None) -> str:
+    requested = str(device or "auto").strip().lower()
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+
+    cuda_available = bool(getattr(torch, "cuda", None) and torch.cuda.is_available())
+    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+    mps_available = bool(mps_backend and mps_backend.is_available())
+
+    if requested in {"", "auto", "gpu"}:
+        if cuda_available:
+            return "cuda:0"
+        if mps_available:
+            return "mps"
+        return "cpu"
+    if requested.startswith("cuda") and not cuda_available:
+        return "cpu"
+    if requested == "mps" and not mps_available:
+        return "cpu"
+    return requested
+
+
+def _device(config: dict) -> str:
+    if "_resolved_device" not in config:
+        config["_resolved_device"] = _resolve_device(config.get("device", "auto"))
+    return config["_resolved_device"]
+
+
 def _device_index(device: str) -> int:
     if device.startswith("cuda"):
         parts = device.split(":", 1)
         return int(parts[1]) if len(parts) == 2 else 0
     return -1
+
+
+def _pipeline_device(device: str):
+    return _device_index(device) if device != "mps" else "mps"
+
+
+def _easyocr_gpu(config: dict) -> bool:
+    configured = config.get("gpu", "auto")
+    if isinstance(configured, bool):
+        return configured
+    return _device(config).startswith("cuda")
+
+
+def _paddleocr_lang(config: dict) -> str:
+    if config.get("lang"):
+        return str(config["lang"])
+    languages = [str(value).lower() for value in config.get("languages", [])]
+    if any(value in {"ko", "kr", "korean"} for value in languages):
+        return "korean"
+    if any(value in {"en", "english"} for value in languages):
+        return "en"
+    return "korean"
 
 
 def _mean(values) -> float:
@@ -95,7 +147,7 @@ class TransformersClassificationPlugin(VisionTaskPlugin):
             self._pipeline = pipeline(
                 "zero-shot-image-classification",
                 model=self.config.get("model", "openai/clip-vit-base-patch32"),
-                device=_device_index(self.config.get("device", "cpu")),
+                device=_pipeline_device(_device(self.config)),
             )
 
     def refine(self, image_path, prompt, seed_result):
@@ -134,10 +186,10 @@ class GroundingDINOPlugin(VisionTaskPlugin):
             from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
         except ImportError as exc:
             raise RuntimeError("Install requirements-specialists.txt to use Grounding DINO") from exc
-        model_id = self.config.get("model", "IDEA-Research/grounding-dino-tiny")
+        model_id = self.config.get("model", "IDEA-Research/grounding-dino-base")
         self._processor = AutoProcessor.from_pretrained(model_id)
         self._model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
-        self._model.to(self.config.get("device", "cpu"))
+        self._model.to(_device(self.config))
         self._model.eval()
         self._torch = torch
 
@@ -149,7 +201,7 @@ class GroundingDINOPlugin(VisionTaskPlugin):
         image = Image.open(image_path).convert("RGB")
         text_prompt = ". ".join(labels) + "."
         inputs = self._processor(images=image, text=text_prompt, return_tensors="pt")
-        inputs = {key: value.to(self.config.get("device", "cpu")) for key, value in inputs.items()}
+        inputs = {key: value.to(_device(self.config)) for key, value in inputs.items()}
         with self._torch.no_grad():
             outputs = self._model(**inputs)
         box_threshold = float(self.config.get("box_threshold", 0.35))
@@ -190,7 +242,7 @@ class GroundingDINOPlugin(VisionTaskPlugin):
         return PluginOutput(
             result=result,
             score=_mean(box.confidence for box in result.boxes),
-            metadata={"model": self.config.get("model", "IDEA-Research/grounding-dino-tiny"), "labels": labels},
+            metadata={"model": self.config.get("model", "IDEA-Research/grounding-dino-base"), "labels": labels, "device": _device(self.config)},
         )
 
 
@@ -226,7 +278,7 @@ class SAMPlugin(VisionTaskPlugin):
                     "Request access to https://huggingface.co/facebook/sam3, run `hf auth login`, "
                     "or set plugins.json sam.config.model to a local downloaded SAM3 directory."
                 ) from exc
-            self._model.to(self.config.get("device", "cpu"))
+            self._model.to(_device(self.config))
             self._model.eval()
             try:
                 import torch
@@ -247,10 +299,10 @@ class SAMPlugin(VisionTaskPlugin):
         inputs = self._processor(images=image, text=label, return_tensors="pt")
         target_sizes = inputs.get("original_sizes")
         if hasattr(inputs, "to"):
-            inputs = inputs.to(self.config.get("device", "cpu"))
+            inputs = inputs.to(_device(self.config))
         else:
             inputs = {
-                key: value.to(self.config.get("device", "cpu")) if hasattr(value, "to") else value
+                key: value.to(_device(self.config)) if hasattr(value, "to") else value
                 for key, value in inputs.items()
             }
         if target_sizes is None:
@@ -313,6 +365,7 @@ class SAMPlugin(VisionTaskPlugin):
                 "labels": labels,
                 "masks": len(result.segments),
                 "loader": "transformers",
+                "device": _device(self.config),
             },
         )
 
@@ -326,7 +379,7 @@ class SAMPlugin(VisionTaskPlugin):
         predictions = self._model.predict(
             image_path,
             bboxes=pixel_boxes,
-            device=self.config.get("device"),
+            device=_device(self.config),
             verbose=False,
         )
         result = DetectionResult(task_type="segmentation")
@@ -349,6 +402,7 @@ class SAMPlugin(VisionTaskPlugin):
                 "model": self.config.get("model", "sam2_b.pt"),
                 "masks": len(result.segments),
                 "backend": "ultralytics_sam2",
+                "device": _device(self.config),
             },
         )
 
@@ -356,6 +410,68 @@ class SAMPlugin(VisionTaskPlugin):
         if self.backend == "official_sam3":
             return self._refine_sam3(image_path, prompt, seed_result)
         return self._refine_sam2(image_path, prompt, seed_result)
+
+
+class GroundedSAM2Plugin(VisionTaskPlugin):
+    plugin_name = "grounded_sam2"
+    supported_tasks = {"segmentation"}
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self._grounding = None
+        self._sam = None
+
+    def _grounding_config(self) -> dict:
+        return {
+            "model": self.config.get("grounding_model", self.config.get("model", "IDEA-Research/grounding-dino-base")),
+            "device": self.config.get("device", "auto"),
+            "labels": self.config.get("labels", []),
+            "box_threshold": self.config.get("box_threshold", 0.45),
+            "text_threshold": self.config.get("text_threshold", 0.30),
+            "merge_iou": self.config.get("merge_iou", 0.35),
+            "nms_iou": self.config.get("nms_iou", 0.60),
+            "min_confidence": self.config.get("min_confidence", 0.20),
+        }
+
+    def _sam_config(self) -> dict:
+        return {
+            "backend": self.config.get("sam_backend", self.config.get("backend", "ultralytics_sam2")),
+            "model": self.config.get("sam_model", "sam2_b.pt"),
+            "device": self.config.get("device", "auto"),
+            "labels": self.config.get("labels", []),
+            "threshold": self.config.get("threshold", 0.5),
+            "mask_threshold": self.config.get("mask_threshold", 0.5),
+        }
+
+    def _load(self):
+        if self._grounding is None:
+            self._grounding = GroundingDINOPlugin(self._grounding_config())
+            self._grounding._load()
+        if self._sam is None:
+            self._sam = SAMPlugin(self._sam_config())
+            self._sam._load()
+
+    def refine(self, image_path, prompt, seed_result):
+        self._load()
+        self._grounding.config = self._grounding_config()
+        self._sam.config = self._sam_config()
+        grounding_output = self._grounding.refine(image_path, prompt, seed_result)
+        sam_output = self._sam.refine(image_path, prompt, grounding_output.result)
+        result = DetectionResult(task_type="segmentation")
+        result.boxes.extend(grounding_output.result.boxes)
+        result.segments.extend(sam_output.result.segments)
+        result.boxes.extend(sam_output.result.boxes)
+        return PluginOutput(
+            result=result,
+            score=sam_output.score if sam_output.score is not None else grounding_output.score,
+            metadata={
+                "grounding": grounding_output.metadata,
+                "sam": sam_output.metadata,
+                "boxes": len(grounding_output.result.boxes),
+                "segments": len(sam_output.result.segments),
+                "pipeline": "grounding_dino+sam2",
+            },
+        )
 
 
 class UltralyticsPosePlugin(VisionTaskPlugin):
@@ -376,7 +492,7 @@ class UltralyticsPosePlugin(VisionTaskPlugin):
 
     def refine(self, image_path, prompt, seed_result):
         self._load()
-        predictions = self._model.predict(image_path, device=self.config.get("device"), verbose=False)
+        predictions = self._model.predict(image_path, device=_device(self.config), verbose=False)
         width, height = Image.open(image_path).size
         names: List[str] = self.config.get("keypoint_names") or []
         result = DetectionResult(task_type="pose_estimation")
@@ -406,43 +522,156 @@ class UltralyticsPosePlugin(VisionTaskPlugin):
                         confidence=float(box_conf[pose_index]) if pose_index < len(box_conf) else 1.0,
                     )
                 )
-        return PluginOutput(result=result, score=_mean(pose.confidence for pose in result.poses), metadata={"model": self.config.get("model", "yolo11n-pose.pt")})
+        return PluginOutput(result=result, score=_mean(pose.confidence for pose in result.poses), metadata={"model": self.config.get("model", "yolo11n-pose.pt"), "device": _device(self.config)})
 
 
-class EasyOCRPlugin(VisionTaskPlugin):
+class OCRPlugin(VisionTaskPlugin):
     plugin_name = "ocr"
     supported_tasks = {"ocr"}
 
     def __init__(self, config=None):
         super().__init__(config)
-        self._reader = None
+        self._engine = None
+
+    @property
+    def backend(self) -> str:
+        return str(self.config.get("backend", "paddleocr")).lower()
 
     def _load(self):
-        if self._reader is None:
+        if self._engine is not None:
+            return
+        if self.backend == "easyocr":
             try:
                 import easyocr
             except ImportError as exc:
-                raise RuntimeError("Install requirements-specialists.txt to use the OCR plugin") from exc
-            self._reader = easyocr.Reader(self.config.get("languages", ["en"]), gpu=self.config.get("gpu", False))
+                raise RuntimeError("Install requirements-specialists.txt to use the EasyOCR backend") from exc
+            self._engine = easyocr.Reader(self.config.get("languages", ["en"]), gpu=_easyocr_gpu(self.config))
+            return
+
+        try:
+            from paddleocr import PaddleOCR
+        except ImportError as exc:
+            raise RuntimeError("Install requirements-specialists.txt to use the PaddleOCR backend") from exc
+
+        use_gpu = _easyocr_gpu(self.config)
+        lang = _paddleocr_lang(self.config)
+        attempts = [
+            {"use_angle_cls": True, "lang": lang, "use_gpu": use_gpu, "show_log": False},
+            {"use_angle_cls": True, "lang": lang, "use_gpu": use_gpu},
+            {"use_textline_orientation": True, "lang": lang},
+            {"lang": lang},
+        ]
+        last_error = None
+        for kwargs in attempts:
+            try:
+                self._engine = PaddleOCR(**kwargs)
+                return
+            except TypeError as exc:
+                last_error = exc
+        raise RuntimeError(f"Failed to initialize PaddleOCR backend: {last_error}") from last_error
+
+    def _read_easyocr(self, image_path, width: int, height: int) -> DetectionResult:
+        result = DetectionResult(task_type="ocr")
+        for polygon, text, confidence in self._engine.readtext(image_path):
+            self._append_text_region(result, polygon, text, confidence, width, height)
+        return result
+
+    def _read_paddleocr(self, image_path, width: int, height: int) -> DetectionResult:
+        result = DetectionResult(task_type="ocr")
+        if hasattr(self._engine, "ocr"):
+            try:
+                raw = self._engine.ocr(image_path, cls=True)
+            except TypeError:
+                raw = self._engine.ocr(image_path)
+        elif hasattr(self._engine, "predict"):
+            raw = self._engine.predict(image_path)
+        else:
+            raw = []
+        for item in self._iter_paddleocr_items(raw):
+            polygon, text, confidence = item
+            self._append_text_region(result, polygon, text, confidence, width, height)
+        return result
+
+    def _iter_paddleocr_items(self, raw):
+        if raw is None:
+            return
+        if isinstance(raw, dict):
+            boxes = raw.get("dt_polys") or raw.get("rec_boxes") or raw.get("boxes") or []
+            texts = raw.get("rec_texts") or raw.get("texts") or []
+            scores = raw.get("rec_scores") or raw.get("scores") or []
+            for index, polygon in enumerate(boxes):
+                yield polygon, texts[index] if index < len(texts) else "", scores[index] if index < len(scores) else 0.0
+            return
+        if not isinstance(raw, (list, tuple)):
+            return
+        if len(raw) == 2 and isinstance(raw[0], (list, tuple)) and all(isinstance(value, str) for value in raw[0]):
+            return
+        for entry in raw:
+            if isinstance(entry, dict):
+                yield from self._iter_paddleocr_items(entry)
+            elif isinstance(entry, (list, tuple)) and entry:
+                first = entry[0]
+                if self._looks_like_polygon(first):
+                    text = ""
+                    confidence = 0.0
+                    if len(entry) > 1:
+                        text_info = entry[1]
+                        if isinstance(text_info, (list, tuple)) and text_info:
+                            text = text_info[0]
+                            confidence = text_info[1] if len(text_info) > 1 else 0.0
+                        else:
+                            text = text_info
+                    yield first, text, confidence
+                else:
+                    yield from self._iter_paddleocr_items(entry)
+
+    @staticmethod
+    def _looks_like_polygon(value) -> bool:
+        if not isinstance(value, (list, tuple)) or not value:
+            return False
+        point = value[0]
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return False
+        return isinstance(point[0], (int, float)) and isinstance(point[1], (int, float))
+
+    @staticmethod
+    def _append_text_region(result: DetectionResult, polygon, text, confidence, width: int, height: int) -> None:
+        points = [point for point in polygon if isinstance(point, (list, tuple)) and len(point) >= 2]
+        if not points:
+            return
+        xs = [float(point[0]) for point in points]
+        ys = [float(point[1]) for point in points]
+        result.texts.append(
+            TextRegion(
+                text=str(text),
+                xmin=max(0.0, min(1.0, min(xs) / width)),
+                ymin=max(0.0, min(1.0, min(ys) / height)),
+                xmax=max(0.0, min(1.0, max(xs) / width)),
+                ymax=max(0.0, min(1.0, max(ys) / height)),
+                confidence=float(confidence or 0.0),
+            )
+        )
 
     def refine(self, image_path, prompt, seed_result):
         self._load()
         width, height = Image.open(image_path).size
-        result = DetectionResult(task_type="ocr")
-        for polygon, text, confidence in self._reader.readtext(image_path):
-            xs = [point[0] for point in polygon]
-            ys = [point[1] for point in polygon]
-            result.texts.append(
-                TextRegion(
-                    text=text,
-                    xmin=min(xs) / width,
-                    ymin=min(ys) / height,
-                    xmax=max(xs) / width,
-                    ymax=max(ys) / height,
-                    confidence=float(confidence),
-                )
-            )
-        return PluginOutput(result=result, score=_mean(item.confidence for item in result.texts), metadata={"languages": self.config.get("languages", ["en"])})
+        if self.backend == "easyocr":
+            result = self._read_easyocr(image_path, width, height)
+        else:
+            result = self._read_paddleocr(image_path, width, height)
+        return PluginOutput(
+            result=result,
+            score=_mean(item.confidence for item in result.texts),
+            metadata={
+                "backend": self.backend,
+                "languages": self.config.get("languages", ["ko", "en"]),
+                "lang": _paddleocr_lang(self.config) if self.backend == "paddleocr" else None,
+                "gpu": _easyocr_gpu(self.config),
+            },
+        )
+
+
+EasyOCRPlugin = OCRPlugin
 
 
 class UltralyticsTrackingPlugin(VisionTaskPlugin):
@@ -468,7 +697,7 @@ class UltralyticsTrackingPlugin(VisionTaskPlugin):
             image_path,
             persist=True,
             tracker=self.config.get("tracker", "bytetrack.yaml"),
-            device=self.config.get("device"),
+            device=_device(self.config),
             verbose=False,
         )
         width, height = Image.open(image_path).size
@@ -495,4 +724,4 @@ class UltralyticsTrackingPlugin(VisionTaskPlugin):
                     )
                 )
         self._frame_id += 1
-        return PluginOutput(result=result, score=_mean(item.confidence for item in result.tracks), metadata={"model": self.config.get("model", "yolo11n.pt"), "frame_id": self._frame_id - 1})
+        return PluginOutput(result=result, score=_mean(item.confidence for item in result.tracks), metadata={"model": self.config.get("model", "yolo11n.pt"), "frame_id": self._frame_id - 1, "device": _device(self.config)})

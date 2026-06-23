@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.core.models import BoundingBox, DetectionResult
+from src.core.models import BoundingBox, DetectionResult, TextRegion
 from src.agents.insight_agent import DatasetInsightAgent
 from src.reporting import (
     ArtifactAuditor,
@@ -12,6 +12,7 @@ from src.reporting import (
     build_user_action_report,
 )
 from src.reporting.issue_reporter import categorize_issue
+from src.utils.format_converter import LabelExportWriter, resolve_export_formats
 from src.workflow.models import OperationPlan
 from src.workflow.runtime import WorkflowRuntime
 
@@ -176,6 +177,38 @@ class ReportingTests(unittest.TestCase):
 
         codes = [notice["code"] for notice in preflight["notices"]]
         self.assertIn("numeric_label_normalized", codes)
+
+    def test_export_format_resolution_falls_back_to_vision_json_for_non_box_labels(self):
+        result = DetectionResult(
+            task_type="ocr",
+            texts=[TextRegion(text="hello", xmin=0.1, ymin=0.1, xmax=0.4, ymax=0.2)],
+        )
+
+        formats = resolve_export_formats(result, ["yolo", "pascal_voc"], "ocr")
+
+        self.assertEqual(formats, ["vision_json"])
+
+    def test_writer_records_fallback_vision_json_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.jpg"
+            from PIL import Image
+
+            Image.new("RGB", (20, 20), color="white").save(image_path)
+            result = DetectionResult(
+                task_type="ocr",
+                texts=[TextRegion(text="hello", xmin=0.1, ymin=0.1, xmax=0.4, ymax=0.2)],
+            )
+            writer = LabelExportWriter(str(root / "labels"), formats=["yolo"])
+
+            resolved = resolve_export_formats(result, writer.formats, result.task_type)
+            paths = writer.save(result, str(image_path), formats=resolved)
+            artifacts = writer.finalize()
+
+            self.assertNotIn("yolo", paths)
+            self.assertIn("vision_json", paths)
+            self.assertIn("vision_json", artifacts)
+            self.assertTrue(Path(artifacts["vision_json"]).exists())
 
 
 if __name__ == "__main__":
