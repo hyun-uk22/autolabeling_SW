@@ -674,6 +674,137 @@ class OCRPlugin(VisionTaskPlugin):
 EasyOCRPlugin = OCRPlugin
 
 
+class ViTPosePlugin(VisionTaskPlugin):
+    plugin_name = "vitpose"
+    supported_tasks = {"pose_estimation"}
+
+    COCO_KEYPOINTS = [
+        "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+        "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+        "left_wrist", "right_wrist", "left_hip", "right_hip",
+        "left_knee", "right_knee", "left_ankle", "right_ankle"
+    ]
+
+    MPII_KEYPOINTS = [
+        "right_ankle", "right_knee", "right_hip", "left_hip",
+        "left_knee", "left_ankle", "pelvis", "thorax",
+        "upper_neck", "head_top", "right_wrist", "right_elbow",
+        "right_shoulder", "left_shoulder", "left_elbow", "left_wrist"
+    ]
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self._model = None
+        self._detector = None
+
+    def _get_keypoint_names(self, prompt: str) -> list:
+        prompt_lower = prompt.lower() if prompt else ""
+        if "mpii" in prompt_lower:
+            return self.MPII_KEYPOINTS
+        return self.COCO_KEYPOINTS
+
+    def _load(self):
+        if self._model is not None:
+            return
+        try:
+            from mmpose.apis import inference_topdown, init_model
+            from mmdet.apis import inference_detector, init_detector
+        except ImportError as exc:
+            raise RuntimeError("Install requirements-specialists.txt to use the ViTPose plugin") from exc
+
+        device = _device(self.config)
+
+        pose_config = self.config.get("pose_config", "configs/body_2d_keypoint/topdown_heatmap/coco/td-hm_ViTPose-large_8xb64-210e_coco-256x192.py")
+        pose_checkpoint = self.config.get("pose_checkpoint", "vitpose-l.pth")
+
+        det_config = self.config.get("det_config", "demo/mmdetection_cfg/rtmdet_m_640-8xb32_coco-person.py")
+        det_checkpoint = self.config.get("det_checkpoint", "https://download.openmmlab.com/mmpose/v1/projects/rtmpose/rtmdet_m_8xb32-100e_coco-obj365-person-235e8209.pth")
+
+        self._detector = init_detector(det_config, det_checkpoint, device=device)
+        self._model = init_model(pose_config, pose_checkpoint, device=device)
+
+    def refine(self, image_path, prompt, seed_result):
+        self._load()
+
+        try:
+            from mmpose.apis import inference_topdown
+            from mmdet.apis import inference_detector
+            import mmcv
+        except ImportError as exc:
+            raise RuntimeError("Install requirements-specialists.txt to use the ViTPose plugin") from exc
+
+        image = mmcv.imread(image_path)
+        height, width = image.shape[:2]
+
+        det_results = inference_detector(self._detector, image)
+        pred_instances = det_results.pred_instances
+
+        bboxes = []
+        if hasattr(pred_instances, 'bboxes') and hasattr(pred_instances, 'scores'):
+            det_threshold = float(self.config.get("det_threshold", 0.5))
+            for bbox, score in zip(pred_instances.bboxes, pred_instances.scores):
+                if score > det_threshold:
+                    bboxes.append({'bbox': bbox.cpu().numpy()})
+
+        if not bboxes:
+            return PluginOutput(
+                result=DetectionResult(task_type="pose_estimation"),
+                score=0.0,
+                metadata={"model": "vitpose", "device": _device(self.config), "message": "No person detected"}
+            )
+
+        pose_results = inference_topdown(self._model, image, bboxes)
+
+        keypoint_names = self._get_keypoint_names(prompt)
+        keypoint_threshold = float(self.config.get("keypoint_threshold", 0.5))
+
+        result = DetectionResult(task_type="pose_estimation")
+
+        for pose_result in pose_results:
+            if not hasattr(pose_result, 'pred_instances'):
+                continue
+
+            pred = pose_result.pred_instances
+            keypoints_data = pred.keypoints[0] if len(pred.keypoints) > 0 else None
+            keypoint_scores = pred.keypoint_scores[0] if len(pred.keypoint_scores) > 0 else None
+
+            if keypoints_data is None:
+                continue
+
+            keypoints = []
+            for idx, (x, y) in enumerate(keypoints_data):
+                confidence = float(keypoint_scores[idx]) if keypoint_scores is not None else 1.0
+                keypoints.append(
+                    Keypoint(
+                        name=keypoint_names[idx] if idx < len(keypoint_names) else f"keypoint_{idx}",
+                        x=float(x) / width,
+                        y=float(y) / height,
+                        visible=confidence > keypoint_threshold,
+                        confidence=confidence,
+                    )
+                )
+
+            pose_confidence = float(keypoint_scores.mean()) if keypoint_scores is not None else 1.0
+            result.poses.append(
+                PoseInstance(
+                    label=self.config.get("label", "person"),
+                    keypoints=keypoints,
+                    confidence=pose_confidence,
+                )
+            )
+
+        return PluginOutput(
+            result=result,
+            score=_mean(pose.confidence for pose in result.poses),
+            metadata={
+                "model": self.config.get("pose_checkpoint", "vitpose-l.pth"),
+                "device": _device(self.config),
+                "keypoint_format": "MPII" if "mpii" in prompt.lower() else "COCO",
+                "num_poses": len(result.poses),
+            }
+        )
+
+
 class UltralyticsTrackingPlugin(VisionTaskPlugin):
     plugin_name = "tracking"
     supported_tasks = {"tracking"}
