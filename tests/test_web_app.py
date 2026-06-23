@@ -26,10 +26,12 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(len(app.tabs), 6)
             self.assertEqual(len(app.chat_input), 1)
-            self.assertEqual(app.selectbox[0].label, "라벨 폴더 선택")
-            self.assertEqual(app.selectbox[0].value, "data/labeled")
-            self.assertEqual(app.selectbox[1].label, "이미지 폴더 선택")
-            self.assertEqual(app.selectbox[1].value, "data/raw")
+            label_path = next(item for item in app.selectbox if item.label == "라벨 폴더 경로")
+            image_path = next(item for item in app.selectbox if item.label == "이미지 폴더 경로")
+            self.assertEqual(label_path.value, "data/labeled")
+            self.assertEqual(image_path.value, "data/raw")
+            self.assertIn("data/labeled", label_path.options)
+            self.assertIn("data/raw", image_path.options)
 
     def test_app_renders_all_workflow_tabs_without_exceptions(self):
         from streamlit.testing.v1 import AppTest

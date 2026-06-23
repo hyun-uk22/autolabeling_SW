@@ -265,6 +265,58 @@ def workspace_dir_candidates(workspace, names, fallback):
     return [fallback]
 
 
+def editable_path_selectbox(label, candidates, state_key, help_text):
+    current = st.session_state.get(state_key) or candidates[0]
+    options = list(dict.fromkeys([current] + candidates))
+    selected = st.selectbox(
+        label,
+        options,
+        index=options.index(current),
+        key=state_key,
+        accept_new_options=True,
+        help=help_text,
+    )
+    return selected or current
+
+
+def class_mapping_candidates(workspace, input_path):
+    root = Path(workspace).expanduser().resolve()
+    try:
+        label_path = Path(resolve_workspace_path(workspace, input_path))
+    except (OSError, ValueError):
+        label_path = root / str(input_path)
+    base_dir = label_path if label_path.is_dir() else label_path.parent
+    search_dirs = []
+    current = base_dir.resolve()
+    while True:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            break
+        search_dirs.append(current)
+        if current == root or current.parent == current:
+            break
+        current = current.parent
+
+    filenames = ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml", "classes.txt")
+    candidates = []
+    for directory in search_dirs:
+        for filename in filenames:
+            path = directory / filename
+            if path.is_file():
+                candidates.append(_relative_workspace_path(root, path))
+        for path in sorted(directory.glob("*.y*ml")):
+            if path.name.lower() not in filenames:
+                candidates.append(_relative_workspace_path(root, path))
+    return list(dict.fromkeys(candidates))
+
+
+def optional_class_mapping_path(workspace, value):
+    if not value or str(value).strip() == "자동 탐색":
+        return None
+    return resolve_workspace_path(workspace, str(value).strip())
+
+
 def _plan_actions(plan):
     return [
         operation.get("action")
@@ -822,6 +874,8 @@ def render_conversation(workspace):
         st.session_state.last_chat_first_pass_plan = None
     if "pending_preflight_preview" not in st.session_state:
         st.session_state.pending_preflight_preview = None
+    if "pending_model_dataset_request" not in st.session_state:
+        st.session_state.pending_model_dataset_request = None
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
@@ -870,7 +924,10 @@ def render_conversation(workspace):
     )
     chat_request = st.chat_input(chat_placeholder)
     if chat_request:
-        st.session_state.chat_messages.append({"role": "user", "content": chat_request})
+        raw_chat_request = chat_request
+        if st.session_state.get("pending_model_dataset_request") and not st.session_state.pending_proposal:
+            chat_request = st.session_state.pending_model_dataset_request["request"] + "\n" + chat_request
+        st.session_state.chat_messages.append({"role": "user", "content": raw_chat_request})
         st.session_state.last_chat_result = None
         st.session_state.last_chat_first_pass_plan = None
         st.session_state.pending_preflight_preview = None
@@ -906,12 +963,18 @@ def render_conversation(workspace):
                         raise
                     status.update(label="실행 계획 생성 완료", state="complete", expanded=False)
                 if routed["kind"] == "plan":
+                    st.session_state.pending_model_dataset_request = None
                     proposal = first_pass_chat_proposal(routed["proposal"])
                     response = describe_plan(proposal, workspace)
                     st.session_state.pending_proposal = proposal
                     st.session_state.pending_preflight_preview = render_chat_preflight_for_proposal(proposal)
                 else:
                     response = routed["response"]
+                    if routed.get("diagnosis"):
+                        st.session_state.pending_model_dataset_request = {
+                            "request": chat_request,
+                            "diagnosis": routed["diagnosis"],
+                        }
         except (OSError, RuntimeError, ValueError) as exc:
             response = f"요청을 실행 계획으로 만들지 못했습니다: {exc}"
         st.session_state.chat_messages.append({"role": "assistant", "content": response})
@@ -1008,41 +1071,47 @@ with convert_tab:
         {"raw", "images"},
         WORKSPACE_DEFAULTS["images"],
     )
-    direct_option = "직접 입력..."
-    label_path_options = [*label_path_candidates, direct_option]
-    image_dir_options = [*image_dir_candidates, direct_option]
+    if "convert_input_path" not in st.session_state:
+        st.session_state.convert_input_path = label_path_candidates[0]
+    if "convert_image_dir" not in st.session_state:
+        st.session_state.convert_image_dir = image_dir_candidates[0]
     with st.container(border=True):
         st.markdown('<span class="path-panel-marker"></span>', unsafe_allow_html=True)
         st.markdown('<div class="form-section">데이터 경로</div>', unsafe_allow_html=True)
         path_left, path_right = st.columns(2)
         with path_left:
-            selected_label_path = st.selectbox("라벨 폴더 선택", label_path_options)
-            input_path = (
-                st.text_input("라벨 폴더 직접 입력", value=WORKSPACE_DEFAULTS["labels"])
-                if selected_label_path == direct_option
-                else selected_label_path
-            )
-            st.caption(
-                "라벨 파일이 들어 있는 폴더만 지정하세요. "
-                "결과 폴더(converted/reports/visualized)가 섞이면 불필요한 파일도 검사될 수 있습니다."
+            input_path = editable_path_selectbox(
+                "라벨 폴더 경로",
+                label_path_candidates,
+                "convert_input_path",
+                (
+                    "추천 경로를 선택하거나 같은 칸에 직접 입력하세요. "
+                    "라벨 파일이 들어 있는 폴더만 지정하세요. "
+                    "결과 폴더(converted/reports/visualized)가 섞이면 불필요한 파일도 검사될 수 있습니다."
+                ),
             )
         with path_right:
-            selected_image_dir = st.selectbox("이미지 폴더 선택", image_dir_options)
-            image_dir = (
-                st.text_input("이미지 폴더 직접 입력", value=WORKSPACE_DEFAULTS["images"])
-                if selected_image_dir == direct_option
-                else selected_image_dir
+            image_dir = editable_path_selectbox(
+                "이미지 폴더 경로",
+                image_dir_candidates,
+                "convert_image_dir",
+                "추천 경로를 선택하거나 같은 칸에 직접 입력하세요. 라벨 파일명과 같은 원본 이미지가 들어 있는 폴더를 지정하세요.",
             )
-            st.caption("라벨 파일명과 같은 원본 이미지가 들어 있는 폴더를 지정하세요.")
     with st.form("convert_form"):
         left, right = st.columns(2)
         with left:
             st.markdown('<div class="form-section">출력 설정</div>', unsafe_allow_html=True)
             output_dir = st.text_input("출력 디렉터리", value=WORKSPACE_DEFAULTS["converted"])
-            convert_classes = st.text_input(
-                "클래스 매핑 파일",
-                value="",
-                placeholder="YOLO data.yaml, dataset.yaml 또는 classes.txt",
+            mapping_options = ["자동 탐색"] + class_mapping_candidates(workspace, input_path)
+            convert_classes = st.selectbox(
+                "클래스 매핑 파일 (선택)",
+                mapping_options,
+                index=0,
+                accept_new_options=True,
+                help=(
+                    "비워두면 입력 라벨 폴더와 상위 폴더에서 data.yaml, dataset.yaml, classes.txt를 자동으로 찾습니다. "
+                    "다른 파일을 쓰려면 이 칸에 직접 경로를 입력하세요."
+                ),
             )
         with right:
             st.markdown('<div class="form-section">변환 규칙</div>', unsafe_allow_html=True)
@@ -1070,7 +1139,7 @@ with convert_tab:
                     resolve_workspace_path(workspace, image_dir),
                     source_format,
                     target_formats,
-                    classes_path=resolve_workspace_path(workspace, convert_classes) if convert_classes else None,
+                    classes_path=optional_class_mapping_path(workspace, convert_classes),
                     duplicate_iou=duplicate_iou,
                 )
             except Exception as exc:
@@ -1090,7 +1159,7 @@ with convert_tab:
                     "out_dir": resolve_workspace_path(workspace, output_dir),
                     "source_format": source_format,
                     "formats": target_formats,
-                    "classes_path": resolve_workspace_path(workspace, convert_classes) if convert_classes else None,
+                    "classes_path": optional_class_mapping_path(workspace, convert_classes),
                     "duplicate_iou": duplicate_iou,
                     "insight_imbalance_ratio": convert_insight_ratio,
                     "strict": strict,

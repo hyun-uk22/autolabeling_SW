@@ -178,6 +178,52 @@ class ReportingTests(unittest.TestCase):
         codes = [notice["code"] for notice in preflight["notices"]]
         self.assertIn("numeric_label_normalized", codes)
 
+    def test_conversion_preflight_summarizes_detailed_validation_issues(self):
+        preflight = build_conversion_preflight(
+            {
+                "sources_discovered": 1,
+                "records_after_merge": 1,
+                "processed_files": [],
+                "failed_files": [],
+                "skipped_files": [],
+                "merge": {"conflicts": []},
+                "class_list": ["car"],
+            },
+            ["coco"],
+            [{
+                "image": "bad.jpg",
+                "issues": [
+                    "box[0]:invalid_box_order",
+                    "box[1]:coordinate_out_of_range",
+                    "classification[0]:confidence_out_of_range",
+                    "segment[0]:too_few_points",
+                    "pose[0]:empty_keypoints",
+                    "pose[0].keypoint[0]:missing_name",
+                    "text[0]:missing_text",
+                    "track[0]:missing_track_id",
+                    "empty_result",
+                ],
+            }],
+        )
+
+        notices = {notice["code"]: notice for notice in preflight["notices"]}
+        for code in (
+            "invalid_box_order",
+            "coordinate_out_of_range",
+            "confidence_out_of_range",
+            "too_few_points",
+            "empty_keypoints",
+            "missing_name",
+            "missing_text",
+            "missing_track_id",
+            "empty_result",
+        ):
+            self.assertIn(code, notices)
+            self.assertEqual(notices[code]["severity"], "warning")
+            self.assertEqual(notices[code]["count"], 1)
+
+        self.assertEqual(preflight["status"], "needs_attention")
+
     def test_export_format_resolution_falls_back_to_vision_json_for_non_box_labels(self):
         result = DetectionResult(
             task_type="ocr",

@@ -3,9 +3,10 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 from pydantic import BaseModel, Field, field_validator
 
 
-ActionType = Literal["generate", "convert", "evaluate"]
+ActionType = Literal["generate", "convert", "evaluate", "prepare_model_dataset"]
 GenerationStrategy = Literal["specialist_first", "vlm_first"]
 SpecialistAdvisorMode = Literal["none", "low", "high", "both"]
+DatasetUsageMode = Literal["library", "official_repo", "custom"]
 
 
 class OperationPlan(BaseModel):
@@ -39,6 +40,16 @@ class OperationPlan(BaseModel):
     strict: bool = False
     require_approval: bool = True
     max_retries: int = 2
+    model_name: Optional[str] = None
+    usage_mode: DatasetUsageMode = "library"
+    framework: Optional[str] = None
+    dataset_purpose: Optional[str] = None
+    repo_url: Optional[str] = None
+    repo_path: Optional[str] = None
+    output_layout: Optional[str] = None
+    split_train: Optional[float] = None
+    split_val: Optional[float] = None
+    split_test: Optional[float] = None
 
     @field_validator("formats", mode="before")
     @classmethod
@@ -52,7 +63,8 @@ class OperationPlan(BaseModel):
     def validate_task_type(cls, value):
         allowed = {
             "classification", "object_detection", "segmentation",
-            "pose_estimation", "ocr", "tracking", "all",
+            "pose_estimation", "ocr", "tracking", "all", "semantic_segmentation",
+            "instance_segmentation", "panoptic_segmentation",
         }
         if value not in allowed:
             raise ValueError(f"Unsupported task_type: {value}")

@@ -835,6 +835,100 @@ class WorkflowRuntime:
         paths = save_experiment_report(report, operation.out_dir)
         return {"action": "evaluate", "rows": report, "artifacts": paths}
 
+    def prepare_model_dataset(self, operation: OperationPlan) -> Dict[str, Any]:
+        model_name = (operation.model_name or "custom").lower()
+        usage_mode = operation.usage_mode or "library"
+        framework = (operation.framework or "custom").lower()
+        purpose = operation.dataset_purpose or "training"
+        out_dir = operation.out_dir
+
+        if usage_mode == "official_repo":
+            directories = [
+                "datasets",
+                "configs",
+                "checkpoints",
+                "outputs",
+            ]
+            required_files = ["dataset_layout.json"]
+            layout = operation.output_layout or f"{model_name}_official_repo_{framework}"
+        elif model_name == "segformer" and framework == "mmsegmentation":
+            directories = [
+                "images/train",
+                "images/val",
+                "annotations/train",
+                "annotations/val",
+            ]
+            required_files = ["dataset_layout.json", "dataset_meta.json"]
+            layout = "segformer_mmsegmentation"
+        elif model_name == "segformer" and framework == "huggingface":
+            directories = [
+                "images/train",
+                "images/validation",
+                "masks/train",
+                "masks/validation",
+            ]
+            required_files = ["dataset_layout.json", "dataset_info.json"]
+            layout = "segformer_huggingface"
+        elif model_name in {"maskdino", "mask2former"}:
+            directories = [
+                "images/train",
+                "images/val",
+                "annotations",
+            ]
+            required_files = [
+                "dataset_layout.json",
+                "annotations/instances_train.json",
+                "annotations/instances_val.json",
+            ]
+            layout = f"{model_name}_{framework}"
+        else:
+            directories = ["images", "annotations"]
+            required_files = ["dataset_layout.json"]
+            layout = operation.output_layout or f"{model_name}_{framework}"
+
+        created_directories = []
+        for relative in directories:
+            path = os.path.join(out_dir, relative)
+            os.makedirs(path, exist_ok=True)
+            created_directories.append(path)
+
+        split = {
+            "train": operation.split_train,
+            "val": operation.split_val,
+            "test": operation.split_test,
+        }
+        metadata = {
+            "action": "prepare_model_dataset",
+            "model_name": model_name,
+            "usage_mode": usage_mode,
+            "framework": framework,
+            "repo_url": operation.repo_url,
+            "repo_path": operation.repo_path,
+            "purpose": purpose,
+            "task_type": operation.task_type,
+            "source_format": operation.source_format,
+            "layout": layout,
+            "split": split,
+            "directories": directories,
+            "required_files": required_files,
+            "notes": [
+                "이 단계는 모델이 요구하는 폴더 구조와 준비 리포트를 생성합니다.",
+                "official_repo 방식은 repo를 자동 clone하지 않고, 공식 repo 기준으로 사용할 데이터셋 준비 구조와 메타정보만 기록합니다.",
+                "실제 라벨 변환은 입력 라벨 형식과 모델 요구 라벨 형식이 호환될 때 별도 변환 단계로 수행해야 합니다.",
+            ],
+        }
+        os.makedirs(out_dir, exist_ok=True)
+        report_path = os.path.join(out_dir, "dataset_layout.json")
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        return {
+            **metadata,
+            "created_directories": created_directories,
+            "artifacts": {"layout_report": report_path},
+            "report_path": report_path,
+        }
+
     def save_history(self, output_dir: str, history: List[Dict[str, Any]]) -> str:
         os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, "workflow_history.json")

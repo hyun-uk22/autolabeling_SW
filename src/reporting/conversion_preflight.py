@@ -1,6 +1,8 @@
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional
 
+from .issue_reporter import ISSUE_CATALOG, issue_code as normalize_issue_code
+
 
 def _notice(severity: str, code: str, message: str, action: str, **extra) -> Dict[str, Any]:
     payload = {
@@ -14,7 +16,27 @@ def _notice(severity: str, code: str, message: str, action: str, **extra) -> Dic
 
 
 def _issue_code(issue: str) -> str:
-    return str(issue).split(":", 1)[0].split(".")[-1]
+    return normalize_issue_code(str(issue))
+
+
+def _validation_notice(code: str, count: int) -> Optional[Dict[str, Any]]:
+    if not count:
+        return None
+    severity, category, message, action = ISSUE_CATALOG.get(
+        code,
+        ("warning", "input_data", code, "입력 데이터 문제 상세를 확인하세요."),
+    )
+    # Preflight should summarize data quality problems without newly blocking
+    # conversion unless the issue is already handled as critical above.
+    notice_severity = "warning" if severity in {"critical", "high", "medium"} else "info"
+    return _notice(
+        notice_severity,
+        code,
+        f"{message} 항목이 {count}개 있습니다.",
+        action,
+        count=count,
+        category=category,
+    )
 
 
 def build_conversion_preflight(
@@ -127,6 +149,16 @@ def build_conversion_preflight(
                 "라벨 taxonomy를 확인하고 누락 클래스명을 채우세요.",
                 count=issue_counts["missing_label"],
             ))
+        summarized_codes = {
+            "missing_image",
+            "image_open_failed",
+            "invalid_image_size",
+            "missing_label",
+        }
+        for code in sorted(set(issue_counts) - summarized_codes):
+            notice = _validation_notice(code, issue_counts[code])
+            if notice:
+                notices.append(notice)
 
     if "yolo" in targets and not summary.get("class_list"):
         notices.append(_notice(

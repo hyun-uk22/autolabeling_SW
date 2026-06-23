@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..core.llm_client import extract_json
 from ..core.model_config import is_bedrock_model
 from . import conversation as conversation_module
+from .conversation import diagnose_model_dataset_request
 
 
 ROUTER_SYSTEM_PROMPT = """
@@ -219,6 +220,40 @@ def handle_conversation(
     chat_node: Optional[ChatNode] = None,
     minimum_confidence: float = 0.65,
 ) -> Dict[str, Any]:
+    model_diagnosis = diagnose_model_dataset_request(request, workspace)
+    if model_diagnosis and not model_diagnosis.get("can_create_plan"):
+        lines = [
+            "모델 데이터셋 준비를 위해 추가 정보가 필요합니다.",
+            "",
+            f"- 모델: `{model_diagnosis.get('model_name')}`",
+            f"- 사용 방식: `{model_diagnosis.get('usage_mode', 'library')}`",
+            f"- 예상 태스크: `{model_diagnosis.get('task_type')}`",
+        ]
+        if model_diagnosis.get("framework"):
+            lines.append(f"- 프레임워크: `{model_diagnosis['framework']}`")
+        if model_diagnosis.get("repo_url"):
+            lines.append(f"- 공식 repo URL: `{model_diagnosis['repo_url']}`")
+        if model_diagnosis.get("repo_path"):
+            lines.append(f"- 로컬 repo 경로: `{model_diagnosis['repo_path']}`")
+        if model_diagnosis.get("purpose"):
+            lines.append(f"- 목적: `{model_diagnosis['purpose']}`")
+        if model_diagnosis.get("source_label_format"):
+            lines.append(f"- 입력 라벨 형식: `{model_diagnosis['source_label_format']}`")
+        lines.append("")
+        if model_diagnosis.get("questions"):
+            lines.append("필수 확인 사항:")
+            lines.extend(f"- {question}" for question in model_diagnosis["questions"])
+        if model_diagnosis.get("incompatible_warnings"):
+            lines.append("")
+            lines.append("현재 정보로 실행할 수 없는 이유:")
+            lines.extend(f"- {warning}" for warning in model_diagnosis["incompatible_warnings"])
+        lines.append("")
+        lines.append("위 정보를 이어서 입력하면 실행 계획을 생성하겠습니다.")
+        return {
+            "kind": "clarification",
+            "response": "\n".join(lines),
+            "diagnosis": model_diagnosis,
+        }
     try:
         proposal = conversation_module.build_conversation_plan(request, workspace)
         return {"kind": "plan", "proposal": proposal, "route_source": "rules"}

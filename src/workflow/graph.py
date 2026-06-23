@@ -63,6 +63,12 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
                 errors.append(f"operation[{index}] convert requires input_path")
             if operation.action == "evaluate" and not operation.runs:
                 errors.append(f"operation[{index}] evaluate requires runs")
+            if operation.action == "prepare_model_dataset":
+                for field in ("model_name", "framework", "dataset_purpose", "out_dir", "source_format"):
+                    if not getattr(operation, field):
+                        errors.append(f"operation[{index}] prepare_model_dataset requires {field}")
+                if operation.usage_mode == "official_repo" and not (operation.repo_url or operation.repo_path):
+                    errors.append(f"operation[{index}] official_repo usage requires repo_url or repo_path")
             if "custom" in operation.formats and not operation.custom_label_template:
                 errors.append(f"operation[{index}] custom format requires custom_label_template")
         return {
@@ -419,6 +425,21 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
                 "history": _event(state, "evaluation_failed", error=str(exc)),
             }
 
+    def execute_prepare_model_dataset(state: WorkflowState) -> Dict[str, Any]:
+        try:
+            output = runtime.prepare_model_dataset(_operation(state))
+            return {
+                "operation_outputs": list(state.get("operation_outputs", [])) + [output],
+                "operation_status": "completed",
+                "history": _event(state, "model_dataset_prepared", output=output),
+            }
+        except Exception as exc:
+            return {
+                "operation_status": "failed",
+                "errors": list(state.get("errors", [])) + [str(exc)],
+                "history": _event(state, "model_dataset_prepare_failed", error=str(exc)),
+            }
+
     def advance_operation(state: WorkflowState) -> Dict[str, Any]:
         index = state.get("operation_index", 0) + 1
         return {
@@ -505,6 +526,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
     builder.add_node("repair_conversion", repair_conversion)
     builder.add_node("export_conversion", export_conversion)
     builder.add_node("execute_evaluate", execute_evaluate)
+    builder.add_node("execute_prepare_model_dataset", execute_prepare_model_dataset)
     builder.add_node("advance_operation", advance_operation)
     builder.add_node("finalize_workflow", finalize_workflow)
     builder.add_node("fail_workflow", fail_workflow)
@@ -516,6 +538,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
         "generate": "prepare_generate",
         "convert": "prepare_convert",
         "evaluate": "execute_evaluate",
+        "prepare_model_dataset": "execute_prepare_model_dataset",
     })
     builder.add_conditional_edges("prepare_generate", route_generate_ready, {"advance": "advance_operation", "select": "select_image"})
     builder.add_conditional_edges(
@@ -543,6 +566,7 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
     builder.add_edge("repair_conversion", "validate_conversion")
     builder.add_edge("export_conversion", "advance_operation")
     builder.add_edge("execute_evaluate", "advance_operation")
+    builder.add_edge("execute_prepare_model_dataset", "advance_operation")
     builder.add_conditional_edges("advance_operation", route_advance, {"begin": "begin_operation", "finalize": "finalize_workflow"})
     builder.add_edge("finalize_workflow", END)
     builder.add_edge("fail_workflow", END)

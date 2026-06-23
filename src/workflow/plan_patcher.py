@@ -36,7 +36,12 @@ Allowed response shape:
     "duplicate_iou": 0.85,
     "strict": true,
     "specialist_consistency_runs": 1,
-    "specialist_advisor_mode": "none|low|high|both"
+    "specialist_advisor_mode": "none|low|high|both",
+    "usage_mode": "library|official_repo|custom",
+    "framework": "huggingface|mmsegmentation|detectron2|pytorch|custom",
+    "dataset_purpose": "training|inference|evaluation",
+    "repo_url": "https://github.com/owner/repo",
+    "repo_path": "path"
   }
 }
 
@@ -59,9 +64,14 @@ ALLOWED_UPDATE_FIELDS = {
     "strict",
     "specialist_consistency_runs",
     "specialist_advisor_mode",
+    "usage_mode",
+    "framework",
+    "dataset_purpose",
+    "repo_url",
+    "repo_path",
 }
 ALLOWED_FORMATS = {"yolo", "pascal_voc", "coco", "vision_json"}
-ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json"}
+ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json", "mask_image"}
 ALLOWED_TASKS = {
     "classification",
     "object_detection",
@@ -70,9 +80,15 @@ ALLOWED_TASKS = {
     "ocr",
     "tracking",
     "all",
+    "semantic_segmentation",
+    "instance_segmentation",
+    "panoptic_segmentation",
 }
 ALLOWED_ADVISOR_MODES = {"none", "low", "high", "both"}
-PATH_FIELDS = {"input_path", "img_dir", "out_dir", "vis_dir", "classes_path"}
+ALLOWED_USAGE_MODES = {"library", "official_repo", "custom"}
+ALLOWED_FRAMEWORKS = {"huggingface", "mmsegmentation", "detectron2", "pytorch", "custom"}
+ALLOWED_PURPOSES = {"training", "inference", "evaluation"}
+PATH_FIELDS = {"input_path", "img_dir", "out_dir", "vis_dir", "classes_path", "repo_path"}
 
 
 class PlanPatch(BaseModel):
@@ -110,6 +126,16 @@ def _resolve_path(value: Any, workspace: Path) -> str:
     return str(resolved)
 
 
+def _resolve_any_path(value: Any, workspace: Path) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("경로 값이 비어 있습니다.")
+    raw = value.strip().strip('"').strip("'")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    return str(candidate.resolve())
+
+
 def _sanitize_updates(updates: Dict[str, Any], current_operation: Dict[str, Any], workspace: Path) -> Dict[str, Any]:
     if not isinstance(updates, dict):
         raise ValueError("patch updates는 객체여야 합니다.")
@@ -142,6 +168,26 @@ def _sanitize_updates(updates: Dict[str, Any], current_operation: Dict[str, Any]
             if mode not in ALLOWED_ADVISOR_MODES:
                 raise ValueError(f"지원하지 않는 advisor mode입니다: {mode}")
             sanitized[key] = mode
+        elif key == "usage_mode":
+            mode = str(value).strip()
+            if mode not in ALLOWED_USAGE_MODES:
+                raise ValueError(f"지원하지 않는 사용 방식입니다: {mode}")
+            sanitized[key] = mode
+        elif key == "framework":
+            framework = str(value).strip()
+            if framework not in ALLOWED_FRAMEWORKS:
+                raise ValueError(f"지원하지 않는 프레임워크입니다: {framework}")
+            sanitized[key] = framework
+        elif key == "dataset_purpose":
+            purpose = str(value).strip()
+            if purpose not in ALLOWED_PURPOSES:
+                raise ValueError(f"지원하지 않는 목적입니다: {purpose}")
+            sanitized[key] = purpose
+        elif key == "repo_url":
+            repo_url = str(value).strip()
+            if not repo_url.startswith(("https://", "http://")):
+                raise ValueError("repo_url은 http:// 또는 https:// URL이어야 합니다.")
+            sanitized[key] = repo_url
         elif key == "threshold":
             threshold = float(value)
             if not 0.0 <= threshold <= 1.0:
@@ -164,6 +210,8 @@ def _sanitize_updates(updates: Dict[str, Any], current_operation: Dict[str, Any]
                 sanitized[key] = value > 0
             else:
                 sanitized[key] = str(value).strip().lower() in {"true", "1", "yes", "y", "on", "strict", "엄격"}
+        elif key == "repo_path":
+            sanitized[key] = _resolve_any_path(value, workspace)
         elif key in PATH_FIELDS:
             sanitized[key] = _resolve_path(value, workspace)
 

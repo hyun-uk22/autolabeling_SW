@@ -7,6 +7,7 @@ from PIL import Image
 
 from src.utils.format_converter import LabelExportWriter
 from src.utils.label_importer import extract_class_names_from_text, import_labels, import_labels_with_report
+from src.utils.label_validator import validate_result
 
 
 class MixedLabelImportTests(unittest.TestCase):
@@ -79,6 +80,32 @@ class MixedLabelImportTests(unittest.TestCase):
 
         self.assertEqual(len(records), 2)
         self.assertEqual([result.boxes[0].label for _, result in records], ["car", "car"])
+
+    def test_yolo_edge_overflow_is_clamped_without_reversing_box(self):
+        self._write("classes.txt", "car\n")
+        self._write("image_a.txt", "0 0.891204 0.819133 0.217593 0.339672\n")
+
+        records = import_labels(self.label_dir, self.image_dir, source_format="yolo")
+        box = records[0][1].boxes[0]
+
+        self.assertAlmostEqual(box.xmin, 0.7824075)
+        self.assertEqual(box.xmax, 1.0)
+        self.assertFalse(validate_result(records[0][1]))
+
+    def test_coco_edge_overflow_is_clamped_without_reversing_box(self):
+        coco = {
+            "images": [{"id": 1, "file_name": "image_a.jpg", "width": 100, "height": 100}],
+            "categories": [{"id": 1, "name": "car"}],
+            "annotations": [{"id": 1, "image_id": 1, "category_id": 1, "bbox": [89.1204, 81.9133, 21.7593, 33.9672]}],
+        }
+        coco_path = self._write("annotations.json", json.dumps(coco))
+
+        records = import_labels(coco_path, self.image_dir, source_format="coco")
+        box = records[0][1].boxes[0]
+
+        self.assertAlmostEqual(box.xmin, 0.891204)
+        self.assertEqual(box.xmax, 1.0)
+        self.assertFalse(validate_result(records[0][1]))
 
     def test_yolo_data_yaml_takes_priority_over_classes_txt(self):
         self._write("classes.txt", "wrong0\nwrong1\nwrong2\nwrong3\n")

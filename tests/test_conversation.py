@@ -563,6 +563,102 @@ path: {test_images}
                     },
                 )
 
+    def test_model_dataset_request_asks_for_missing_information(self):
+        with tempfile.TemporaryDirectory() as directory:
+            routed = handle_conversation(
+                "SegFormer 학습용 데이터셋 구조로 만들어줘",
+                directory,
+            )
+
+            self.assertEqual(routed["kind"], "clarification")
+            self.assertIn("추가 정보가 필요", routed["response"])
+            self.assertIn("프레임워크", routed["response"])
+            self.assertIn("현재 라벨 형식", routed["response"])
+            self.assertEqual(routed["diagnosis"]["model_name"], "segformer")
+            self.assertFalse(routed["diagnosis"]["can_create_plan"])
+
+    def test_model_dataset_request_builds_plan_when_information_is_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proposal = build_conversation_plan(
+                "SegFormer를 MMSegmentation에서 training 목적으로 사용할 거야. "
+                "현재 라벨 형식은 COCO이고 train 8 val 2로 나눠줘. "
+                "출력 위치는 datasets/segformer",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["action"], "prepare_model_dataset")
+            self.assertEqual(operation["model_name"], "segformer")
+            self.assertEqual(operation["framework"], "mmsegmentation")
+            self.assertEqual(operation["dataset_purpose"], "training")
+            self.assertEqual(operation["source_format"], "coco")
+            self.assertEqual(operation["split_train"], 0.8)
+            self.assertEqual(operation["split_val"], 0.2)
+            self.assertEqual(Path(operation["out_dir"]), root / "datasets" / "segformer")
+
+    def test_model_dataset_plan_executes_and_writes_layout_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proposal = build_conversation_plan(
+                "SegFormer를 Hugging Face에서 training 목적으로 사용할 거야. "
+                "현재 라벨 형식은 mask image이고 train 8 val 2로 나눠줘. "
+                "출력 위치는 datasets/segformer_hf",
+                root,
+            )
+
+            result = execute_workflow_plan(proposal["plan"], thread_id="model-dataset-test")
+
+            self.assertEqual(result["status"], "completed")
+            output = result["operation_outputs"][0]
+            self.assertEqual(output["action"], "prepare_model_dataset")
+            self.assertEqual(output["layout"], "segformer_huggingface")
+            self.assertTrue((root / "datasets" / "segformer_hf" / "images" / "train").is_dir())
+            self.assertTrue((root / "datasets" / "segformer_hf" / "masks" / "validation").is_dir())
+            report = root / "datasets" / "segformer_hf" / "dataset_layout.json"
+            self.assertTrue(report.is_file())
+            report_data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(report_data["source_format"], "mask_image")
+
+    def test_official_repo_model_dataset_request_requires_repo_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            routed = handle_conversation(
+                "MaskDINO 공식 repo git clone 방식으로 training 데이터셋 구조를 만들어줘. "
+                "프레임워크는 Detectron2이고 현재 라벨 형식은 COCO야. "
+                "train 8 val 2, 출력 위치는 datasets/maskdino",
+                directory,
+            )
+
+            self.assertEqual(routed["kind"], "clarification")
+            self.assertEqual(routed["diagnosis"]["usage_mode"], "official_repo")
+            self.assertIn("clone URL", routed["response"])
+
+    def test_official_repo_model_dataset_plan_records_repo_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proposal = build_conversation_plan(
+                "MaskDINO 공식 repo git clone 방식으로 training 데이터셋 구조를 만들어줘. "
+                "프레임워크는 Detectron2이고 현재 라벨 형식은 COCO야. "
+                "repo: https://github.com/IDEA-Research/MaskDINO "
+                "train 8 val 2, 출력 위치는 datasets/maskdino",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["usage_mode"], "official_repo")
+            self.assertEqual(operation["framework"], "detectron2")
+            self.assertEqual(operation["repo_url"], "https://github.com/IDEA-Research/MaskDINO")
+
+            result = execute_workflow_plan(proposal["plan"], thread_id="official-repo-dataset-test")
+
+            output = result["operation_outputs"][0]
+            self.assertEqual(output["layout"], "maskdino_official_repo_detectron2")
+            self.assertEqual(output["repo_url"], "https://github.com/IDEA-Research/MaskDINO")
+            self.assertTrue((root / "datasets" / "maskdino" / "datasets").is_dir())
+            report = root / "datasets" / "maskdino" / "dataset_layout.json"
+            report_data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(report_data["usage_mode"], "official_repo")
+
 
 if __name__ == "__main__":
     unittest.main()

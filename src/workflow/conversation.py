@@ -59,6 +59,30 @@ SOURCE_FORMAT_ALIASES = {
     **FORMAT_ALIASES,
     "csv": ("csv",),
     "generic_json": ("generic json", "generic_json", "일반 json"),
+    "mask_image": ("mask image", "mask images", "mask", "마스크 이미지", "마스크"),
+}
+MODEL_DATASET_ALIASES = {
+    "segformer": ("segformer", "seg former"),
+    "maskdino": ("maskdino", "mask dino"),
+    "mask2former": ("mask2former", "mask 2 former"),
+    "deeplabv3+": ("deeplabv3+", "deeplab", "deep lab"),
+}
+FRAMEWORK_ALIASES = {
+    "huggingface": ("hugging face", "huggingface", "hf", "허깅페이스"),
+    "mmsegmentation": ("mmsegmentation", "mmseg", "mmsegmentation", "mmseg멘테이션"),
+    "detectron2": ("detectron2", "detectron"),
+    "pytorch": ("pytorch", "torch", "파이토치"),
+    "custom": ("custom", "커스텀", "직접"),
+}
+USAGE_MODE_ALIASES = {
+    "official_repo": ("official repo", "official repository", "공식 repo", "공식 repository", "공식 레포", "git clone", "clone", "깃클론"),
+    "library": ("library", "라이브러리", "패키지", "pip", "huggingface", "mmsegmentation", "detectron2"),
+    "custom": ("custom", "커스텀", "직접"),
+}
+PURPOSE_ALIASES = {
+    "training": ("training", "train", "학습", "훈련"),
+    "inference": ("inference", "infer", "추론"),
+    "evaluation": ("evaluation", "evaluate", "평가"),
 }
 
 
@@ -283,6 +307,191 @@ def _mentioned_formats(request: str, aliases: Dict[str, Iterable[str]] = FORMAT_
     ]
 
 
+def _mentioned_model(request: str) -> Optional[str]:
+    lowered = request.lower().replace("-", " ")
+    for model, aliases in MODEL_DATASET_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return model
+    return None
+
+
+def _mentioned_framework(request: str) -> Optional[str]:
+    lowered = request.lower().replace("-", " ")
+    for framework, aliases in FRAMEWORK_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return framework
+    return None
+
+
+def _mentioned_usage_mode(request: str) -> str:
+    lowered = request.lower().replace("-", " ")
+    for mode, aliases in USAGE_MODE_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return mode
+    return "library"
+
+
+def _mentioned_purpose(request: str) -> Optional[str]:
+    lowered = request.lower().replace("-", " ")
+    for purpose, aliases in PURPOSE_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return purpose
+    return None
+
+
+def _repo_url_from_request(request: str) -> Optional[str]:
+    match = re.search(r"https?://[^\s'\"`]+", request)
+    if not match:
+        return None
+    return match.group(0).rstrip(".,)")
+
+
+def _repo_path_from_request(request: str, root: Path) -> Optional[str]:
+    matches = []
+    matches.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(r"(?im)^\s*(?:repo|repository|레포|저장소)\s*:\s*(.+?)\s*$", request)
+    )
+    matches.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(
+            r"(?:repo|repository|레포|저장소)\s*(?:경로|위치|path)?\s*(?:은|는|을|를|로|:|=)?\s*([A-Za-z]:[\\/][^\r\n]+|[\w.-]+(?:[\\/][\w.-]+)+)",
+            request,
+            re.IGNORECASE,
+        )
+    )
+    for raw in matches:
+        if raw.startswith(("http://", "https://")):
+            continue
+        candidate = Path(raw)
+        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        return str(resolved)
+    return None
+
+
+def _model_task(model_name: Optional[str], request: str) -> str:
+    lowered = request.lower()
+    if _contains_any(lowered, ("panoptic", "파노픽")):
+        return "panoptic_segmentation"
+    if _contains_any(lowered, ("instance", "인스턴스")) or model_name in {"maskdino", "mask2former"}:
+        return "instance_segmentation"
+    return "semantic_segmentation"
+
+
+def _output_path_from_request(request: str, root: Path) -> Optional[Path]:
+    matches = []
+    matches.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(r"(?im)^\s*(?:out|output|출력|저장)\s*:\s*(.+?)\s*$", request)
+    )
+    matches.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(
+            r"(?:출력|저장)\s*(?:위치|경로|폴더)?\s*(?:은|는|을|를|로|:|=)?\s*([A-Za-z]:[\\/][^\r\n]+|[\w.-]+(?:[\\/][\w.-]+)+)",
+            request,
+        )
+    )
+    matches.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(r"(?:출력|저장|output)[^A-Za-z0-9가-힣]{0,10}(?:위치|경로|폴더|dir)?[^A-Za-z0-9가-힣]{0,10}([A-Za-z]:[\\/][^\r\n]+|[\w.-]+(?:[\\/][\w.-]+)+)", request, re.IGNORECASE)
+    )
+    for raw in matches:
+        candidate = Path(raw)
+        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Workspace 밖의 출력 경로는 사용할 수 없습니다.") from exc
+        return resolved
+    return None
+
+
+def _split_policy(request: str) -> Dict[str, Optional[float]]:
+    lowered = request.lower()
+    match = re.search(r"train\D{0,10}([0-9]+(?:\.[0-9]+)?)\D{0,10}val\D{0,10}([0-9]+(?:\.[0-9]+)?)", lowered)
+    if not match:
+        match = re.search(r"학습\D{0,10}([0-9]+(?:\.[0-9]+)?)\D{0,10}(?:검증|val)\D{0,10}([0-9]+(?:\.[0-9]+)?)", lowered)
+    if match:
+        train = float(match.group(1))
+        val = float(match.group(2))
+        total = train + val
+        if total > 1.0:
+            train /= total
+            val /= total
+        return {"train": train, "val": val, "test": None}
+    ratio = re.search(r"([0-9]+)\s*[:/]\s*([0-9]+)(?:\s*[:/]\s*([0-9]+))?", lowered)
+    if ratio:
+        values = [float(value) for value in ratio.groups() if value is not None]
+        total = sum(values)
+        return {
+            "train": values[0] / total,
+            "val": values[1] / total if len(values) > 1 else None,
+            "test": values[2] / total if len(values) > 2 else None,
+        }
+    return {"train": None, "val": None, "test": None}
+
+
+def diagnose_model_dataset_request(request: str, workspace: str | Path) -> Optional[Dict[str, Any]]:
+    root = Path(workspace).expanduser().resolve()
+    model_name = _mentioned_model(request)
+    lowered = request.lower()
+    layout_requested = _contains_any(lowered, ("데이터셋", "dataset", "폴더", "구조", "양식", "학습용", "training"))
+    if not model_name or not layout_requested:
+        return None
+    usage_mode = _mentioned_usage_mode(request)
+    framework = _mentioned_framework(request)
+    purpose = _mentioned_purpose(request)
+    source_formats = _mentioned_formats(request, SOURCE_FORMAT_ALIASES)
+    out_dir = _output_path_from_request(request, root)
+    repo_url = _repo_url_from_request(request)
+    repo_path = _repo_path_from_request(request, root)
+    split = _split_policy(request)
+    task_type = _model_task(model_name, request)
+
+    missing = []
+    if not framework:
+        missing.append("framework")
+    if not purpose:
+        missing.append("purpose")
+    if not source_formats:
+        missing.append("source_label_format")
+    if not out_dir:
+        missing.append("output_dir")
+    if usage_mode == "official_repo" and not (repo_url or repo_path):
+        missing.append("repo_source")
+    if purpose == "training" and (split["train"] is None or split["val"] is None):
+        missing.append("split_policy")
+
+    questions = {
+        "framework": "사용 프레임워크를 알려주세요. 예: Hugging Face, MMSegmentation, Detectron2, PyTorch, custom",
+        "purpose": "목적을 알려주세요. 예: training, inference, evaluation",
+        "source_label_format": "현재 라벨 형식을 알려주세요. 예: COCO, Pascal VOC, YOLO, vision_json, mask image",
+        "output_dir": "출력 위치를 알려주세요. 예: datasets/segformer",
+        "repo_source": "공식 repo를 사용할 경우 clone URL 또는 로컬 repo 경로를 알려주세요. 예: repo: https://github.com/... 또는 repo: external/MaskDINO",
+        "split_policy": "학습/검증/테스트 분할 방식을 알려주세요. 예: train 8, val 2",
+    }
+    source_format = source_formats[0] if source_formats else None
+    incompatible = []
+    if model_name == "segformer" and source_format == "yolo":
+        incompatible.append("SegFormer semantic segmentation 학습에는 bbox-only YOLO 라벨만으로는 정확한 class mask를 만들 수 없습니다. polygon/mask 라벨이 필요합니다.")
+    return {
+        "model_name": model_name,
+        "usage_mode": usage_mode,
+        "framework": framework,
+        "purpose": purpose,
+        "repo_url": repo_url,
+        "repo_path": repo_path,
+        "task_type": task_type,
+        "source_label_format": source_format,
+        "out_dir": str(out_dir) if out_dir else None,
+        "split": split,
+        "missing_required_info": missing,
+        "questions": [questions[item] for item in missing],
+        "incompatible_warnings": incompatible,
+        "can_create_plan": not missing and not incompatible,
+    }
+
+
 def _target_formats(request: str) -> List[str]:
     lowered = request.lower().replace("-", " ")
     mentioned = _mentioned_formats(request)
@@ -317,6 +526,11 @@ def _source_format(request: str) -> Optional[str]:
 
 def _action(request: str) -> str:
     lowered = request.lower()
+    if _mentioned_model(request) and _contains_any(
+        lowered,
+        ("데이터셋", "dataset", "폴더", "구조", "양식", "학습용", "training"),
+    ):
+        return "prepare_model_dataset"
     if _contains_any(lowered, ("평가", "비교", "리포트", "evaluate", "evaluation")):
         return "evaluate"
     if _contains_any(lowered, ("변환", "바꿔", "바꾸", "변경", "통일", "convert", "format")):
@@ -582,27 +796,58 @@ def build_conversation_plan(
         )
         summary = f"이미지 {selected_images['file_count']}개에 대해 {task_type} 라벨 생성"
     else:
-        if _contains_any(request.lower(), ("원본 이미지랑 잘 맞", "이미지와 잘 맞", "image alignment")):
-            raise ValueError(
-                "라벨과 원본 이미지의 공간 정합성 검증은 현재 대화형 평가에서 지원하지 않습니다. "
-                "현재 평가는 ground truth 비교 또는 run_metrics.csv 실험 비교를 지원합니다."
+        if action == "prepare_model_dataset":
+            diagnosis = diagnose_model_dataset_request(request, root)
+            if not diagnosis:
+                raise ValueError("모델 데이터셋 준비 요청을 해석하지 못했습니다.")
+            if diagnosis["missing_required_info"] or diagnosis["incompatible_warnings"]:
+                messages = []
+                messages.extend(diagnosis["questions"])
+                messages.extend(diagnosis["incompatible_warnings"])
+                raise ValueError("모델 데이터셋 준비에 필요한 정보가 부족합니다: " + " / ".join(messages))
+            operation = OperationPlan(
+                action="prepare_model_dataset",
+                model_name=diagnosis["model_name"],
+                usage_mode=diagnosis["usage_mode"],
+                framework=diagnosis["framework"],
+                dataset_purpose=diagnosis["purpose"],
+                repo_url=diagnosis["repo_url"],
+                repo_path=diagnosis["repo_path"],
+                task_type=diagnosis["task_type"],
+                source_format=diagnosis["source_label_format"] or "auto",
+                out_dir=diagnosis["out_dir"],
+                output_layout=f"{diagnosis['model_name']}_{diagnosis['usage_mode']}_{diagnosis['framework']}",
+                split_train=diagnosis["split"].get("train"),
+                split_val=diagnosis["split"].get("val"),
+                split_test=diagnosis["split"].get("test"),
+                require_approval=True,
             )
-        runs = _discover_runs(root)
-        if not runs:
-            for candidate in inventory["label_candidates"]:
-                if candidate["format"] == "yolo":
-                    runs[candidate["relative_path"]] = candidate["path"]
-        if not runs:
-            raise ValueError("Workspace에서 평가 가능한 run_metrics.csv를 찾지 못했습니다.")
-        ground_truth = (root / "data" / "ground_truth").resolve()
-        operation = OperationPlan(
-            action="evaluate",
-            gt_dir=str(ground_truth) if ground_truth.is_dir() else None,
-            out_dir=str((root / "data" / "reports").resolve()),
-            runs=runs,
-            require_approval=False,
-        )
-        summary = f"발견한 실험 결과 {len(runs)}개를 비교 평가"
+            summary = (
+                f"{diagnosis['model_name']} {diagnosis['usage_mode']} {diagnosis['framework']} "
+                f"{diagnosis['purpose']}용 데이터셋 구조 생성"
+            )
+        else:
+            if _contains_any(request.lower(), ("원본 이미지랑 잘 맞", "이미지와 잘 맞", "image alignment")):
+                raise ValueError(
+                    "라벨과 원본 이미지의 공간 정합성 검증은 현재 대화형 평가에서 지원하지 않습니다. "
+                    "현재 평가는 ground truth 비교 또는 run_metrics.csv 실험 비교를 지원합니다."
+                )
+            runs = _discover_runs(root)
+            if not runs:
+                for candidate in inventory["label_candidates"]:
+                    if candidate["format"] == "yolo":
+                        runs[candidate["relative_path"]] = candidate["path"]
+            if not runs:
+                raise ValueError("Workspace에서 평가 가능한 run_metrics.csv를 찾지 못했습니다.")
+            ground_truth = (root / "data" / "ground_truth").resolve()
+            operation = OperationPlan(
+                action="evaluate",
+                gt_dir=str(ground_truth) if ground_truth.is_dir() else None,
+                out_dir=str((root / "data" / "reports").resolve()),
+                runs=runs,
+                require_approval=False,
+            )
+            summary = f"발견한 실험 결과 {len(runs)}개를 비교 평가"
 
     plan = WorkflowPlan(request_summary=request[:200], operations=[operation])
     return {
@@ -627,6 +872,25 @@ def describe_plan(proposal: Dict[str, Any], workspace: str | Path) -> str:
             lines.append(f"- {label}: `{_relative(Path(value), root)}`")
     if operation.get("formats"):
         lines.append(f"- 출력 포맷: `{', '.join(operation['formats'])}`")
+    if operation.get("action") == "prepare_model_dataset":
+        lines.append(f"- 모델: `{operation.get('model_name')}`")
+        lines.append(f"- 사용 방식: `{operation.get('usage_mode', 'library')}`")
+        lines.append(f"- 프레임워크: `{operation.get('framework')}`")
+        if operation.get("repo_url"):
+            lines.append(f"- 공식 repo URL: `{operation.get('repo_url')}`")
+        if operation.get("repo_path"):
+            lines.append(f"- 로컬 repo 경로: `{_relative(Path(operation['repo_path']), root)}`")
+        lines.append(f"- 목적: `{operation.get('dataset_purpose')}`")
+        lines.append(f"- 태스크: `{operation.get('task_type')}`")
+        lines.append(f"- 입력 라벨 형식: `{operation.get('source_format')}`")
+        split_parts = [
+            f"train={operation.get('split_train'):.2f}" if operation.get("split_train") is not None else None,
+            f"val={operation.get('split_val'):.2f}" if operation.get("split_val") is not None else None,
+            f"test={operation.get('split_test'):.2f}" if operation.get("split_test") is not None else None,
+        ]
+        split_text = ", ".join(part for part in split_parts if part)
+        if split_text:
+            lines.append(f"- 분할: `{split_text}`")
     if operation.get("duplicate_iou") != 0.85:
         lines.append(f"- 중복 IoU: `{operation['duplicate_iou']}`")
     if operation.get("strict"):
@@ -661,6 +925,9 @@ def describe_result(result: Dict[str, Any], workspace: str | Path) -> str:
             lines.append(f"- 생성 라벨: {output.get('total_labels', 0)}개")
         elif action == "evaluate":
             lines.append(f"- 평가 결과: {len(output.get('rows', []))}개")
+        elif action == "prepare_model_dataset":
+            lines.append(f"- 모델 데이터셋 구조: `{output.get('layout', '-')}`")
+            lines.append(f"- 생성 폴더: {len(output.get('created_directories', []))}개")
         report_path = output.get("report_path") or output.get("summary_path")
         if report_path:
             lines.append(f"- 결과 파일: `{_relative(Path(report_path), Path(workspace).resolve())}`")

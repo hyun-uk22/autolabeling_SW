@@ -32,6 +32,10 @@ CLASS_LIST_PRIORITY = {
 }
 
 
+def clamp_unit_coordinate(value) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
 @dataclass(frozen=True)
 class LabelSource:
     path: str
@@ -353,10 +357,10 @@ def normalize_pixel_box(xmin, ymin, xmax, ymax, width: float, height: float) -> 
     if width <= 0 or height <= 0:
         raise ValueError("Image width and height must be positive for pixel coordinate conversion")
     return {
-        "xmin": normalize_coordinate(float(xmin) / width),
-        "ymin": normalize_coordinate(float(ymin) / height),
-        "xmax": normalize_coordinate(float(xmax) / width),
-        "ymax": normalize_coordinate(float(ymax) / height),
+        "xmin": clamp_unit_coordinate(float(xmin) / width),
+        "ymin": clamp_unit_coordinate(float(ymin) / height),
+        "xmax": clamp_unit_coordinate(float(xmax) / width),
+        "ymax": clamp_unit_coordinate(float(ymax) / height),
     }
 
 
@@ -372,10 +376,10 @@ def parse_yolo_file(path: str, image_name: str, class_list: List[str]) -> Tuple[
             result.boxes.append(
                 BoundingBox(
                     label=label_for_class_id(class_id, class_list),
-                    xmin=normalize_coordinate(x_center - width / 2),
-                    ymin=normalize_coordinate(y_center - height / 2),
-                    xmax=normalize_coordinate(x_center + width / 2),
-                    ymax=normalize_coordinate(y_center + height / 2),
+                    xmin=clamp_unit_coordinate(x_center - width / 2),
+                    ymin=clamp_unit_coordinate(y_center - height / 2),
+                    xmax=clamp_unit_coordinate(x_center + width / 2),
+                    ymax=clamp_unit_coordinate(y_center + height / 2),
                     confidence=1.0,
                 )
             )
@@ -463,7 +467,10 @@ def import_coco(input_path: str) -> List[Tuple[str, DetectionResult]]:
             if not isinstance(segmentation, list) or len(segmentation) < 6:
                 continue
             points = [
-                Point(x=normalize_coordinate(segmentation[idx] / width), y=normalize_coordinate(segmentation[idx + 1] / height))
+                Point(
+                    x=clamp_unit_coordinate(segmentation[idx] / width),
+                    y=clamp_unit_coordinate(segmentation[idx + 1] / height),
+                )
                 for idx in range(0, len(segmentation) - 1, 2)
             ]
             result.segments.append(PolygonSegment(label=label, polygon=points, confidence=normalize_confidence(annotation.get("score", 1.0))))
