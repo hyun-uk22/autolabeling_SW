@@ -1012,6 +1012,7 @@ if "workspace" not in st.session_state:
 workspace = st.session_state.get("workspace")
 if not workspace:
     st.rerun()
+    st.stop()
 st.markdown(f'<div class="workspace-path">{html.escape(workspace)}</div>', unsafe_allow_html=True)
 chat_tab, convert_tab, generate_tab, evaluate_tab, result_tab, settings_tab = st.tabs(
     ["대화형 작업", "형식 변환", "라벨 생성", "평가", "결과 리포트", "설정"]
