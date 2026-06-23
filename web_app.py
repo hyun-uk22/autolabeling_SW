@@ -376,10 +376,13 @@ def start_label_editor_issue_queue(workspace, files, context):
     st.rerun()
 
 
-def render_issue_editor_launcher(files, context, key_prefix, title="문제 파일 라벨 편집"):
+def render_issue_editor_launcher(files, context, key_prefix, title="문제 파일 라벨 편집", filter_to_issue_queue=False):
     issue_files = unique_issue_files(files)
     if not issue_files:
         return
+    context = dict(context or {})
+    if filter_to_issue_queue:
+        context["filter_to_issue_queue"] = True
     with st.container(border=True):
         st.markdown(f"**{title}**")
         st.caption(
@@ -634,6 +637,44 @@ def render_workflow_report(result, key_prefix="report"):
                     "BBox Agreement",
                     "-" if mean_agreement is None else f"{mean_agreement * 100:.1f}%",
                 )
+            if specialist_consistency.get("llm_enabled_images"):
+                st.markdown("**LMM 재생성 일관성 분석**")
+                llm_columns = st.columns(4)
+                llm_columns[0].metric("LMM 비교 이미지", specialist_consistency.get("llm_enabled_images", 0))
+                llm_columns[1].metric("LMM 모드", specialist_consistency.get("llm_mode", "none"))
+                llm_agreement = specialist_consistency.get("llm_mean_bbox_agreement")
+                llm_columns[2].metric(
+                    "Prediction Agreement",
+                    "-" if llm_agreement is None else f"{llm_agreement * 100:.1f}%",
+                )
+                llm_columns[3].metric("검토 필요", specialist_consistency.get("llm_review_required_images", 0))
+                st.caption(
+                    "1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 agreement를 계산합니다."
+                )
+                llm_review_records = specialist_consistency.get("llm_review_records") or []
+                if llm_review_records:
+                    st.markdown("**LMM 기준 검토 대상 이미지**")
+                    review_rows = []
+                    for record in llm_review_records:
+                        agreement = record.get("mean_bbox_agreement")
+                        threshold = record.get("threshold")
+                        review_rows.append({
+                            "파일": record.get("image", ""),
+                            "LMM 모드": record.get("mode", ""),
+                            "Prediction Agreement": "-" if agreement is None else f"{agreement * 100:.1f}%",
+                            "임계치": "-" if threshold is None else f"{threshold * 100:.1f}%",
+                        })
+                    st.dataframe(review_rows, width="stretch")
+                    review_files = [row["파일"] for row in review_rows if row.get("파일")]
+                    render_issue_editor_launcher(
+                        review_files,
+                        workflow_editor_context(output),
+                        f"{key_prefix}-{index}-llm-review",
+                        title="LMM 임계치 미달 이미지만 라벨 편집",
+                        filter_to_issue_queue=True,
+                    )
+                elif specialist_consistency.get("llm_review_required_images", 0) == 0:
+                    st.success("LMM 비교 기준으로 임계치 미달 이미지는 없습니다.")
         elif action == "convert":
             validation = output.get("validation", {})
             columns = st.columns(4)
@@ -1436,6 +1477,9 @@ def render_label_editor_tab(workspace):
                 editor_source_format,
                 classes_path=resolve_workspace_path(workspace, editor_classes) if editor_classes else None,
             )
+            if issue_context.get("filter_to_issue_queue") and issue_queue:
+                issue_set = set(issue_queue)
+                records = [record for record in records if record.get("image") in issue_set]
             st.session_state.editor_records = records
             st.session_state.editor_report = report
             st.session_state.editor_loaded_context_signature = context_signature
@@ -2001,12 +2045,13 @@ def has_generate_operation(plan):
     )
 
 
-def chat_rerun_plan(first_pass_plan, advisor_mode):
+def chat_rerun_plan(first_pass_plan, llm_mode):
     plan = copy.deepcopy(first_pass_plan)
     for operation in plan.get("operations", []):
         if operation.get("action") == "generate":
-            operation["specialist_consistency_runs"] = 1
-            operation["specialist_advisor_mode"] = advisor_mode
+            operation["specialist_consistency_runs"] = 0
+            operation["specialist_advisor_mode"] = "none"
+            operation["llm_consistency_mode"] = llm_mode
     return plan
 
 
@@ -2014,21 +2059,21 @@ def render_selective_rerun_controls(first_pass_plan, key_prefix, on_complete):
     if not first_pass_plan or not has_generate_operation(first_pass_plan):
         return
     st.divider()
-    st.markdown("#### 1차 추론 이후 선택 재추론")
-    st.caption("위 결과를 확인한 뒤 필요할 때만 동일 작업 설정으로 specialist 재추론을 실행합니다.")
-    advisor_mode = st.selectbox(
-        "재추론 Advisor",
-        ["none", "low", "high", "both"],
+    st.markdown("#### 1차 추론 이후 LMM 재생성 비교")
+    st.caption("1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 agreement를 계산합니다.")
+    llm_mode = st.selectbox(
+        "재생성 LMM",
+        ["low", "high", "both"],
         index=0,
-        key=f"{key_prefix}_specialist_advisor_mode",
-        help="none은 LLM 없이 고정 파라미터로 재추론하고, low/high/both는 LLM이 threshold, augmentation, prompt 보조 파라미터를 제안합니다.",
+        key=f"{key_prefix}_llm_consistency_mode",
+        help="선택한 Low/High LMM이 같은 이미지에 대해 라벨을 다시 생성하고, 1차 Vision 결과와 prediction-to-prediction agreement를 계산합니다.",
     )
-    if st.button("Specialist 재추론 1회 실행", type="secondary", key=f"{key_prefix}_specialist_rerun"):
+    if st.button("LMM 재생성 비교 실행", type="secondary", key=f"{key_prefix}_llm_consistency_rerun"):
         try:
-            result = execute_plan(chat_rerun_plan(first_pass_plan, advisor_mode), auto_approve=True)
+            result = execute_plan(chat_rerun_plan(first_pass_plan, llm_mode), auto_approve=True)
             on_complete(result)
         except Exception as exc:
-            st.error(f"선택 재추론 실행 중 오류가 발생했습니다: {exc}")
+            st.error(f"LMM 재생성 비교 실행 중 오류가 발생했습니다: {exc}")
         st.rerun()
 
 

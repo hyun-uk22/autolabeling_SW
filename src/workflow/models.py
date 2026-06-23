@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 ActionType = Literal["generate", "convert", "evaluate", "prepare_model_dataset"]
 GenerationStrategy = Literal["specialist_first", "vlm_first"]
 SpecialistAdvisorMode = Literal["none", "low", "high", "both"]
+LLMConsistencyMode = Literal["none", "low", "high", "both"]
 DatasetUsageMode = Literal["library", "official_repo", "custom"]
 
 
@@ -25,6 +26,7 @@ class OperationPlan(BaseModel):
     generation_strategy: GenerationStrategy = "specialist_first"
     specialist_consistency_runs: int = Field(default=0, ge=0, le=3)
     specialist_advisor_mode: SpecialistAdvisorMode = "none"
+    llm_consistency_mode: LLMConsistencyMode = "none"
     plugin_config: Optional[str] = None
     plugin_fail_fast: bool = False
     gt_dir: Optional[str] = None

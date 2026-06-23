@@ -37,6 +37,7 @@ Allowed response shape:
     "strict": true,
     "specialist_consistency_runs": 1,
     "specialist_advisor_mode": "none|low|high|both",
+    "llm_consistency_mode": "none|low|high|both",
     "usage_mode": "library|official_repo|custom",
     "framework": "huggingface|mmsegmentation|detectron2|pytorch|custom",
     "dataset_purpose": "training|inference|evaluation",
@@ -64,6 +65,7 @@ ALLOWED_UPDATE_FIELDS = {
     "strict",
     "specialist_consistency_runs",
     "specialist_advisor_mode",
+    "llm_consistency_mode",
     "usage_mode",
     "framework",
     "dataset_purpose",
@@ -203,6 +205,11 @@ def _sanitize_updates(updates: Dict[str, Any], current_operation: Dict[str, Any]
             if not 0 <= runs <= 3:
                 raise ValueError("specialist_consistency_runs는 0~3 범위여야 합니다.")
             sanitized[key] = runs
+        elif key in {"specialist_advisor_mode", "llm_consistency_mode"}:
+            mode = str(value).strip().lower()
+            if mode not in ALLOWED_ADVISOR_MODES:
+                raise ValueError(f"지원하지 않는 모드입니다: {mode}")
+            sanitized[key] = mode
         elif key == "strict":
             if isinstance(value, bool):
                 sanitized[key] = value

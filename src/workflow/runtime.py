@@ -93,6 +93,12 @@ def _bbox_agreement(base: DetectionResult, rerun: DetectionResult, iou_threshold
     rerun_count = len(rerun.boxes)
     match_count = len(matches)
     denominator = max(base_count, rerun_count, 1)
+    pseudo_precision = match_count / rerun_count if rerun_count else 0.0
+    pseudo_recall = match_count / base_count if base_count else 0.0
+    pseudo_f1 = (
+        2 * pseudo_precision * pseudo_recall / (pseudo_precision + pseudo_recall)
+        if pseudo_precision + pseudo_recall else 0.0
+    )
     return {
         "bbox_iou_threshold": iou_threshold,
         "base_boxes": base_count,
@@ -102,8 +108,48 @@ def _bbox_agreement(base: DetectionResult, rerun: DetectionResult, iou_threshold
         "new_boxes": max(0, rerun_count - match_count),
         "mean_matched_iou": sum(item["iou"] for item in matches) / match_count if match_count else 0.0,
         "agreement": match_count / denominator,
+        "pseudo_precision": pseudo_precision,
+        "pseudo_recall": pseudo_recall,
+        "pseudo_f1": pseudo_f1,
         "matches": matches[:20],
     }
+
+
+def _llm_review_queue(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    review_rows = []
+    for record in records:
+        llm_consistency = (record.get("specialist_consistency") or {}).get("llm_consistency") or {}
+        if not llm_consistency.get("enabled") or not llm_consistency.get("review_required"):
+            continue
+        comparisons = llm_consistency.get("comparisons") or []
+        agreements = [
+            (comparison.get("bbox_agreement") or {}).get("agreement")
+            for comparison in comparisons
+            if (comparison.get("bbox_agreement") or {}).get("agreement") is not None
+        ]
+        review_rows.append({
+            "image": record.get("image", ""),
+            "mode": llm_consistency.get("mode"),
+            "threshold": llm_consistency.get("threshold"),
+            "mean_bbox_agreement": (
+                sum(agreements) / len(agreements)
+                if agreements else llm_consistency.get("mean_bbox_agreement")
+            ),
+            "comparisons": [
+                {
+                    "level": comparison.get("level"),
+                    "model": comparison.get("model"),
+                    "bbox_agreement": (comparison.get("bbox_agreement") or {}).get("agreement"),
+                    "mean_matched_iou": (comparison.get("bbox_agreement") or {}).get("mean_matched_iou"),
+                    "pseudo_precision": (comparison.get("bbox_agreement") or {}).get("pseudo_precision"),
+                    "pseudo_recall": (comparison.get("bbox_agreement") or {}).get("pseudo_recall"),
+                    "pseudo_f1": (comparison.get("bbox_agreement") or {}).get("pseudo_f1"),
+                    "review_required": comparison.get("review_required"),
+                }
+                for comparison in comparisons
+            ],
+        })
+    return review_rows
 
 
 def _confidence_summary(values: List[float]) -> Dict[str, Any]:
@@ -427,6 +473,64 @@ class WorkflowRuntime:
             "bbox_agreement": bbox,
         }
 
+    def _llm_consistency_rerun(
+        self,
+        image_path: str,
+        operation: OperationPlan,
+        base_result: DetectionResult,
+    ) -> Dict[str, Any]:
+        mode = operation.llm_consistency_mode
+        if mode == "none" or count_result_labels(base_result) <= 0:
+            return {"enabled": False, "reason": "disabled_or_empty"}
+        low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
+        self._ensure_vlm_clients(operation, low_model, high_model)
+        selected = []
+        if mode in {"low", "both"}:
+            selected.append(("low", self.low_client))
+        if mode in {"high", "both"}:
+            selected.append(("high", self.high_client))
+
+        comparisons = []
+        for level, client in selected:
+            before = client.api_attempts
+            started = time.perf_counter()
+            llm_result = client.predict(
+                image_path,
+                operation.prompt,
+                temperature=0.0,
+                task_type=operation.task_type,
+            )
+            llm_result.source_model = client.model_name
+            bbox = _bbox_agreement(base_result, llm_result)
+            consistency = compute_result_consistency(base_result, llm_result)
+            agreement = bbox.get("agreement", consistency)
+            review_required = agreement < operation.threshold
+            comparisons.append({
+                "level": level,
+                "model": client.model_name,
+                "api_attempts": client.api_attempts - before,
+                "elapsed_sec": time.perf_counter() - started,
+                "result": llm_result.model_dump(),
+                "result_consistency": consistency,
+                "bbox_agreement": bbox,
+                "review_required": review_required,
+                "threshold": operation.threshold,
+            })
+
+        agreements = [
+            item["bbox_agreement"].get("agreement")
+            for item in comparisons
+            if item.get("bbox_agreement", {}).get("agreement") is not None
+        ]
+        return {
+            "enabled": True,
+            "mode": mode,
+            "threshold": operation.threshold,
+            "comparisons": comparisons,
+            "mean_bbox_agreement": sum(agreements) / len(agreements) if agreements else None,
+            "review_required": any(item.get("review_required") for item in comparisons),
+        }
+
     def generate_drafts(self, image_path: str, operation: OperationPlan) -> Dict[str, Any]:
         self._ensure_generation_for_operation(operation)
         started = time.perf_counter()
@@ -463,6 +567,10 @@ class WorkflowRuntime:
         )
         first_pass_report = self._first_pass_report(merged, records, operation)
         specialist_consistency = self._specialist_consistency_rerun(image_path, operation, merged, first_pass_report)
+        llm_consistency = self._llm_consistency_rerun(image_path, operation, merged)
+        if llm_consistency.get("enabled"):
+            specialist_consistency = dict(specialist_consistency)
+            specialist_consistency["llm_consistency"] = llm_consistency
         return {
             "result": merged,
             "records": records,
@@ -539,6 +647,13 @@ class WorkflowRuntime:
             first_pass_report = record.get("first_pass_report") or {}
             specialist_consistency = record.get("specialist_consistency") or {}
             bbox_agreement = specialist_consistency.get("bbox_agreement") or {}
+            llm_consistency = specialist_consistency.get("llm_consistency") or {}
+            llm_comparisons = llm_consistency.get("comparisons") or []
+            llm_agreements = [
+                (item.get("bbox_agreement") or {}).get("agreement")
+                for item in llm_comparisons
+                if (item.get("bbox_agreement") or {}).get("agreement") is not None
+            ]
             metric_rows.append({
                 "image": record["image"],
                 "status": record["status"],
@@ -568,6 +683,15 @@ class WorkflowRuntime:
                 "specialist_mean_matched_iou": bbox_agreement.get("mean_matched_iou"),
                 "specialist_rerun_records": json_io.dumps(specialist_consistency.get("records", []), ensure_ascii=False),
                 "specialist_rerun_patch": json_io.dumps(specialist_consistency.get("patch", {}), ensure_ascii=False),
+                "llm_consistency_enabled": bool(llm_consistency.get("enabled")),
+                "llm_consistency_mode": llm_consistency.get("mode"),
+                "llm_consistency_threshold": llm_consistency.get("threshold"),
+                "llm_mean_bbox_agreement": (
+                    sum(llm_agreements) / len(llm_agreements)
+                    if llm_agreements else None
+                ),
+                "llm_review_required": bool(llm_consistency.get("review_required")),
+                "llm_consistency_comparisons": json_io.dumps(llm_comparisons, ensure_ascii=False),
                 "validation_issues": json_io.dumps(record.get("issues", []), ensure_ascii=False),
                 "low_api_attempts": record.get("low_api_attempts", 0),
                 "high_api_attempts": record.get("high_api_attempts", 0),
@@ -621,6 +745,22 @@ class WorkflowRuntime:
             for item in specialist_consistency_records
             if (item.get("bbox_agreement") or {}).get("agreement") is not None
         ]
+        llm_consistency_records = [
+            item.get("llm_consistency")
+            for item in (
+                record.get("specialist_consistency") or {}
+                for record in records
+            )
+            if (item or {}).get("enabled")
+        ]
+        llm_bbox_agreements = [
+            (comparison.get("bbox_agreement") or {}).get("agreement")
+            for item in llm_consistency_records
+            for comparison in item.get("comparisons", [])
+            if (comparison.get("bbox_agreement") or {}).get("agreement") is not None
+        ]
+        llm_review_rows = _llm_review_queue(records)
+        llm_review_required = len(llm_review_rows)
         first_pass_reports = [
             record.get("first_pass_report")
             for record in records
@@ -679,6 +819,15 @@ class WorkflowRuntime:
                 "mean_bbox_agreement": (
                     sum(specialist_bbox_agreements) / len(specialist_bbox_agreements)
                     if specialist_bbox_agreements else None
+                ),
+                "llm_enabled_images": len(llm_consistency_records),
+                "llm_mode": operation.llm_consistency_mode,
+                "llm_review_required_images": llm_review_required,
+                "llm_review_images": [row["image"] for row in llm_review_rows if row.get("image")],
+                "llm_review_records": llm_review_rows,
+                "llm_mean_bbox_agreement": (
+                    sum(llm_bbox_agreements) / len(llm_bbox_agreements)
+                    if llm_bbox_agreements else None
                 ),
             },
             "evaluation": evaluation,

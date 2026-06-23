@@ -7,7 +7,7 @@ from src.core.models import BoundingBox, DetectionResult
 from src.plugins.base import PluginOutput, VisionTaskPlugin
 from src.plugins.orchestrator import TaskPluginOrchestrator
 from src.workflow.models import OperationPlan
-from src.workflow.runtime import WorkflowRuntime
+from src.workflow.runtime import WorkflowRuntime, _llm_review_queue
 
 
 class ThresholdBoxPlugin(VisionTaskPlugin):
@@ -28,6 +28,19 @@ class ThresholdBoxPlugin(VisionTaskPlugin):
             )
         )
         return PluginOutput(result=result, score=threshold, metadata={"threshold": threshold})
+
+
+class FakeLLMClient:
+    def __init__(self, model_name, result):
+        self.model_name = model_name
+        self.result = result
+        self.api_attempts = 0
+
+    def predict(self, image_path, prompt, temperature=0.0, task_type="object_detection"):
+        self.api_attempts += 1
+        result = self.result.model_copy(deep=True)
+        result.task_type = task_type
+        return result
 
 
 class SpecialistConsistencyTests(unittest.TestCase):
@@ -115,6 +128,77 @@ class SpecialistConsistencyTests(unittest.TestCase):
                 prepared["images"],
                 [str(Path("csv") / "data" / "a.jpg"), str(Path("extra") / "b.png")],
             )
+
+    def test_llm_consistency_compares_vision_result_to_selected_llm_result(self):
+        runtime = WorkflowRuntime()
+        operation = OperationPlan(
+            action="generate",
+            task_type="object_detection",
+            llm_consistency_mode="low",
+            threshold=0.75,
+        )
+        base = DetectionResult(task_type="object_detection")
+        base.boxes.append(BoundingBox(label="person", xmin=0.1, ymin=0.1, xmax=0.4, ymax=0.4, confidence=0.9))
+        llm = DetectionResult(task_type="object_detection")
+        llm.boxes.append(BoundingBox(label="person", xmin=0.12, ymin=0.1, xmax=0.42, ymax=0.4, confidence=0.8))
+        runtime.low_client = FakeLLMClient("low", llm)
+        runtime.high_client = FakeLLMClient("high", DetectionResult(task_type="object_detection"))
+
+        with patch.object(runtime, "_ensure_vlm_clients", return_value=[]):
+            report = runtime._llm_consistency_rerun("image.jpg", operation, base)
+
+        self.assertTrue(report["enabled"])
+        self.assertEqual(report["mode"], "low")
+        self.assertEqual(report["comparisons"][0]["level"], "low")
+        self.assertGreater(report["comparisons"][0]["bbox_agreement"]["agreement"], 0.0)
+        self.assertFalse(report["review_required"])
+
+    def test_llm_review_queue_keeps_only_threshold_failures(self):
+        records = [
+            {
+                "image": "pass.jpg",
+                "specialist_consistency": {
+                    "llm_consistency": {
+                        "enabled": True,
+                        "review_required": False,
+                        "mode": "low",
+                        "threshold": 0.75,
+                        "comparisons": [],
+                    }
+                },
+            },
+            {
+                "image": "fail.jpg",
+                "specialist_consistency": {
+                    "llm_consistency": {
+                        "enabled": True,
+                        "review_required": True,
+                        "mode": "high",
+                        "threshold": 0.75,
+                        "comparisons": [
+                            {
+                                "level": "high",
+                                "model": "high-model",
+                                "bbox_agreement": {
+                                    "agreement": 0.4,
+                                    "mean_matched_iou": 0.6,
+                                    "pseudo_precision": 0.5,
+                                    "pseudo_recall": 0.5,
+                                    "pseudo_f1": 0.5,
+                                },
+                                "review_required": True,
+                            }
+                        ],
+                    }
+                },
+            },
+        ]
+
+        queue = _llm_review_queue(records)
+
+        self.assertEqual([item["image"] for item in queue], ["fail.jpg"])
+        self.assertEqual(queue[0]["mode"], "high")
+        self.assertEqual(queue[0]["mean_bbox_agreement"], 0.4)
 
 
 if __name__ == "__main__":
