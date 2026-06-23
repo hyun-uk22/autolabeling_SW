@@ -30,6 +30,26 @@ CLASS_LIST_PRIORITY = {
     "csv": 50,
     "generic_json": 40,
 }
+PREFERRED_LABEL_DIRS = {"labels", "labeled"}
+IGNORED_LABEL_DISCOVERY_DIRS = {
+    ".git",
+    ".streamlit",
+    "__pycache__",
+    "artifacts",
+    "converted",
+    "outputs",
+    "reports",
+    "runs",
+    "visualized",
+    "visualizations",
+}
+IGNORED_LABEL_DISCOVERY_FILENAMES = {
+    "conversion_report.json",
+    "run_metrics.csv",
+    "run_metrics.jsonl",
+    "run_summary.json",
+    "user_action_report.json",
+}
 
 
 @dataclass(frozen=True)
@@ -705,20 +725,40 @@ def discover_label_sources(input_path: str, image_dir: str) -> Tuple[List[LabelS
     skipped = []
     files_scanned = 0
     candidate_extensions = {".xml", ".txt", ".json", ".jsonl", ".csv"}
-    for root, _, names in os.walk(input_path):
-        for name in sorted(names):
-            path = os.path.join(root, name)
-            files_scanned += 1
-            ext = os.path.splitext(name)[1].lower()
-            if ext not in candidate_extensions or name.lower() == "classes.txt":
-                continue
-            fmt, reason = _detect_label_file(path, image_dir)
-            if fmt:
-                sources.append(LabelSource(path=path, format=fmt, search_root=os.path.abspath(input_path)))
-            elif reason:
-                skipped.append({"path": os.path.abspath(path), "reason": reason})
+    input_abs = os.path.abspath(input_path)
+    preferred_roots = []
+    for name in sorted(os.listdir(input_path)):
+        path = os.path.join(input_path, name)
+        if os.path.isdir(path) and name.lower() in PREFERRED_LABEL_DIRS:
+            preferred_roots.append(path)
+    search_roots = preferred_roots or [input_path]
+    for search_root in search_roots:
+        for root, dirs, names in os.walk(search_root):
+            dirs[:] = [
+                dirname
+                for dirname in dirs
+                if dirname.lower() not in IGNORED_LABEL_DISCOVERY_DIRS
+            ]
+            for name in sorted(names):
+                path = os.path.join(root, name)
+                files_scanned += 1
+                if name.lower() in IGNORED_LABEL_DISCOVERY_FILENAMES:
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in candidate_extensions or name.lower() == "classes.txt":
+                    continue
+                fmt, reason = _detect_label_file(path, image_dir)
+                if fmt:
+                    sources.append(LabelSource(path=path, format=fmt, search_root=input_abs))
+                elif reason:
+                    skipped.append({"path": os.path.abspath(path), "reason": reason})
     sources.sort(key=lambda item: (item.format, item.path.lower()))
-    return sources, {"files_scanned": files_scanned, "skipped_files": skipped}
+    return sources, {
+        "files_scanned": files_scanned,
+        "skipped_files": skipped,
+        "search_roots": [os.path.abspath(path) for path in search_roots],
+        "preferred_label_dirs_used": bool(preferred_roots),
+    }
 
 
 def _box_values(item) -> List[float]:

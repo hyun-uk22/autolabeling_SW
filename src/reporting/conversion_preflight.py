@@ -1,16 +1,5 @@
 from collections import Counter
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-
-
-def _conversion_impact(severity: str, code: str) -> str:
-    if code in {"no_label_sources", "no_records"}:
-        return "변환 불가"
-    if code in {"missing_images", "invalid_images", "import_failed_files"}:
-        return "해당 데이터 제외 후 진행"
-    if severity == "critical":
-        return "해당 데이터 제외 후 진행"
-    return "변환은 그대로 진행"
 
 
 def _notice(severity: str, code: str, message: str, action: str, **extra) -> Dict[str, Any]:
@@ -19,7 +8,6 @@ def _notice(severity: str, code: str, message: str, action: str, **extra) -> Dic
         "code": code,
         "message": message,
         "user_action": action,
-        "conversion_impact": extra.pop("conversion_impact", _conversion_impact(severity, code)),
     }
     payload.update(extra)
     return payload
@@ -27,35 +15,6 @@ def _notice(severity: str, code: str, message: str, action: str, **extra) -> Dic
 
 def _issue_code(issue: str) -> str:
     return str(issue).split(":", 1)[0].split(".")[-1]
-
-
-def _short_path(value: Any) -> str:
-    return Path(str(value)).name if value else ""
-
-
-def _sample_paths(items: Iterable[Dict[str, Any]], key: str = "path", limit: int = 5) -> List[str]:
-    samples = []
-    for item in items:
-        value = item.get(key)
-        if value:
-            samples.append(_short_path(value))
-        if len(samples) >= limit:
-            break
-    return samples
-
-
-def _conflict_examples(conflicts: Iterable[Dict[str, Any]], limit: int = 5) -> List[str]:
-    examples = []
-    for conflict in conflicts:
-        image = conflict.get("image", "unknown")
-        existing = conflict.get("existing_label", "?")
-        incoming = conflict.get("incoming_label", "?")
-        iou = conflict.get("iou")
-        suffix = f" (IoU {iou:.3f})" if isinstance(iou, (int, float)) else ""
-        examples.append(f"{image}: {existing} vs {incoming}{suffix}")
-        if len(examples) >= limit:
-            break
-    return examples
 
 
 def build_conversion_preflight(
@@ -79,86 +38,62 @@ def build_conversion_preflight(
         notices.append(_notice(
             "critical",
             "no_records",
-            "변환할 수 있는 라벨 레코드가 없습니다.",
-            "입력 라벨 파일이 비어 있거나 지원 schema인지 확인하세요.",
+            "변환할 수 있는 라벨 데이터가 없습니다.",
+            "입력 라벨 파일이 비어 있거나 지원하는 파일 형식인지 확인하세요.",
         ))
 
     failed_files = summary.get("failed_files", [])
     if failed_files:
-        files = _sample_paths(failed_files)
         notices.append(_notice(
             "warning",
             "import_failed_files",
             f"{len(failed_files)}개 라벨 파일을 읽지 못했습니다.",
-            f"확인할 파일: {', '.join(files)}" if files else "conversion_report.json의 input_summary.failed_files를 확인하세요.",
+            "입력 데이터 문제 상세의 실패 원인을 확인해 라벨 형식이 실제 파일 내용과 맞는지 점검하고, 리포트/metrics 파일은 라벨 입력 폴더에서 분리하세요.",
             count=len(failed_files),
-            files=files,
-            details=failed_files[:5],
         ))
 
     skipped_files = summary.get("skipped_files", [])
     if skipped_files:
-        files = _sample_paths(skipped_files)
         notices.append(_notice(
             "info",
             "skipped_unrecognized_files",
-            f"{len(skipped_files)}개 파일은 지원 라벨 schema로 판별되지 않아 건너뛰었습니다.",
-            f"건너뛴 파일: {', '.join(files)}. 의도한 라벨 파일이면 포맷을 명시하거나 schema를 지원 형식에 맞게 정리하세요.",
+            f"{len(skipped_files)}개 파일은 지원하는 라벨 파일 형식으로 판별되지 않아 건너뛰었습니다.",
+            "의도한 라벨 파일이면 파일 형식을 명시하거나 지원하는 라벨 형식에 맞게 정리하세요.",
             count=len(skipped_files),
-            files=files,
-            details=skipped_files[:5],
         ))
 
     for source in summary.get("processed_files", []):
         if source.get("format") != "yolo":
             continue
-        duplicate_rows = source.get("duplicate_label_rows") or []
-        if duplicate_rows:
-            files = _sample_paths(duplicate_rows)
-            examples = []
-            for item in duplicate_rows[:5]:
-                row = (item.get("rows") or [{}])[0]
-                line = row.get("line")
-                first_line = row.get("first_line")
-                location = f"{_short_path(item.get('path'))}: line {line}"
-                if first_line:
-                    location += f" duplicates line {first_line}"
-                examples.append(location)
-            notices.append(_notice(
-                "warning",
-                "duplicate_label_rows",
-                f"동일한 YOLO 라벨 row 중복이 {sum(item.get('count', 0) for item in duplicate_rows)}건 발견됐습니다.",
-                f"중복 라벨을 확인하세요: {', '.join(examples)}. 의도한 중복이 아니면 하나만 남기세요.",
-                count=sum(item.get("count", 0) for item in duplicate_rows),
-                files=files,
-                examples=examples,
-                details=duplicate_rows[:5],
-            ))
         mapping = source.get("class_mapping", {})
         if mapping.get("status") == "missing":
-            source_name = _short_path(source.get("path"))
             notices.append(_notice(
                 "warning",
                 "missing_yolo_class_mapping",
-                f"YOLO class mapping 파일을 찾지 못해 {source_name}의 class id를 문자 라벨로 처리했습니다.",
-                f"{source_name}와 같은 폴더에 data.yaml, dataset.yaml 또는 classes.txt를 두거나 classes_path로 지정하세요.",
+                "YOLO class mapping 파일을 찾지 못해 class id를 문자열 라벨로 처리했습니다.",
+                "data.yaml, dataset.yaml 또는 classes.txt를 입력 라벨 폴더에 두거나 --classes/classes_path로 지정하세요.",
                 source=source.get("path"),
                 searched=mapping.get("searched", []),
-                files=[source_name] if source_name else [],
             ))
 
     merge = summary.get("merge", {})
     conflicts = merge.get("conflicts", [])
     if conflicts:
-        examples = _conflict_examples(conflicts)
         notices.append(_notice(
             "warning",
             "label_conflicts",
             f"동일 위치 라벨에서 클래스명이 다른 충돌 {len(conflicts)}건을 발견했습니다.",
-            f"충돌 데이터: {', '.join(examples)}. taxonomy나 class alias를 정리하세요.",
+            "input_summary.merge.conflicts를 확인해 taxonomy나 class alias를 정리하세요.",
             count=len(conflicts),
-            examples=examples,
-            details=conflicts[:5],
+        ))
+    label_normalizations = merge.get("label_normalizations", [])
+    if label_normalizations:
+        notices.append(_notice(
+            "info",
+            "numeric_label_normalized",
+            f"겹치는 라벨을 기준으로 숫자 클래스 라벨 {len(label_normalizations)}건을 실제 클래스명으로 정규화했습니다.",
+            "input_summary.merge.label_normalizations를 확인해 추론된 class id와 클래스명이 의도와 일치하는지 검토하세요.",
+            count=len(label_normalizations),
         ))
 
     if validation_records:
@@ -168,25 +103,19 @@ def build_conversion_preflight(
             for issue in record.get("issues", [])
         )
         if issue_counts.get("missing_image"):
-            examples = [
-                record.get("image", "")
-                for record in validation_records
-                if any(_issue_code(issue) == "missing_image" for issue in record.get("issues", []))
-            ][:5]
             notices.append(_notice(
-                "critical",
+                "warning",
                 "missing_images",
-                f"이미지 파일을 찾지 못한 레코드가 {issue_counts['missing_image']}개 있습니다.",
-                f"이미지 파일을 확인하세요: {', '.join(examples)}. 라벨 filename/stem과 이미지 디렉터리 구성을 맞춘 뒤 다시 실행하세요.",
+                f"이미지 파일을 찾지 못한 데이터가 {issue_counts['missing_image']}개 있습니다.",
+                "라벨 파일만 점검하는 경우 계속 진행할 수 있지만, COCO/Pascal VOC처럼 이미지 크기가 필요한 출력은 이미지 디렉터리 연결 후 다시 실행하세요.",
                 count=issue_counts["missing_image"],
-                examples=examples,
             ))
         if issue_counts.get("image_open_failed") or issue_counts.get("invalid_image_size"):
             count = issue_counts.get("image_open_failed", 0) + issue_counts.get("invalid_image_size", 0)
             notices.append(_notice(
                 "critical",
                 "invalid_images",
-                f"이미지 크기를 읽을 수 없는 레코드가 {count}개 있습니다.",
+                f"이미지 크기를 읽을 수 없는 데이터가 {count}개 있습니다.",
                 "손상 이미지 또는 지원하지 않는 이미지 형식을 교체하세요.",
                 count=count,
             ))
