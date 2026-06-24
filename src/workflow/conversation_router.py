@@ -41,6 +41,17 @@ evaluation, reports, and workspace usage concisely. Do not claim that a file ope
 do not create an execution plan, and do not invent dataset results.
 """
 
+CLASS_NORMALIZER_SYSTEM_PROMPT = """
+You normalize user-requested visual object classes for open-vocabulary vision models.
+Extract only concrete visual object categories that the user wants to detect/segment/track.
+Translate every class to a common English singular class name suitable for Grounding DINO.
+Preserve the user's class order.
+Do not include output formats, dataset names, task names, verbs, paths, thresholds, or model names.
+Return JSON only:
+{"labels": ["person", "car"]}
+If no concrete object class is requested, return {"labels": []}.
+"""
+
 ACTION_INTENTS = {
     "convert_labels": "convert",
     "generate_labels": "generate",
@@ -51,6 +62,10 @@ ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json", "cust
 ALLOWED_TASKS = {
     "classification", "object_detection", "segmentation", "pose_estimation", "ocr", "tracking", "all",
 }
+OPEN_VOCAB_TASK_WORDS = (
+    "검출", "탐지", "찾아", "찾아줘", "세그멘테이션", "분할",
+    "detect", "find", "segment", "segmentation", "track",
+)
 
 
 class IntentParameters(BaseModel):
@@ -199,6 +214,49 @@ class ChatNode:
         return _call_model(self.model_name, CHAT_SYSTEM_PROMPT, request, False).strip()
 
 
+def _request_mentions_open_vocab_classes(request: str) -> bool:
+    text = request.lower()
+    return any(word in text for word in OPEN_VOCAB_TASK_WORDS)
+
+
+def _proposal_needs_class_normalization(proposal: Dict[str, Any], request: str) -> bool:
+    operations = proposal.get("plan", {}).get("operations", [])
+    if len(operations) != 1:
+        return False
+    operation = operations[0]
+    if operation.get("action") != "generate":
+        return False
+    if operation.get("task_type") not in {"object_detection", "segmentation", "tracking"}:
+        return False
+    prompt = str(operation.get("prompt") or request).lower()
+    if "names:" in prompt or "classes:" in prompt or "class_names:" in prompt or "labels:" in prompt:
+        return False
+    return _request_mentions_open_vocab_classes(request)
+
+
+def _normalize_class_labels(
+    request: str,
+    model_name: Optional[str] = None,
+    caller: Optional[Callable[[str], Dict[str, Any]]] = None,
+) -> tuple[list[str], Optional[str]]:
+    try:
+        if caller:
+            payload = caller(request)
+        else:
+            model = model_name or os.getenv("CLASS_NORMALIZER_MODEL") or resolve_planner_model()
+            payload = extract_json(_call_model(model, CLASS_NORMALIZER_SYSTEM_PROMPT, request, True))
+        labels = payload.get("labels", []) if isinstance(payload, dict) else []
+        normalized = []
+        for label in labels:
+            value = str(label).strip().lower()
+            if not value or any(char in value for char in "\n\r\t"):
+                continue
+            normalized.append(value)
+        return list(dict.fromkeys(normalized)), None
+    except Exception as exc:
+        return [], str(exc)
+
+
 def _build_conversation_plan_with_overrides(
     request: str,
     workspace: str,
@@ -230,6 +288,7 @@ def handle_conversation(
     workspace: str,
     intent_router: Optional[IntentRouter] = None,
     chat_node: Optional[ChatNode] = None,
+    class_normalizer_caller: Optional[Callable[[str], Dict[str, Any]]] = None,
     minimum_confidence: float = 0.65,
 ) -> Dict[str, Any]:
     model_diagnosis = diagnose_model_dataset_request(request, workspace)
@@ -270,8 +329,26 @@ def handle_conversation(
     if editor_request:
         editor_request["route_source"] = "rules"
         return editor_request
+
     try:
-        proposal = conversation_module.build_conversation_plan(request, workspace)
+        proposal = _build_conversation_plan_with_overrides(
+            request,
+            workspace,
+            {},
+        )
+        if _proposal_needs_class_normalization(proposal, request):
+            class_labels, class_error = _normalize_class_labels(request, caller=class_normalizer_caller)
+            class_overrides: Dict[str, Any] = {}
+            if class_labels:
+                class_overrides["normalized_class_labels"] = class_labels
+            if class_error:
+                class_overrides["class_normalizer_error"] = class_error
+            if class_overrides:
+                proposal = _build_conversation_plan_with_overrides(
+                    request,
+                    workspace,
+                    class_overrides,
+                )
         return {"kind": "plan", "proposal": proposal, "route_source": "rules"}
     except ValueError as rule_error:
         message = str(rule_error)
@@ -315,6 +392,14 @@ def handle_conversation(
         overrides = route.parameters.model_dump(exclude_none=True)
         overrides["action"] = ACTION_INTENTS[route.intent]
         proposal = _build_conversation_plan_with_overrides(request, workspace, overrides)
+        if _proposal_needs_class_normalization(proposal, request):
+            class_labels, class_error = _normalize_class_labels(request, caller=class_normalizer_caller)
+            if class_labels:
+                overrides["normalized_class_labels"] = class_labels
+            if class_error:
+                overrides["class_normalizer_error"] = class_error
+            if class_labels or class_error:
+                proposal = _build_conversation_plan_with_overrides(request, workspace, overrides)
         proposal["warnings"].append("규칙 기반 해석이 불충분하여 LLM Intent Router로 의도를 보완했습니다.")
         return {
             "kind": "plan",

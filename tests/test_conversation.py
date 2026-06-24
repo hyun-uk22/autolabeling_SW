@@ -5,11 +5,15 @@ from pathlib import Path
 
 from PIL import Image
 
+from src.core.models import DetectionResult
+from src.workflow.graph import build_workflow_graph
 from src.workflow.conversation import build_conversation_plan, build_label_editor_request, describe_plan, discover_workspace
 from src.workflow import conversation_router as conversation_router_module
 from src.workflow.conversation_router import ChatNode, IntentRouter, handle_conversation
+from src.workflow.models import OperationPlan, WorkflowPlan
 from src.workflow.plan_patcher import revise_pending_proposal
 from src.workflow.service import execute_workflow_plan
+from src.utils.label_importer import extract_class_names_from_text
 
 
 class ConversationWorkflowTests(unittest.TestCase):
@@ -672,8 +676,9 @@ path: {test_images}
             self.assertEqual(operation["action"], "generate")
             self.assertEqual(operation["specialist_consistency_runs"], 0)
             self.assertEqual(operation["specialist_advisor_mode"], "none")
-            self.assertIn("Specialist 재추론", description)
-            self.assertIn("재추론 Advisor", description)
+            self.assertIn("- 태스크: `object_detection`", description)
+            self.assertNotIn("Specialist 재추론", description)
+            self.assertNotIn("재추론 Advisor", description)
 
     def test_llm_router_generate_plan_starts_with_first_pass_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -735,6 +740,118 @@ path: {test_images}
             self.assertEqual(Path(operation["img_dir"]).resolve(), image_root.resolve())
             self.assertIn("이미지 1개", proposal["summary"])
 
+    def test_generation_plan_warns_when_open_vocab_task_has_no_class_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            Image.new("RGB", (10, 10), "white").save(root / "data" / "raw" / "sample.jpg")
+
+            proposal = build_conversation_plan("현재 데이터셋에 대해서 coco 형식으로 segmentation 라벨 생성해줘", root)
+
+            self.assertTrue(any("찾을 클래스명이 필요" in warning for warning in proposal["warnings"]))
+
+    def test_generation_prompt_class_sentence_is_parsed_as_candidate_labels(self):
+        labels = extract_class_names_from_text("검출 대상 클래스: person, car, dining table")
+
+        self.assertEqual(labels, ["person", "car", "dining table"])
+
+    def test_freeform_quoted_class_list_is_parsed_as_candidate_labels(self):
+        prompt = (
+            "'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', "
+            "'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person', "
+            "'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor' "
+            "이 클래스만을 바탕으로 segmentation 진행해줘."
+        )
+
+        self.assertEqual(
+            extract_class_names_from_text(prompt),
+            [
+                "aeroplane",
+                "bicycle",
+                "bird",
+                "boat",
+                "bottle",
+                "bus",
+                "car",
+                "cat",
+                "chair",
+                "cow",
+                "diningtable",
+                "dog",
+                "horse",
+                "motorbike",
+                "person",
+                "pottedplant",
+                "sheep",
+                "sofa",
+                "train",
+                "tvmonitor",
+            ],
+        )
+
+    def test_generation_plan_accepts_freeform_quoted_class_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            Image.new("RGB", (10, 10), "white").save(root / "data" / "raw" / "sample.jpg")
+
+            proposal = build_conversation_plan(
+                "'aeroplane', 'bicycle', 'bird', 'boat', 'bottle' 이 클래스만을 바탕으로 segmentation 진행해줘.",
+                root,
+            )
+
+            self.assertFalse(any("찾을 클래스명이 필요" in warning for warning in proposal["warnings"]))
+
+    def test_korean_natural_class_prompt_is_translated_to_english_labels(self):
+        labels = extract_class_names_from_text("사람 차 개 고양이 자전거 찾아줘")
+
+        self.assertEqual(labels, ["person", "car", "dog", "cat", "bicycle"])
+
+    def test_generation_plan_accepts_korean_class_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            Image.new("RGB", (10, 10), "white").save(root / "data" / "raw" / "sample.jpg")
+
+            proposal = build_conversation_plan("사람 차 개 고양이 자전거 찾아줘. segmentation으로 coco 라벨 생성해줘", root)
+
+            self.assertFalse(any("검출 대상 클래스 목록이 필요" in warning for warning in proposal["warnings"]))
+
+    def test_conversation_normalizes_unmapped_korean_classes_with_llm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            Image.new("RGB", (10, 10), "white").save(root / "data" / "raw" / "sample.jpg")
+
+            routed = handle_conversation(
+                "소화전이랑 신호등 찾아줘. segmentation으로 coco 라벨 생성해줘",
+                str(root),
+                class_normalizer_caller=lambda request: {"labels": ["fire hydrant", "traffic light"]},
+            )
+            operation = routed["proposal"]["plan"]["operations"][0]
+
+            self.assertEqual(routed["kind"], "plan")
+            self.assertIn("classes: fire hydrant, traffic light", operation["prompt"])
+            self.assertTrue(any("영어 specialist labels" in warning for warning in routed["proposal"]["warnings"]))
+            self.assertFalse(any("검출 대상 클래스 목록이 필요" in warning for warning in routed["proposal"]["warnings"]))
+
+    def test_conversation_uses_llm_class_normalizer_for_freeform_object_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            Image.new("RGB", (10, 10), "white").save(root / "data" / "raw" / "sample.jpg")
+            calls = []
+
+            routed = handle_conversation(
+                "도로 주변에 있는 위험 표지랑 횡단보도 신호 같은 것만 찾아서 segmentation 진행해줘",
+                str(root),
+                class_normalizer_caller=lambda request: calls.append(request) or {"labels": ["traffic sign", "traffic light"]},
+            )
+            operation = routed["proposal"]["plan"]["operations"][0]
+
+            self.assertEqual(len(calls), 1)
+            self.assertIn("classes: traffic sign, traffic light", operation["prompt"])
+
     def test_llm_plan_patch_updates_allowed_fields_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -760,6 +877,116 @@ path: {test_images}
             self.assertTrue(operation["strict"])
             self.assertEqual(Path(operation["out_dir"]), (root / "data" / "converted_test").resolve())
             self.assertTrue(any("out_dir" in change for change in revision["changes"]))
+
+    def test_pending_generate_plan_can_patch_task_type_from_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            proposal = build_conversation_plan("현재 이미지들을 COCO 형식으로 라벨링 생성해줘", root)
+
+            revision = revise_pending_proposal(
+                "태스크는 segmentation으로 바꿔줘",
+                proposal,
+                root,
+                caller=lambda _: self.fail("task-only patch should not call the LLM patcher"),
+            )
+            operation = revision["proposal"]["plan"]["operations"][0]
+            description = describe_plan(revision["proposal"], root)
+
+            self.assertEqual(revision["kind"], "patch")
+            self.assertEqual(operation["task_type"], "segmentation")
+            self.assertIn("task_type", revision["changes"][0])
+            self.assertIn("segmentation 라벨 생성", revision["proposal"]["summary"])
+            self.assertNotIn("object_detection 라벨 생성", revision["proposal"]["summary"])
+            self.assertIn("- 태스크: `segmentation`", description)
+
+    def test_pending_generate_plan_patches_task_and_freeform_class_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            proposal = build_conversation_plan("현재 데이터셋을 기준으로 coco 형식의 라벨 만들어줘", root)
+
+            revision = revise_pending_proposal(
+                "'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', "
+                "'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person', "
+                "'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor' "
+                "이 클래스만을 바탕으로 segmentation 진행해줘.",
+                proposal,
+                root,
+                caller=lambda _: self.fail("deterministic task/class patch should not call the LLM patcher"),
+            )
+            operation = revision["proposal"]["plan"]["operations"][0]
+
+            self.assertEqual(operation["task_type"], "segmentation")
+            self.assertIn("classes: aeroplane, bicycle, bird", operation["prompt"])
+            self.assertFalse(any("검출 대상 클래스 목록이 필요" in warning for warning in revision["proposal"]["warnings"]))
+            self.assertFalse(any("찾을 클래스명이 필요" in warning for warning in revision["proposal"]["warnings"]))
+
+    def test_specialist_first_draft_failure_does_not_loop_forever(self):
+        class EmptySpecialistDraftFailRuntime:
+            def plan(self, request, supplied_plan=None):
+                return WorkflowPlan.model_validate(supplied_plan)
+
+            def prepare_generation(self, operation):
+                return {
+                    "images": ["sample.jpg"],
+                    "low_model": "low",
+                    "high_model": "high",
+                    "warnings": [],
+                }
+
+            def run_specialists(self, image_path, operation, result):
+                return {
+                    "result": DetectionResult(task_type=operation.task_type),
+                    "records": [],
+                    "first_pass_report": {},
+                    "specialist_consistency": {},
+                    "elapsed_sec": 0.0,
+                }
+
+            def generate_drafts(self, image_path, operation):
+                raise RuntimeError("draft model is unavailable")
+
+            def needs_high_verification(self, operation, result, plugin_records, issues):
+                raise ValueError("LOW_MODEL and HIGH_MODEL are identical.")
+
+            def export_generation(self, operation, records):
+                return {
+                    "action": "generate",
+                    "images": len(records),
+                    "total_labels": 0,
+                }
+
+            def save_history(self, output_dir, history):
+                return "workflow_history.json"
+
+        operation = OperationPlan(
+            action="generate",
+            task_type="segmentation",
+            img_dir="samples",
+            out_dir="data/labeled",
+            formats=["coco"],
+            generation_strategy="specialist_first",
+        )
+        plan = WorkflowPlan(request_summary="segmentation label generation", operations=[operation])
+        graph = build_workflow_graph(EmptySpecialistDraftFailRuntime())
+
+        result = graph.invoke(
+            {
+                "request": "",
+                "supplied_plan": plan.model_dump(),
+                "auto_approve": True,
+                "thread_id": "draft-failure-test",
+                "history": [],
+                "errors": [],
+            },
+            config={"recursion_limit": 50},
+        )
+
+        self.assertEqual(result["status"], "completed_with_errors")
+        self.assertEqual(result["operation_outputs"][0]["images"], 1)
+        self.assertTrue(any("draft model is unavailable" in error for error in result["errors"]))
+        self.assertTrue(any("LOW_MODEL and HIGH_MODEL are identical" in error for error in result["errors"]))
 
     def test_llm_plan_patch_rejects_action_change_and_external_path(self):
         with tempfile.TemporaryDirectory() as directory:

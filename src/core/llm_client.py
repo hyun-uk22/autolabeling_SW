@@ -18,19 +18,71 @@ from .models import (
 
 load_dotenv()
 
-def extract_json(text: str) -> dict:
-    match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    # Additional cleanup for robust parsing
+
+def _strip_json_fence(text: str) -> str:
     text = text.strip()
-    if text.startswith('```') and text.endswith('```'):
-        text = text[3:-3].strip()
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()
+    return text
+
+
+def _balanced_json_slice(text: str) -> str:
+    start_candidates = [index for index in (text.find("{"), text.find("[")) if index >= 0]
+    if not start_candidates:
+        return text
+    start = min(start_candidates)
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return text[start:]
+
+
+def extract_json(text: str, strict: bool = False) -> dict:
+    cleaned = _balanced_json_slice(_strip_json_fence(text or ""))
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        print(f"[Warning] Failed to parse JSON. Raw output: {text[:100]}...")
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        print(f"[Warning] Failed to parse JSON. Raw output: {cleaned[:200]}...")
+        if strict:
+            raise ValueError(f"Failed to parse JSON response: {exc}") from exc
         return {"boxes": []}
+
+
+def llm_max_tokens(task_type: str = "") -> int:
+    configured = os.getenv("VISION_LLM_MAX_TOKENS") or os.getenv("LLM_MAX_TOKENS")
+    if configured:
+        try:
+            return max(1024, int(configured))
+        except ValueError:
+            pass
+    if task_type in {"segmentation", "pose_estimation", "all"}:
+        return 4096
+    return 2048
 
 def normalize_coordinate(value) -> float:
     coord = float(value)
@@ -247,7 +299,7 @@ class VisionLLMClient:
                 elif self.provider == "anthropic":
                     response = self.client.messages.create(
                         model=self.model_name,
-                        max_tokens=1024,
+                        max_tokens=llm_max_tokens(task_type),
                         temperature=temperature,
                         system=system_msg,
                         messages=[
@@ -272,7 +324,7 @@ class VisionLLMClient:
                 elif self.provider == "bedrock":
                     body = {
                         "anthropic_version": "bedrock-2023-05-31",
-                        "max_tokens": 1024,
+                        "max_tokens": llm_max_tokens(task_type),
                         "temperature": temperature,
                         "system": system_msg,
                         "messages": [
@@ -301,7 +353,7 @@ class VisionLLMClient:
                     response_body = json.loads(response["body"].read())
                     content = response_body["content"][0]["text"]
 
-                data = extract_json(content)
+                data = extract_json(content, strict=True)
                 result = parse_labeling_result(data, task_type)
                 
                 self.successful_predictions += 1
@@ -345,7 +397,7 @@ class VisionLLMClient:
                 elif self.provider == "anthropic":
                     response = self.client.messages.create(
                         model=self.model_name,
-                        max_tokens=1024,
+                        max_tokens=llm_max_tokens(),
                         temperature=temperature,
                         system=system_msg,
                         messages=[
@@ -369,7 +421,7 @@ class VisionLLMClient:
                 elif self.provider == "bedrock":
                     body = {
                         "anthropic_version": "bedrock-2023-05-31",
-                        "max_tokens": 1024,
+                        "max_tokens": llm_max_tokens(),
                         "temperature": temperature,
                         "system": system_msg,
                         "messages": [
@@ -400,7 +452,7 @@ class VisionLLMClient:
                 else:
                     raise ValueError(f"Unsupported provider: {self.provider}")
                 self.successful_predictions += 1
-                return extract_json(content)
+                return extract_json(content, strict=True)
             except Exception as exc:
                 if attempt == self.max_retries - 1:
                     self.failed_predictions += 1

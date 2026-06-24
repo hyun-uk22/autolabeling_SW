@@ -11,7 +11,8 @@ from PIL import Image, ImageEnhance
 from ..agents.insight_agent import DatasetInsightAgent
 from ..agents.verification_agent import HierarchicalVerificationAgent
 from ..core.llm_client import VisionLLMClient
-from ..core.model_config import required_api_keys, resolve_model_names, validate_cascade_setup
+from ..core.llm_client import extract_json
+from ..core.model_config import is_bedrock_model, required_api_keys, resolve_model_names, validate_cascade_setup, resolve_planner_model
 from ..core.models import DetectionResult
 from ..plugins.orchestrator import TaskPluginOrchestrator
 from ..plugins.registry import load_generation_plugins
@@ -123,9 +124,9 @@ def _llm_review_queue(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         comparisons = llm_consistency.get("comparisons") or []
         agreements = [
-            (comparison.get("bbox_agreement") or {}).get("agreement")
+            comparison.get("agreement", (comparison.get("bbox_agreement") or {}).get("agreement"))
             for comparison in comparisons
-            if (comparison.get("bbox_agreement") or {}).get("agreement") is not None
+            if comparison.get("agreement", (comparison.get("bbox_agreement") or {}).get("agreement")) is not None
         ]
         review_rows.append({
             "image": record.get("image", ""),
@@ -140,6 +141,8 @@ def _llm_review_queue(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "level": comparison.get("level"),
                     "model": comparison.get("model"),
                     "bbox_agreement": (comparison.get("bbox_agreement") or {}).get("agreement"),
+                    "agreement": comparison.get("agreement", (comparison.get("bbox_agreement") or {}).get("agreement")),
+                    "result_consistency": comparison.get("result_consistency"),
                     "mean_matched_iou": (comparison.get("bbox_agreement") or {}).get("mean_matched_iou"),
                     "pseudo_precision": (comparison.get("bbox_agreement") or {}).get("pseudo_precision"),
                     "pseudo_recall": (comparison.get("bbox_agreement") or {}).get("pseudo_recall"),
@@ -187,10 +190,24 @@ def _class_counts(result: DetectionResult) -> Dict[str, int]:
     return counts
 
 
+INSIGHT_ADVISOR_SYSTEM_PROMPT = """
+You are a dataset balance advisor for a vision labeling tool.
+Use only the provided rule-based statistics. Do not recalculate counts.
+Return Korean JSON only:
+{
+  "summary": "one concise sentence",
+  "priority_classes": ["class_a"],
+  "suggestions": ["actionable Korean suggestion"]
+}
+Mention every class tied for the most severe shortage. Keep suggestions practical for data collection, sampling, and augmentation.
+"""
+
+
 class WorkflowRuntime:
-    def __init__(self, planner_model: Optional[str] = None, allow_same_model: bool = False):
+    def __init__(self, planner_model: Optional[str] = None, allow_same_model: bool = False, insight_advisor=None):
         self.planner = WorkflowPlanner(planner_model)
         self.allow_same_model = allow_same_model
+        self.insight_advisor = insight_advisor
         self._generation_key = None
         self._plugin_key = None
         self._vlm_key = None
@@ -207,6 +224,96 @@ class WorkflowRuntime:
     def analyze_dataset(operation: OperationPlan, results: List[DetectionResult]) -> Dict[str, Any]:
         agent = DatasetInsightAgent(operation.insight_imbalance_ratio)
         return agent.analyze(results)
+
+    def _call_text_llm_json(self, system_prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        model_name = os.getenv("DATASET_INSIGHT_MODEL") or os.getenv("INSIGHT_ADVISOR_MODEL") or resolve_planner_model()
+        prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        if is_bedrock_model(model_name):
+            import boto3
+
+            client = boto3.client(
+                "bedrock-runtime",
+                region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+            )
+            body = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1024,
+                "temperature": 0.0,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            }
+            response = client.invoke_model(
+                modelId=model_name.removeprefix("bedrock:"),
+                body=json.dumps(body),
+                contentType="application/json",
+                accept="application/json",
+            )
+            return extract_json(json.loads(response["body"].read())["content"][0]["text"])
+        if "gpt" in model_name.lower():
+            from openai import OpenAI
+
+            response = OpenAI(api_key=os.getenv("OPENAI_API_KEY")).chat.completions.create(
+                model=model_name,
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            return extract_json(response.choices[0].message.content or "{}")
+        if "claude" in model_name.lower():
+            from anthropic import Anthropic
+
+            response = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")).messages.create(
+                model=model_name,
+                max_tokens=1024,
+                temperature=0.0,
+                system=system_prompt,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return extract_json(response.content[0].text)
+        raise ValueError(f"Unsupported insight advisor model: {model_name}")
+
+    def advise_dataset_insight(self, operation: OperationPlan, insight: Dict[str, Any]) -> Dict[str, Any]:
+        if not insight.get("distribution") or insight.get("status") == "empty":
+            return insight
+        payload = {
+            "task_type": operation.task_type,
+            "formats": operation.formats,
+            "imbalance_ratio_threshold": operation.insight_imbalance_ratio,
+            "rule_based_insight": insight,
+        }
+        try:
+            advisor_output = (
+                self.insight_advisor(payload)
+                if self.insight_advisor
+                else self._call_text_llm_json(INSIGHT_ADVISOR_SYSTEM_PROMPT, payload)
+            )
+            suggestions = [
+                str(item).strip()
+                for item in advisor_output.get("suggestions", [])
+                if str(item).strip()
+            ]
+            if not suggestions:
+                return insight
+            advised = dict(insight)
+            advised["rule_based_suggestions"] = list(insight.get("suggestions", []))
+            advised["suggestions"] = suggestions
+            advised["llm_advisor"] = {
+                "enabled": True,
+                "summary": str(advisor_output.get("summary", "")).strip(),
+                "priority_classes": [
+                    str(item).strip()
+                    for item in advisor_output.get("priority_classes", [])
+                    if str(item).strip()
+                ],
+            }
+            return advised
+        except Exception as exc:
+            advised = dict(insight)
+            advised["llm_advisor"] = {"enabled": False, "error": str(exc)}
+            return advised
 
     def prepare_generation(self, operation: OperationPlan) -> Dict[str, Any]:
         os.makedirs(operation.img_dir, exist_ok=True)
@@ -286,6 +393,18 @@ class WorkflowRuntime:
         )
         self._vlm_key = key
         return messages
+
+    def _ensure_llm_consistency_client(self, level: str, model_name: str) -> VisionLLMClient:
+        missing_keys = [key for key in required_api_keys(model_name, "") if not os.getenv(key)]
+        if missing_keys:
+            raise ValueError(f"Missing API key(s): {', '.join(missing_keys)}")
+        if level == "low":
+            if self.low_client is None or self.low_client.model_name != model_name:
+                self.low_client = VisionLLMClient(model_name)
+            return self.low_client
+        if self.high_client is None or self.high_client.model_name != model_name:
+            self.high_client = VisionLLMClient(model_name)
+        return self.high_client
 
     def _ensure_generation_for_operation(self, operation: OperationPlan) -> None:
         low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
@@ -493,15 +612,20 @@ class WorkflowRuntime:
         if mode == "none" or count_result_labels(base_result) <= 0:
             return {"enabled": False, "reason": "disabled_or_empty"}
         low_model, high_model = resolve_model_names(operation.low_model, operation.high_model)
-        self._ensure_vlm_clients(operation, low_model, high_model)
         selected = []
         if mode in {"low", "both"}:
-            selected.append(("low", self.low_client))
+            selected.append(("low", low_model))
         if mode in {"high", "both"}:
-            selected.append(("high", self.high_client))
+            selected.append(("high", high_model))
+        if mode == "both":
+            self._ensure_vlm_clients(operation, low_model, high_model)
 
         comparisons = []
-        for level, client in selected:
+        for level, model_name in selected:
+            if mode == "both":
+                client = self.low_client if level == "low" else self.high_client
+            else:
+                client = self._ensure_llm_consistency_client(level, model_name)
             before = client.api_attempts
             started = time.perf_counter()
             llm_result = client.predict(
@@ -513,7 +637,8 @@ class WorkflowRuntime:
             llm_result.source_model = client.model_name
             bbox = _bbox_agreement(base_result, llm_result)
             consistency = compute_result_consistency(base_result, llm_result)
-            agreement = bbox.get("agreement", consistency)
+            has_box_comparison = bool(bbox.get("base_boxes") or bbox.get("rerun_boxes"))
+            agreement = bbox.get("agreement", consistency) if has_box_comparison else consistency
             review_required = agreement < operation.threshold
             comparisons.append({
                 "level": level,
@@ -522,15 +647,21 @@ class WorkflowRuntime:
                 "elapsed_sec": time.perf_counter() - started,
                 "result": llm_result.model_dump(),
                 "result_consistency": consistency,
+                "agreement": agreement,
                 "bbox_agreement": bbox,
                 "review_required": review_required,
                 "threshold": operation.threshold,
             })
 
         agreements = [
-            item["bbox_agreement"].get("agreement")
+            item.get("agreement")
             for item in comparisons
-            if item.get("bbox_agreement", {}).get("agreement") is not None
+            if item.get("agreement") is not None
+        ]
+        prediction_consistencies = [
+            item.get("result_consistency")
+            for item in comparisons
+            if item.get("result_consistency") is not None
         ]
         return {
             "enabled": True,
@@ -538,6 +669,10 @@ class WorkflowRuntime:
             "threshold": operation.threshold,
             "comparisons": comparisons,
             "mean_bbox_agreement": sum(agreements) / len(agreements) if agreements else None,
+            "mean_prediction_consistency": (
+                sum(prediction_consistencies) / len(prediction_consistencies)
+                if prediction_consistencies else None
+            ),
             "review_required": any(item.get("review_required") for item in comparisons),
         }
 
@@ -853,13 +988,19 @@ class WorkflowRuntime:
                 record.get("specialist_consistency") or {}
                 for record in records
             )
-            if (item or {}).get("enabled")
+            if (item.get("llm_consistency") or {}).get("enabled")
         ]
         llm_bbox_agreements = [
-            (comparison.get("bbox_agreement") or {}).get("agreement")
+            comparison.get("agreement", (comparison.get("bbox_agreement") or {}).get("agreement"))
             for item in llm_consistency_records
             for comparison in item.get("comparisons", [])
-            if (comparison.get("bbox_agreement") or {}).get("agreement") is not None
+            if comparison.get("agreement", (comparison.get("bbox_agreement") or {}).get("agreement")) is not None
+        ]
+        llm_prediction_consistencies = [
+            comparison.get("result_consistency")
+            for item in llm_consistency_records
+            for comparison in item.get("comparisons", [])
+            if comparison.get("result_consistency") is not None
         ]
         llm_review_rows = _llm_review_queue(records)
         llm_review_required = len(llm_review_rows)
@@ -931,12 +1072,19 @@ class WorkflowRuntime:
                     sum(llm_bbox_agreements) / len(llm_bbox_agreements)
                     if llm_bbox_agreements else None
                 ),
+                "llm_mean_prediction_consistency": (
+                    sum(llm_prediction_consistencies) / len(llm_prediction_consistencies)
+                    if llm_prediction_consistencies else None
+                ),
             },
             "evaluation": evaluation,
             "performance": build_generation_performance(
                 len(records), total_elapsed, low_attempts, high_attempts, escalation_count,
             ),
-            "dataset_insight": self.analyze_dataset(operation, exported_results),
+            "dataset_insight": self.advise_dataset_insight(
+                operation,
+                self.analyze_dataset(operation, exported_results),
+            ),
             "export_validation": {
                 "failed_records": sum(bool(record["issues"]) for record in export_records),
                 "artifact_issues": artifact_issues,
@@ -945,6 +1093,7 @@ class WorkflowRuntime:
             "llm_exports": llm_exports,
             "user_action_report": user_action_report,
             "artifacts": artifacts,
+            "records": [dict(record) for record in records],
         }
         summary_path = os.path.join(operation.out_dir, "run_summary.json")
         user_action_path = os.path.join(operation.out_dir, "user_action_report.json")
@@ -953,6 +1102,48 @@ class WorkflowRuntime:
         json_io.dump_file(user_action_report, user_action_path, ensure_ascii=False, indent=2)
         json_io.dump_file(summary, summary_path, ensure_ascii=False, indent=2)
         return summary
+
+    def run_llm_consistency_on_records(
+        self,
+        operation: OperationPlan,
+        records: List[Dict[str, Any]],
+        llm_mode: str,
+    ) -> Dict[str, Any]:
+        operation = operation.model_copy(update={
+            "llm_consistency_mode": llm_mode,
+            "specialist_consistency_runs": 0,
+            "specialist_advisor_mode": "none",
+        })
+        os.makedirs(operation.out_dir, exist_ok=True)
+        os.makedirs(operation.vis_dir, exist_ok=True)
+        updated_records = []
+        for record in records:
+            updated = dict(record)
+            base_result = DetectionResult.model_validate(record["result"])
+            image_path = os.path.join(operation.img_dir, record["image"])
+            llm_consistency = self._llm_consistency_rerun(image_path, operation, base_result)
+            specialist_consistency = dict(record.get("specialist_consistency") or {})
+            if llm_consistency.get("enabled"):
+                specialist_consistency["enabled"] = True
+                specialist_consistency["llm_consistency"] = llm_consistency
+            updated["specialist_consistency"] = specialist_consistency
+            comparisons = llm_consistency.get("comparisons") or []
+            updated["low_api_attempts"] = int(updated.get("low_api_attempts", 0)) + sum(
+                int(item.get("api_attempts", 0))
+                for item in comparisons
+                if item.get("level") == "low"
+            )
+            updated["high_api_attempts"] = int(updated.get("high_api_attempts", 0)) + sum(
+                int(item.get("api_attempts", 0))
+                for item in comparisons
+                if item.get("level") == "high"
+            )
+            updated["elapsed_sec"] = float(updated.get("elapsed_sec", 0.0)) + sum(
+                float(item.get("elapsed_sec", 0.0))
+                for item in comparisons
+            )
+            updated_records.append(updated)
+        return self.export_generation(operation, updated_records)
 
     def load_conversion(self, operation: OperationPlan, source_format: str) -> Dict[str, Any]:
         batch = import_labels_with_report(
@@ -1076,7 +1267,10 @@ class WorkflowRuntime:
                 "artifact_issues": artifact_issues,
             },
             "user_action_report": user_action_report,
-            "dataset_insight": self.analyze_dataset(operation, exported_results),
+            "dataset_insight": self.advise_dataset_insight(
+                operation,
+                self.analyze_dataset(operation, exported_results),
+            ),
             "records": validations,
             "exports": export_records,
             "artifacts": artifacts,

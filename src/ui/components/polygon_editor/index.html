@@ -62,7 +62,12 @@
         overflow: visible;
       }
       polygon {
-        pointer-events: none;
+        pointer-events: all;
+        cursor: pointer;
+      }
+      polygon.selected {
+        stroke: #dc2626;
+        stroke-width: 3;
       }
       rect.box {
         cursor: move;
@@ -106,6 +111,7 @@
       <button id="mode-edit" class="active" type="button">Point 드래그</button>
       <button id="mode-polygon" type="button" style="display: none;">Polygon 생성</button>
       <button id="mode-bbox" type="button">BBox 생성</button>
+      <button id="delete-polygon" type="button" disabled>선택 Polygon 삭제</button>
       <button id="finish-polygon" type="button" style="display: none;" disabled>Polygon 완료</button>
       <button id="cancel-draft" type="button" disabled>생성 취소</button>
       <input id="label-input" value="object" aria-label="label" />
@@ -144,6 +150,7 @@
         edit: document.getElementById("mode-edit"),
         polygon: document.getElementById("mode-polygon"),
         bbox: document.getElementById("mode-bbox"),
+        deletePolygon: document.getElementById("delete-polygon"),
         finish: document.getElementById("finish-polygon"),
         cancel: document.getElementById("cancel-draft"),
       };
@@ -158,6 +165,7 @@
       let drag = null;
       let draftPolygon = [];
       let draftBox = null;
+      let selectedSegmentIndex = null;
 
       function clone(value) {
         return JSON.parse(JSON.stringify(value));
@@ -202,6 +210,7 @@
           action,
           segments: state.segments,
           boxes: state.boxes,
+          selectedSegmentIndex,
           updatedAt: Date.now(),
         });
       }
@@ -209,6 +218,26 @@
       function updateDraftButtons() {
         buttons.finish.disabled = draftPolygon.length < 3;
         buttons.cancel.disabled = draftPolygon.length === 0 && draftBox === null;
+        buttons.deletePolygon.disabled = selectedSegmentIndex === null || selectedSegmentIndex < 0 || selectedSegmentIndex >= state.segments.length;
+      }
+
+      function selectSegment(segmentIndex) {
+        selectedSegmentIndex = segmentIndex;
+        statusEl.textContent = `segment ${segmentIndex} 선택됨`;
+        render();
+      }
+
+      function deleteSelectedPolygon() {
+        if (selectedSegmentIndex === null || selectedSegmentIndex < 0 || selectedSegmentIndex >= state.segments.length) {
+          statusEl.textContent = "삭제할 polygon을 먼저 선택하세요.";
+          return;
+        }
+        const deletedIndex = selectedSegmentIndex;
+        state.segments.splice(selectedSegmentIndex, 1);
+        selectedSegmentIndex = null;
+        statusEl.textContent = `segment ${deletedIndex} polygon을 삭제했습니다.`;
+        emit("delete_polygon");
+        render();
       }
 
       function finishPolygon() {
@@ -228,6 +257,7 @@
       function cancelDraft() {
         draftPolygon = [];
         draftBox = null;
+        selectedSegmentIndex = null;
         updateDraftButtons();
         statusEl.textContent = "생성을 취소했습니다.";
         render();
@@ -280,8 +310,14 @@
           const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
           polygon.setAttribute("points", segmentPoints(segment));
           polygon.setAttribute("fill", "rgba(37, 99, 235, 0.18)");
-          polygon.setAttribute("stroke", "#2563eb");
-          polygon.setAttribute("stroke-width", "2");
+          polygon.setAttribute("stroke", segmentIndex === selectedSegmentIndex ? "#dc2626" : "#2563eb");
+          polygon.setAttribute("stroke-width", segmentIndex === selectedSegmentIndex ? "3" : "2");
+          if (segmentIndex === selectedSegmentIndex) polygon.classList.add("selected");
+          polygon.addEventListener("pointerdown", (event) => {
+            if (mode !== "edit") return;
+            event.stopPropagation();
+            selectSegment(segmentIndex);
+          });
           svg.appendChild(polygon);
 
           const first = (segment.polygon || [])[0];
@@ -451,6 +487,7 @@
       buttons.edit.addEventListener("click", () => setMode("edit"));
       buttons.polygon.addEventListener("click", () => setMode("polygon"));
       buttons.bbox.addEventListener("click", () => setMode("bbox"));
+      buttons.deletePolygon.addEventListener("click", deleteSelectedPolygon);
       buttons.finish.addEventListener("click", finishPolygon);
       buttons.cancel.addEventListener("click", cancelDraft);
 
@@ -464,6 +501,7 @@
           segments: clone(args.segments || []),
           boxes: clone(args.boxes || []),
         };
+        selectedSegmentIndex = null;
         render();
       });
 

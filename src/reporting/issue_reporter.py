@@ -38,6 +38,7 @@ ISSUE_CATALOG = {
     "missing_category_id": ("high", "output_format", "COCO category_id가 누락되었습니다", "annotation의 category_id를 확인하세요."),
     "no_label_records": ("critical", "output_format", "Vision JSON에 유효한 라벨이 없습니다", "입력 결과와 task를 확인하세요."),
     "no_labels": ("critical", "output_format", "클래스 목록이 비어 있습니다", "생성된 객체의 클래스 이름을 확인하세요."),
+    "plugin_error": ("critical", "model_pipeline", "Vision 모델 실행 오류가 발생했습니다", "모델 설정과 검출 클래스 목록을 확인하세요."),
 }
 
 ISSUE_SUGGESTIONS = {
@@ -149,6 +150,10 @@ ISSUE_SUGGESTIONS = {
         "생성 결과 또는 입력 데이터에 클래스명이 있는지 확인하세요.",
         "YOLO 입력이라면 클래스 매핑 파일을 함께 제공하세요.",
     ],
+    "plugin_error": [
+        "Grounding DINO/Grounded SAM2 계열 모델은 검출 대상 클래스 목록이 필요합니다.",
+        "프롬프트에 찾을 클래스명을 명시하거나 classes.txt/data.yaml/plugin labels를 제공하세요.",
+    ],
 }
 
 FIX_INSTRUCTIONS = {
@@ -186,6 +191,7 @@ FIX_INSTRUCTIONS = {
     "missing_category_id": "COCO 출력 파일{target}의 annotation에 category_id를 추가하고 categories.id와 맞추세요.",
     "no_label_records": "Vision JSON 출력 파일{target}에 task와 호환되는 라벨 record가 생성되도록 입력 데이터를 확인하세요.",
     "no_labels": "클래스 목록{target}이 비어 있으므로 입력 라벨의 클래스명 또는 YOLO 클래스 매핑 파일을 확인하세요.",
+    "plugin_error": "Vision 모델 실행 오류{target}가 발생했습니다. 검출 대상 클래스 목록, plugin 설정, 모델 가중치/의존성을 확인하세요.",
 }
 
 

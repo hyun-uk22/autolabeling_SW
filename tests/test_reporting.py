@@ -103,6 +103,30 @@ class ReportingTests(unittest.TestCase):
         runtime_insight = WorkflowRuntime.analyze_dataset(operation, results)
         self.assertEqual(runtime_insight["status"], "balanced")
 
+    def test_dataset_insight_llm_advisor_interprets_rule_statistics(self):
+        results = []
+        for label, count in {"person": 22, "bird": 2, "train": 2, "cow": 2}.items():
+            for _ in range(count):
+                results.append(DetectionResult(boxes=[BoundingBox(
+                    label=label, xmin=0.1, ymin=0.1, xmax=0.2, ymax=0.2,
+                )]))
+        operation = OperationPlan(action="convert", insight_imbalance_ratio=3.0)
+        runtime = WorkflowRuntime(insight_advisor=lambda payload: {
+            "summary": "person이 과대표집되어 있고 bird, train, cow가 동일하게 부족합니다.",
+            "priority_classes": ["bird", "train", "cow"],
+            "suggestions": [
+                "bird, train, cow 샘플을 우선 수집하세요.",
+                "학습 sampler에서 bird, train, cow oversampling을 적용하세요.",
+            ],
+        })
+
+        insight = runtime.advise_dataset_insight(operation, runtime.analyze_dataset(operation, results))
+
+        self.assertEqual(insight["distribution"]["person"]["count"], 22)
+        self.assertEqual(insight["llm_advisor"]["priority_classes"], ["bird", "train", "cow"])
+        self.assertIn("bird, train, cow", insight["suggestions"][0])
+        self.assertTrue(insight["rule_based_suggestions"])
+
     def test_dataset_insight_agent_keeps_cli_accumulator_compatibility(self):
         agent = DatasetInsightAgent()
         agent.add_result(DetectionResult(boxes=[BoundingBox(

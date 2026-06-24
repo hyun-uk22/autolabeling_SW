@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 
 
@@ -80,7 +81,10 @@ from src.workflow.conversation import (
     describe_result,
 )
 from src.workflow.conversation_router import handle_conversation
+from src.workflow.models import OperationPlan
 from src.workflow.plan_patcher import revise_pending_proposal
+from src.workflow.runtime import WorkflowRuntime
+from src.ui.canvas_geometry import object_polygon_points
 from src.ui.polygon_editor import polygon_vertex_editor
 
 
@@ -373,6 +377,8 @@ def start_label_editor_issue_queue(workspace, files, context):
     st.session_state.editor_issue_context = context
     st.session_state.editor_loaded_context_signature = ""
     st.session_state.editor_selected_image_select = queue[0]
+    st.session_state.editor_auto_load = True
+    st.session_state.editor_open_notice = f"문제 파일 {len(queue)}개를 라벨 편집 큐로 보냈습니다."
     st.session_state.open_label_editor = True
     st.rerun()
 
@@ -400,6 +406,7 @@ def start_label_editor_context(workspace, context):
     st.session_state.editor_issue_context = {}
     st.session_state.editor_loaded_context_signature = ""
     st.session_state.editor_auto_load = True
+    st.session_state.editor_open_notice = "라벨 편집 탭으로 이동합니다."
     st.session_state.open_label_editor = True
 
 
@@ -468,7 +475,7 @@ def generation_editor_context_options(output):
                 context = workflow_editor_context(output)
                 context["label_path"] = str(Path(output_root) / level)
                 context["output_dir"] = context["label_path"]
-                options.append((f"{level.upper()} LMM 재생성 라벨", context))
+                options.append((f"{level.upper()} LLM 재생성 라벨", context))
     review_root = llm_exports.get("review_root")
     review_artifacts = llm_exports.get("review_artifacts") or {}
     if review_root:
@@ -477,7 +484,7 @@ def generation_editor_context_options(output):
                 context = workflow_editor_context(output)
                 context["label_path"] = str(Path(review_root) / level)
                 context["output_dir"] = context["label_path"]
-                options.append((f"{level.upper()} LMM 검토 후보 라벨", context))
+                options.append((f"{level.upper()} LLM 검토 후보 라벨", context))
     return options
 
 
@@ -661,13 +668,10 @@ def render_workflow_report(result, key_prefix="report"):
         )
         if action == "generate":
             performance = output.get("performance", {})
-            columns = st.columns(4)
+            columns = st.columns(3)
             columns[0].metric("처리 이미지", output.get("images", 0))
             columns[1].metric("생성 라벨", output.get("total_labels", 0))
             columns[2].metric("평균 처리 시간", f"{performance.get('avg_elapsed_sec', 0.0):.2f}초")
-            columns[3].metric("Escalation 비율", f"{performance.get('escalation_rate', 0.0) * 100:.1f}%")
-            if performance.get("estimation_notice"):
-                st.caption(performance["estimation_notice"])
             first_pass = output.get("first_pass_report", {})
             if first_pass.get("images"):
                 fp_columns = st.columns(3)
@@ -689,35 +693,39 @@ def render_workflow_report(result, key_prefix="report"):
                     "-" if mean_agreement is None else f"{mean_agreement * 100:.1f}%",
                 )
             if specialist_consistency.get("llm_enabled_images"):
-                st.markdown("**LMM 재생성 일관성 분석**")
+                st.markdown("**LLM 재생성 일관성 분석**")
                 llm_columns = st.columns(4)
-                llm_columns[0].metric("LMM 비교 이미지", specialist_consistency.get("llm_enabled_images", 0))
-                llm_columns[1].metric("LMM 모드", specialist_consistency.get("llm_mode", "none"))
-                llm_agreement = specialist_consistency.get("llm_mean_bbox_agreement")
+                llm_columns[0].metric("LLM 비교 이미지", specialist_consistency.get("llm_enabled_images", 0))
+                llm_columns[1].metric("LLM 모드", specialist_consistency.get("llm_mode", "none"))
+                llm_agreement = (
+                    specialist_consistency.get("llm_mean_prediction_consistency")
+                    if specialist_consistency.get("llm_mean_prediction_consistency") is not None
+                    else specialist_consistency.get("llm_mean_bbox_agreement")
+                )
                 llm_columns[2].metric(
                     "Prediction Self-Consistency",
                     "-" if llm_agreement is None else f"{llm_agreement * 100:.1f}%",
                 )
                 llm_columns[3].metric("검토 필요", specialist_consistency.get("llm_review_required_images", 0))
                 st.caption(
-                    "1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 self_consistency를 계산합니다."
+                    "1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LLM 재생성 결과와 bbox IoU 기반 self_consistency를 계산합니다."
                 )
                 llm_exports = output.get("llm_exports") or {}
                 if llm_exports.get("enabled"):
                     st.caption(
-                        f"LMM 재생성 라벨 저장 위치: `{llm_exports.get('output_root')}` / "
+                        f"LLM 재생성 라벨 저장 위치: `{llm_exports.get('output_root')}` / "
                         f"검토 필요 라벨 저장 위치: `{llm_exports.get('review_root')}`"
                     )
                     export_rows = []
                     for level, artifacts in (llm_exports.get("artifacts") or {}).items():
                         export_rows.append({
-                            "LMM": level,
+                            "LLM": level,
                             "저장 폴더": str(Path(llm_exports.get("output_root", "")) / level),
                             "산출물": ", ".join(sorted(artifacts.keys())) if isinstance(artifacts, dict) else "",
                         })
                     for level, artifacts in (llm_exports.get("review_artifacts") or {}).items():
                         export_rows.append({
-                            "LMM": f"{level} review",
+                            "LLM": f"{level} review",
                             "저장 폴더": str(Path(llm_exports.get("review_root", "")) / level),
                             "산출물": ", ".join(sorted(artifacts.keys())) if isinstance(artifacts, dict) else "",
                         })
@@ -725,14 +733,14 @@ def render_workflow_report(result, key_prefix="report"):
                         st.dataframe(export_rows, width="stretch")
                 llm_review_records = specialist_consistency.get("llm_review_records") or []
                 if llm_review_records:
-                    st.markdown("**LMM 기준 검토 대상 이미지**")
+                    st.markdown("**LLM 기준 검토 대상 이미지**")
                     review_rows = []
                     for record in llm_review_records:
                         agreement = record.get("mean_bbox_agreement")
                         threshold = record.get("threshold")
                         review_rows.append({
                             "파일": record.get("image", ""),
-                            "LMM 모드": record.get("mode", ""),
+                            "LLM 모드": record.get("mode", ""),
                             "Prediction Self-Consistency": "-" if agreement is None else f"{agreement * 100:.1f}%",
                             "임계치": "-" if threshold is None else f"{threshold * 100:.1f}%",
                         })
@@ -744,18 +752,18 @@ def render_workflow_report(result, key_prefix="report"):
                         "라벨 편집에 사용할 라벨 기준",
                         context_labels,
                         key=f"{key_prefix}-{index}-llm-review-editor-source",
-                        help="같은 이미지 큐를 1차 Vision 라벨 또는 LMM 재생성 라벨 중 어떤 산출물 기준으로 편집할지 선택합니다.",
+                        help="같은 이미지 큐를 1차 Vision 라벨 또는 LLM 재생성 라벨 중 어떤 산출물 기준으로 편집할지 선택합니다.",
                     )
                     selected_context = dict(context_options[context_labels.index(selected_context_label)][1])
                     render_issue_editor_launcher(
                         review_files,
                         selected_context,
                         f"{key_prefix}-{index}-llm-review",
-                        title="LMM 임계치 미달 이미지만 라벨 편집",
+                        title="LLM 임계치 미달 이미지만 라벨 편집",
                         filter_to_issue_queue=True,
                     )
                 elif specialist_consistency.get("llm_review_required_images", 0) == 0:
-                    st.success("LMM 비교 기준으로 임계치 미달 이미지는 없습니다.")
+                    st.success("LLM 비교 기준으로 임계치 미달 이미지는 없습니다.")
         elif action == "convert":
             validation = output.get("validation", {})
             columns = st.columns(4)
@@ -805,6 +813,11 @@ def render_workflow_report(result, key_prefix="report"):
         distribution = insight.get("distribution", {})
         if distribution:
             st.markdown("**Dataset Insight**")
+            advisor = insight.get("llm_advisor") or {}
+            if advisor.get("summary"):
+                st.info(advisor["summary"])
+            if advisor.get("priority_classes"):
+                st.caption("LLM 우선 검토 클래스: " + ", ".join(advisor["priority_classes"]))
             st.dataframe([
                 {
                     "클래스": label,
@@ -847,6 +860,31 @@ def render_recent_result_summary(label, result):
     if output_dir != "-":
         summary += f" | 출력 경로: {output_dir}"
     st.caption(summary)
+
+
+def llm_rerun_completion_notice(result):
+    outputs = result.get("operation_outputs", [])
+    generate_output = next(
+        (output for output in outputs if output.get("action") == "generate"),
+        {},
+    )
+    consistency = generate_output.get("specialist_consistency") or {}
+    enabled = consistency.get("llm_enabled_images", 0)
+    review_required = consistency.get("llm_review_required_images", 0)
+    mode = consistency.get("llm_mode", "none")
+    agreement = (
+        consistency.get("llm_mean_prediction_consistency")
+        if consistency.get("llm_mean_prediction_consistency") is not None
+        else consistency.get("llm_mean_bbox_agreement")
+    )
+    if agreement is None:
+        agreement_text = "Self-Consistency: 계산 불가"
+    else:
+        agreement_text = f"Self-Consistency: {agreement * 100:.1f}%"
+    return (
+        "LLM 재생성 비교가 완료되었습니다. "
+        f"모드: {mode}, 비교 이미지: {enabled}개, 검토 필요: {review_required}개, {agreement_text}"
+    )
 
 
 def run_plan(plan, auto_approve=False, result_key="workflow", first_pass_plan_key=None):
@@ -1304,44 +1342,6 @@ def object_rect_bounds(obj, width, height):
     return clamp_unit(xmin), clamp_unit(ymin), clamp_unit(xmax), clamp_unit(ymax)
 
 
-def object_polygon_points(obj, width, height):
-    left = to_float(obj.get("left"))
-    top = to_float(obj.get("top"))
-    scale_x = to_float(obj.get("scaleX"), 1.0)
-    scale_y = to_float(obj.get("scaleY"), 1.0)
-    path_offset = obj.get("pathOffset") or {}
-    offset_x = to_float(path_offset.get("x"), 0.0) if isinstance(path_offset, dict) else 0.0
-    offset_y = to_float(path_offset.get("y"), 0.0) if isinstance(path_offset, dict) else 0.0
-    points = obj.get("points") or []
-    if not points and obj.get("path"):
-        points = []
-        for command in obj.get("path") or []:
-            if not isinstance(command, (list, tuple)) or len(command) < 3:
-                continue
-            command_type = str(command[0]).upper()
-            if command_type not in {"M", "L"}:
-                continue
-            points.append({"x": command[1], "y": command[2], "_path": True})
-    result = []
-    for point in points:
-        point_x = to_float(point.get("x"))
-        point_y = to_float(point.get("y"))
-        if point.get("_absolute"):
-            x = point_x / max(width, 1)
-            y = point_y / max(height, 1)
-        elif point.get("_path"):
-            x = (left + point_x * scale_x) / max(width, 1)
-            y = (top + point_y * scale_y) / max(height, 1)
-        elif 0 <= point_x <= 1 and 0 <= point_y <= 1:
-            x = point_x
-            y = point_y
-        else:
-            x = (left + (point_x - offset_x) * scale_x) / max(width, 1)
-            y = (top + (point_y - offset_y) * scale_y) / max(height, 1)
-        result.append(Point(x=clamp_unit(x), y=clamp_unit(y)))
-    return result
-
-
 def canvas_point_coordinate(obj, width, height):
     obj_type = str(obj.get("type", "")).lower()
     if obj_type not in {"circle", "point"}:
@@ -1748,7 +1748,7 @@ def render_label_editor_tab(workspace):
                         update_key = f"polygon_vertex_editor_update_{selected_image}"
                         updated_at = editor_value.get("updatedAt")
                         action = editor_value.get("action")
-                        if action in {"move_vertex", "add_bbox", "add_polygon"} and updated_at and st.session_state.get(update_key) != updated_at:
+                        if action in {"move_vertex", "add_bbox", "add_polygon", "delete_polygon"} and updated_at and st.session_state.get(update_key) != updated_at:
                             st.session_state.setdefault(undo_key, []).append(result.model_dump())
                             updated = result_with_vertex_editor_payload(
                                 result,
@@ -2156,36 +2156,153 @@ def chat_rerun_plan(first_pass_plan, llm_mode):
     return plan
 
 
-def render_selective_rerun_controls(first_pass_plan, key_prefix, on_complete):
+def generation_records_for_llm_rerun(output):
+    records = output.get("records") or []
+    if records:
+        return records, "summary_records"
+    output_dir = output.get("output_dir") or ""
+    image_dir = output.get("image_dir") or output.get("img_dir") or ""
+    if not output_dir or not image_dir:
+        return [], "missing_paths"
+    try:
+        batch = import_labels_with_report(
+            output_dir,
+            image_dir,
+            source_format="auto",
+            classes_path=output.get("classes_path") or None,
+        )
+    except Exception:
+        return [], "import_failed"
+    restored = [
+        {
+            "image": image_name,
+            "status": "Completed",
+            "result": result.model_dump(),
+            "issues": [],
+            "plugin_records": [],
+            "elapsed_sec": 0.0,
+            "low_api_attempts": 0,
+            "high_api_attempts": 0,
+            "first_pass_report": {},
+            "specialist_consistency": {"enabled": False},
+        }
+        for image_name, result in batch.records
+    ]
+    return restored, "exported_labels"
+
+
+def run_llm_consistency_from_previous_result(first_pass_plan, previous_result, llm_mode):
+    if not previous_result:
+        raise ValueError("LLM 비교에 사용할 1차 추론 결과가 없습니다.")
+    generate_operation = next(
+        (operation for operation in first_pass_plan.get("operations", []) if operation.get("action") == "generate"),
+        None,
+    )
+    if not generate_operation:
+        raise ValueError("실행 계획에서 라벨 생성 작업을 찾지 못했습니다.")
+    previous_outputs = previous_result.get("operation_outputs", [])
+    generate_output_index = next(
+        (index for index, output in enumerate(previous_outputs) if output.get("action") == "generate"),
+        None,
+    )
+    if generate_output_index is None:
+        raise ValueError("이전 결과에서 라벨 생성 결과를 찾지 못했습니다.")
+    records, record_source = generation_records_for_llm_rerun(previous_outputs[generate_output_index])
+    if not records:
+        raise ValueError(
+            "이전 라벨 생성 결과에 재사용할 record가 없고, 출력 라벨에서도 복원하지 못했습니다. "
+            f"복원 상태: {record_source}"
+        )
+
+    operation_payload = dict(generate_operation)
+    previous_generate_output = previous_outputs[generate_output_index]
+    if previous_generate_output.get("image_dir"):
+        operation_payload["img_dir"] = previous_generate_output["image_dir"]
+    if previous_generate_output.get("output_dir"):
+        operation_payload["out_dir"] = previous_generate_output["output_dir"]
+    if previous_generate_output.get("formats"):
+        operation_payload["formats"] = previous_generate_output["formats"]
+    if previous_generate_output.get("task_type"):
+        operation_payload["task_type"] = previous_generate_output["task_type"]
+    if previous_generate_output.get("classes_path"):
+        operation_payload["classes_path"] = previous_generate_output["classes_path"]
+    operation_payload["llm_consistency_mode"] = llm_mode
+    operation_payload["specialist_consistency_runs"] = 0
+    operation_payload["specialist_advisor_mode"] = "none"
+    operation = OperationPlan.model_validate(operation_payload)
+    with st.status("LLM 재생성 비교 실행 중", expanded=True) as status:
+        if record_source == "summary_records":
+            st.write("저장된 1차 Vision Model 결과 records를 재사용합니다.")
+        else:
+            st.write("저장된 출력 라벨에서 1차 결과 records를 복원해 사용합니다.")
+        st.write("Specialist 모델은 다시 실행하지 않고 선택한 LLM만 호출합니다.")
+        summary = WorkflowRuntime().run_llm_consistency_on_records(operation, records, llm_mode)
+        status.update(label="LLM 재생성 비교 완료", state="complete", expanded=False)
+
+    updated_result = copy.deepcopy(previous_result)
+    updated_result["status"] = "completed"
+    updated_outputs = list(updated_result.get("operation_outputs", []))
+    updated_outputs[generate_output_index] = summary
+    updated_result["operation_outputs"] = updated_outputs
+    return updated_result
+
+
+def render_selective_rerun_controls(first_pass_plan, previous_result, key_prefix, on_complete):
     if not first_pass_plan or not has_generate_operation(first_pass_plan):
         return
+    previous_outputs = (previous_result or {}).get("operation_outputs", [])
+    previous_generate_output = next(
+        (output for output in previous_outputs if output.get("action") == "generate"),
+        {},
+    )
+    reusable_records, reusable_source = generation_records_for_llm_rerun(previous_generate_output)
     st.divider()
-    st.markdown("#### 1차 추론 이후 LMM 재생성 비교")
-    st.caption("1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 self_consistency를 계산합니다.")
+    st.markdown("#### 1차 추론 이후 LLM 재생성 비교")
+    st.caption("1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LLM 재생성 결과와 bbox IoU 기반 self_consistency를 계산합니다.")
     llm_mode = st.selectbox(
-        "재생성 LMM",
+        "재생성 LLM",
         ["low", "high", "both"],
         index=0,
         key=f"{key_prefix}_llm_consistency_mode",
-        help="선택한 Low/High LMM이 같은 이미지에 대해 라벨을 다시 생성하고, 1차 Vision 결과와 prediction-to-prediction self_consistency를 계산합니다.",
+        help="선택한 Low/High LLM이 같은 이미지에 대해 라벨을 다시 생성하고, 1차 Vision 결과와 prediction-to-prediction self_consistency를 계산합니다.",
     )
-    if st.button("LMM 재생성 비교 실행", type="secondary", key=f"{key_prefix}_llm_consistency_rerun"):
+    if reusable_records:
+        source_label = "summary records" if reusable_source == "summary_records" else "출력 라벨 복원"
+        st.caption(
+            f"저장된 1차 추론 결과 {len(reusable_records)}개를 재사용합니다. 기준: {source_label}. "
+            "실행이 끝나면 결과 리포트 상단에 완료 요약이 표시되고, LLM 재생성 일관성 분석 섹션이 갱신됩니다."
+        )
+    else:
+        st.warning("LLM 비교에 재사용할 1차 추론 결과 records가 없습니다. 라벨 생성을 먼저 다시 실행해 주세요.")
+    if st.button(
+        "LLM 재생성 비교 실행",
+        type="secondary",
+        key=f"{key_prefix}_llm_consistency_rerun",
+        disabled=not reusable_records,
+    ):
         try:
-            result = execute_plan(chat_rerun_plan(first_pass_plan, llm_mode), auto_approve=True)
+            with st.spinner("LLM 재생성 비교를 실행 중입니다. 이미지 수와 선택한 LLM에 따라 시간이 걸릴 수 있습니다."):
+                result = run_llm_consistency_from_previous_result(first_pass_plan, previous_result, llm_mode)
             on_complete(result)
         except Exception as exc:
-            st.error(f"LMM 재생성 비교 실행 중 오류가 발생했습니다: {exc}")
+            st.error(f"LLM 재생성 비교 실행 중 오류가 발생했습니다: {exc}")
+            return
         st.rerun()
 
 
 def complete_chat_rerun(result, workspace):
     response = "선택 재추론을 완료했습니다.\n\n" + describe_result(result, workspace)
     st.session_state.last_chat_result = result
+    st.session_state.result_report_notice = llm_rerun_completion_notice(result)
+    st.session_state.open_result_report = True
     st.session_state.chat_messages.append({"role": "assistant", "content": response})
 
 
 def render_result_report(workspace):
     st.markdown('<div class="panel-title">결과 리포트</div>', unsafe_allow_html=True)
+    result_notice = st.session_state.pop("result_report_notice", "")
+    if result_notice:
+        st.success(result_notice)
     manual_results = st.session_state.get("manual_results", {})
     manual_key = st.session_state.get("last_manual_result_key")
     if manual_key and manual_key in manual_results:
@@ -2202,10 +2319,12 @@ def render_result_report(workspace):
                     st.session_state.manual_results = {}
                 st.session_state.manual_results["generate"] = result
                 st.session_state.last_manual_result_key = "generate"
+                st.session_state.result_report_notice = llm_rerun_completion_notice(result)
                 st.session_state.open_result_report = True
 
             render_selective_rerun_controls(
                 st.session_state.get("last_generate_first_pass_plan"),
+                manual_results[manual_key],
                 "generate",
                 complete_generate_rerun,
             )
@@ -2219,6 +2338,7 @@ def render_result_report(workspace):
     render_workflow_report(result, key_prefix="chat")
     render_selective_rerun_controls(
         st.session_state.get("last_chat_first_pass_plan"),
+        result,
         "chat",
         lambda rerun_result: complete_chat_rerun(rerun_result, workspace),
     )
@@ -2414,29 +2534,28 @@ chat_tab, convert_tab, generate_tab, editor_tab, result_tab, settings_tab = st.t
     ["대화형 작업", "형식 변환", "라벨 생성", "라벨 편집", "결과 리포트", "설정"]
 )
 
-if st.session_state.pop("open_result_report", False):
-    st.html(
-        """
+def request_tab_switch(label):
+    components.html(
+        f"""
         <script>
         const labels = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
-        const target = labels.find((el) => el.textContent.includes('결과 리포트'));
+        const target = labels.find((el) => el.textContent.includes({json.dumps(label)}));
         if (target) target.click();
         </script>
         """,
-        unsafe_allow_javascript=True,
+        height=0,
     )
 
+
+editor_notice = st.session_state.pop("editor_open_notice", "")
+if editor_notice:
+    st.success(editor_notice)
+
+if st.session_state.pop("open_result_report", False):
+    request_tab_switch("결과 리포트")
+
 if st.session_state.pop("open_label_editor", False):
-    st.html(
-        """
-        <script>
-        const labels = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
-        const target = labels.find((el) => el.textContent.includes('라벨 편집'));
-        if (target) target.click();
-        </script>
-        """,
-        unsafe_allow_javascript=True,
-    )
+    request_tab_switch("라벨 편집")
 
 with chat_tab:
     render_conversation(workspace)
@@ -2507,7 +2626,7 @@ with convert_tab:
             st.markdown('<div class="form-section">변환 규칙</div>', unsafe_allow_html=True)
             source_format = st.selectbox("입력 파일 형식", SOURCE_OPTIONS)
             target_formats = st.multiselect("출력 포맷", FORMAT_OPTIONS, default=["yolo"])
-            duplicate_iou = st.slider("중복 IoU", 0.01, 1.0, 0.85, 0.01)
+            duplicate_iou = 0.85
             convert_insight_ratio = st.slider(
                 "불균형 비율 기준",
                 1.1,

@@ -11,6 +11,7 @@ from ..utils.custom_label_mapper import (
     sample_custom_label_file,
 )
 from ..utils import json_io
+from ..utils.label_importer import extract_class_names_from_text
 from .models import OperationPlan, WorkflowPlan
 
 
@@ -581,7 +582,7 @@ def _action(request: str) -> str:
         return "evaluate"
     if _contains_any(lowered, ("변환", "바꿔", "바꾸", "변경", "통일", "convert", "format")):
         return "convert"
-    if _contains_any(lowered, ("생성", "라벨링", "라벨링해", "만들어", "검출", "탐지", "generate", "detect", "label image")):
+    if _contains_any(lowered, ("생성", "라벨링", "라벨링해", "만들어", "검출", "탐지", "진행", "generate", "detect", "segment", "label image")):
         return "generate"
     raise ValueError("요청에서 작업 종류를 확인하지 못했습니다. 변환, 라벨 생성 또는 평가 작업을 명시해 주세요.")
 
@@ -980,6 +981,23 @@ def build_conversation_plan(
         if threshold is None:
             threshold = _numeric_option(request, "threshold|신뢰도")
         plugin_config = (root / "configs" / "plugins.json").resolve()
+        normalized_class_labels = [
+            str(label).strip()
+            for label in overrides.get("normalized_class_labels", [])
+            if str(label).strip()
+        ]
+        generation_prompt = request
+        if normalized_class_labels:
+            generation_prompt = (
+                f"{request}\n"
+                "classes: " + ", ".join(dict.fromkeys(normalized_class_labels))
+            )
+            warnings.append(
+                "LLM이 프롬프트의 검출 대상 클래스를 영어 specialist labels로 정규화했습니다: "
+                + ", ".join(dict.fromkeys(normalized_class_labels))
+            )
+        if overrides.get("class_normalizer_error"):
+            warnings.append(f"클래스명 LLM 정규화에 실패해 규칙 기반 후보만 사용합니다: {overrides['class_normalizer_error']}")
         operation = OperationPlan(
             action="generate",
             task_type=task_type,
@@ -988,12 +1006,18 @@ def build_conversation_plan(
             vis_dir=str((root / "data" / "visualized").resolve()),
             formats=formats,
             threshold=threshold if threshold is not None else 0.75,
-            prompt=request,
+            prompt=generation_prompt,
             specialist_consistency_runs=0,
             specialist_advisor_mode="none",
             plugin_config=str(plugin_config) if plugin_config.is_file() else None,
             require_approval=True,
         )
+        if task_type in {"object_detection", "segmentation", "tracking"} and not extract_class_names_from_text(generation_prompt):
+            warnings.append(
+                "Grounding DINO/Grounded SAM2 기반 생성은 찾을 클래스명이 필요합니다. "
+                "자유 문장으로 `person, car만 찾아줘`, `'person', 'car' 기반으로 진행해줘`, "
+                "`사람 차 찾아줘`처럼 입력하거나 classes.txt/data.yaml을 지정하세요."
+            )
         summary = f"이미지 {selected_images['file_count']}개에 대해 {task_type} 라벨 생성"
     else:
         if action == "prepare_model_dataset":
@@ -1098,8 +1122,13 @@ def describe_plan(proposal: Dict[str, Any], workspace: str | Path) -> str:
     if operation.get("threshold") != 0.75:
         lines.append(f"- 신뢰도 기준: `{operation['threshold']}`")
     if operation.get("action") == "generate":
-        lines.append(f"- Specialist 재추론: `{operation.get('specialist_consistency_runs', 0)}회`")
-        lines.append(f"- 재추론 Advisor: `{operation.get('specialist_advisor_mode', 'none')}`")
+        lines.append(f"- 태스크: `{operation.get('task_type', 'object_detection')}`")
+        specialist_runs = int(operation.get("specialist_consistency_runs", 0) or 0)
+        advisor_mode = operation.get("specialist_advisor_mode", "none")
+        if specialist_runs > 0:
+            lines.append(f"- Specialist 재추론: `{specialist_runs}회`")
+        if advisor_mode and advisor_mode != "none":
+            lines.append(f"- 재추론 Advisor: `{advisor_mode}`")
     for warning in proposal.get("warnings", []):
         lines.append(f"- 확인 사항: {warning}")
     lines.append("이 계획으로 실행할까요?")

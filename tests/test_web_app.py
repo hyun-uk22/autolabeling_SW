@@ -8,6 +8,60 @@ from unittest.mock import patch
 
 @unittest.skipUnless(importlib.util.find_spec("streamlit"), "Streamlit is not installed")
 class StreamlitAppTests(unittest.TestCase):
+    def test_polygon_canvas_absolute_points_are_not_shifted_by_left_top(self):
+        from src.ui.canvas_geometry import object_polygon_points
+
+        obj = {
+            "type": "polygon",
+            "left": 100,
+            "top": 50,
+            "width": 100,
+            "height": 100,
+            "scaleX": 1,
+            "scaleY": 1,
+            "pathOffset": {"x": 150, "y": 100},
+            "points": [
+                {"x": 100, "y": 50},
+                {"x": 200, "y": 50},
+                {"x": 200, "y": 150},
+                {"x": 100, "y": 150},
+            ],
+        }
+
+        points = object_polygon_points(obj, 400, 300)
+
+        self.assertEqual(
+            [(round(point.x, 3), round(point.y, 3)) for point in points],
+            [(0.25, 0.167), (0.5, 0.167), (0.5, 0.5), (0.25, 0.5)],
+        )
+
+    def test_polygon_canvas_local_points_still_use_left_top_and_path_offset(self):
+        from src.ui.canvas_geometry import object_polygon_points
+
+        obj = {
+            "type": "polygon",
+            "left": 100,
+            "top": 50,
+            "width": 100,
+            "height": 100,
+            "scaleX": 1,
+            "scaleY": 1,
+            "pathOffset": {"x": 50, "y": 50},
+            "points": [
+                {"x": 0, "y": 0},
+                {"x": 100, "y": 0},
+                {"x": 100, "y": 100},
+                {"x": 0, "y": 100},
+            ],
+        }
+
+        points = object_polygon_points(obj, 400, 300)
+
+        self.assertEqual(
+            [(round(point.x, 3), round(point.y, 3)) for point in points],
+            [(0.125, 0.0), (0.375, 0.0), (0.375, 0.333), (0.125, 0.333)],
+        )
+
     def test_initial_screen_requires_workspace_selection(self):
         from streamlit.testing.v1 import AppTest
 

@@ -17,6 +17,58 @@ from .custom_label_mapper import CUSTOM_MAPPING_FORMAT, import_custom_mapping
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 YOLO_DATASET_FILENAMES = ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml")
+KOREAN_CLASS_ALIASES = {
+    "사람": "person",
+    "인간": "person",
+    "보행자": "person",
+    "남자": "person",
+    "여자": "person",
+    "아이": "person",
+    "차": "car",
+    "자동차": "car",
+    "승용차": "car",
+    "차량": "car",
+    "버스": "bus",
+    "트럭": "truck",
+    "자전거": "bicycle",
+    "오토바이": "motorcycle",
+    "모터사이클": "motorcycle",
+    "개": "dog",
+    "강아지": "dog",
+    "고양이": "cat",
+    "새": "bird",
+    "말": "horse",
+    "양": "sheep",
+    "소": "cow",
+    "코끼리": "elephant",
+    "곰": "bear",
+    "얼룩말": "zebra",
+    "기린": "giraffe",
+    "사자": "lion",
+    "호랑이": "tiger",
+    "가방": "handbag",
+    "우산": "umbrella",
+    "병": "bottle",
+    "컵": "cup",
+    "의자": "chair",
+    "소파": "couch",
+    "침대": "bed",
+    "식탁": "dining table",
+    "책": "book",
+    "노트북": "laptop",
+    "키보드": "keyboard",
+    "마우스": "mouse",
+    "휴대폰": "cell phone",
+    "핸드폰": "cell phone",
+    "티비": "tv",
+    "텔레비전": "tv",
+    "신호등": "traffic light",
+    "정지표지판": "stop sign",
+    "사과": "apple",
+    "바나나": "banana",
+    "오렌지": "orange",
+    "피자": "pizza",
+}
 SOURCE_PRIORITY = {
     "coco": 60,
     "pascal_voc": 50,
@@ -218,6 +270,70 @@ def load_yolo_yaml_classes(yaml_path: Optional[str]) -> List[str]:
     return []
 
 
+def _clean_prompt_label(value: str) -> str:
+    label = _strip_yaml_value(value)
+    label = re.sub(r"\s+", " ", label).strip(" .;:")
+    if not label:
+        return ""
+    lowered = label.lower()
+    stop_phrases = (
+        "이 클래스만",
+        "이 클래스",
+        "클래스만",
+        "바탕으로",
+        "기반으로",
+        "segmentation",
+        "라벨",
+        "생성",
+        "진행",
+        "해줘",
+        "찾아줘",
+        "detect",
+        "segment",
+        "only",
+        "based on",
+        "using",
+    )
+    for phrase in stop_phrases:
+        lowered = lowered.split(phrase, 1)[0].strip()
+    label = lowered.strip(" '\"`[](){}.,;:")
+    if not label or len(label) > 60:
+        return ""
+    if not re.search(r"[a-z가-힣]", label):
+        return ""
+    return label
+
+
+def _extract_quoted_or_comma_class_names(text: str) -> List[str]:
+    quoted = [
+        _clean_prompt_label(match.group(1))
+        for match in re.finditer(r"['\"`]([^'\"`]+)['\"`]", text)
+    ]
+    quoted = [label for label in quoted if label]
+    if len(quoted) >= 2:
+        return list(dict.fromkeys(quoted))
+
+    candidate_patterns = [
+        r"(.+?)(?:\s*이\s*클래스만|\s*클래스만|\s*클래스를?\s*바탕으로|\s*클래스를?\s*기반으로)",
+        r"(?:only|these classes?|classes?)\s*:?\s*(.+?)(?:\.|$)",
+    ]
+    for pattern in candidate_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        raw = match.group(1)
+        if "," not in raw and "\n" not in raw:
+            continue
+        labels = [
+            _clean_prompt_label(item)
+            for item in re.split(r"[,/|\n]", raw)
+            if _clean_prompt_label(item)
+        ]
+        if len(labels) >= 2:
+            return list(dict.fromkeys(labels))
+    return []
+
+
 def extract_class_names_from_text(text: Optional[str]) -> List[str]:
     if not text:
         return []
@@ -254,6 +370,35 @@ def extract_class_names_from_text(text: Optional[str]) -> List[str]:
         if entries:
             return [label for _, label in sorted(entries)]
         return list_entries
+    for line in lines:
+        stripped = line.strip()
+        match = re.search(
+            r"(?:classes|class_names|labels|검출\s*대상\s*클래스|검출\s*클래스|대상\s*클래스)\s*(?:은|는|:)\s*(.+)",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        raw_items = match.group(1)
+        raw_items = re.sub(r"^(?:다음\s*목록으로\s*제한하세요|다음|목록)\s*:?\s*", "", raw_items).strip()
+        labels = [
+            _strip_yaml_value(item)
+            for item in re.split(r"[,/|]", raw_items)
+            if _strip_yaml_value(item)
+        ]
+        if labels:
+            return list(dict.fromkeys(labels))
+    freeform_labels = _extract_quoted_or_comma_class_names(str(text))
+    if freeform_labels:
+        return freeform_labels
+    lowered = str(text).lower()
+    detected_matches = []
+    for korean, english in sorted(KOREAN_CLASS_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+        for match in re.finditer(rf"(?<![가-힣A-Za-z0-9]){re.escape(korean)}(?![가-힣A-Za-z0-9])", lowered):
+            detected_matches.append((match.start(), -len(korean), english))
+    if detected_matches:
+        ordered = [english for _, _, english in sorted(detected_matches)]
+        return list(dict.fromkeys(ordered))
     return []
 
 

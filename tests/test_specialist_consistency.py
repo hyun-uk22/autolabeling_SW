@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from src.core.models import BoundingBox, DetectionResult
+from src.core.models import BoundingBox, DetectionResult, Point, PolygonSegment
 from src.plugins.base import PluginOutput, VisionTaskPlugin
 from src.plugins.orchestrator import TaskPluginOrchestrator
 from src.workflow.models import OperationPlan
@@ -137,6 +137,8 @@ class SpecialistConsistencyTests(unittest.TestCase):
             action="generate",
             task_type="object_detection",
             llm_consistency_mode="low",
+            low_model="low",
+            high_model="high",
             threshold=0.75,
         )
         base = DetectionResult(task_type="object_detection")
@@ -146,14 +148,35 @@ class SpecialistConsistencyTests(unittest.TestCase):
         runtime.low_client = FakeLLMClient("low", llm)
         runtime.high_client = FakeLLMClient("high", DetectionResult(task_type="object_detection"))
 
-        with patch.object(runtime, "_ensure_vlm_clients", return_value=[]):
-            report = runtime._llm_consistency_rerun("image.jpg", operation, base)
+        report = runtime._llm_consistency_rerun("image.jpg", operation, base)
 
         self.assertTrue(report["enabled"])
         self.assertEqual(report["mode"], "low")
         self.assertEqual(report["comparisons"][0]["level"], "low")
         self.assertGreater(report["comparisons"][0]["bbox_agreement"]["agreement"], 0.0)
         self.assertFalse(report["review_required"])
+
+    def test_low_only_llm_consistency_does_not_validate_unused_high_model(self):
+        runtime = WorkflowRuntime()
+        model_name = "bedrock:anthropic.claude-sonnet-test"
+        operation = OperationPlan(
+            action="generate",
+            task_type="object_detection",
+            llm_consistency_mode="low",
+            low_model=model_name,
+            high_model=model_name,
+            threshold=0.75,
+        )
+        base = DetectionResult(task_type="object_detection")
+        base.boxes.append(BoundingBox(label="person", xmin=0.1, ymin=0.1, xmax=0.4, ymax=0.4, confidence=0.9))
+        llm = DetectionResult(task_type="object_detection")
+        llm.boxes.append(BoundingBox(label="person", xmin=0.12, ymin=0.1, xmax=0.42, ymax=0.4, confidence=0.8))
+        runtime.low_client = FakeLLMClient(model_name, llm)
+
+        report = runtime._llm_consistency_rerun("image.jpg", operation, base)
+
+        self.assertTrue(report["enabled"])
+        self.assertEqual([item["level"] for item in report["comparisons"]], ["low"])
 
     def test_llm_review_queue_keeps_only_threshold_failures(self):
         records = [
@@ -277,6 +300,126 @@ class SpecialistConsistencyTests(unittest.TestCase):
             comparisons = records[0]["specialist_consistency"]["llm_consistency"]["comparisons"]
             self.assertIn("label_paths", comparisons[0])
             self.assertIn("review_label_paths", comparisons[1])
+
+    def test_llm_consistency_can_reuse_existing_generation_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            img_dir = root / "images"
+            out_dir = root / "labeled"
+            vis_dir = root / "visualized"
+            img_dir.mkdir()
+            Image.new("RGB", (100, 100), "white").save(img_dir / "sample.jpg")
+
+            base = DetectionResult(task_type="object_detection", source_model="vision")
+            base.boxes.append(BoundingBox(label="person", xmin=0.1, ymin=0.1, xmax=0.4, ymax=0.4, confidence=0.9))
+            llm = DetectionResult(task_type="object_detection", source_model="low")
+            llm.boxes.append(BoundingBox(label="person", xmin=0.12, ymin=0.1, xmax=0.42, ymax=0.4, confidence=0.8))
+            operation = OperationPlan(
+                action="generate",
+                task_type="object_detection",
+                img_dir=str(img_dir),
+                out_dir=str(out_dir),
+                vis_dir=str(vis_dir),
+                formats=["yolo"],
+                llm_consistency_mode="none",
+                low_model="low",
+                high_model="high",
+            )
+            records = [{
+                "image": "sample.jpg",
+                "status": "Completed",
+                "result": base.model_dump(),
+                "issues": [],
+                "plugin_records": [{"plugin": "grounding_dino"}],
+                "elapsed_sec": 0.1,
+                "low_api_attempts": 0,
+                "high_api_attempts": 0,
+                "first_pass_report": {"total_labels": 1},
+                "specialist_consistency": {"enabled": False},
+            }]
+            runtime = WorkflowRuntime()
+            runtime.low_client = FakeLLMClient("low", llm)
+
+            summary = runtime.run_llm_consistency_on_records(operation, records, "low")
+
+            self.assertEqual(summary["specialist_consistency"]["llm_enabled_images"], 1)
+            self.assertTrue(summary["llm_exports"]["enabled"])
+            self.assertTrue((root / "labeled_llm" / "low" / "sample.txt").is_file())
+            self.assertEqual(records[0]["specialist_consistency"], {"enabled": False})
+
+    def test_llm_consistency_summary_counts_llm_even_when_parent_specialist_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out_dir = root / "out"
+            img_dir = root / "images"
+            out_dir.mkdir()
+            img_dir.mkdir()
+            Image.new("RGB", (100, 100), "white").save(img_dir / "sample.jpg")
+            records = [{
+                "image": "sample.jpg",
+                "status": "Completed",
+                "result": DetectionResult(task_type="object_detection").model_dump(),
+                "issues": [],
+                "plugin_records": [],
+                "elapsed_sec": 0.1,
+                "low_api_attempts": 1,
+                "high_api_attempts": 0,
+                "specialist_consistency": {
+                    "enabled": False,
+                    "llm_consistency": {
+                        "enabled": True,
+                        "mode": "low",
+                        "threshold": 0.75,
+                        "review_required": True,
+                        "comparisons": [{
+                            "level": "low",
+                            "agreement": 0.25,
+                            "result_consistency": 0.25,
+                            "bbox_agreement": {"agreement": 0.0},
+                            "review_required": True,
+                        }],
+                    },
+                },
+            }]
+            operation = OperationPlan(action="generate", out_dir=str(out_dir), img_dir=str(img_dir))
+
+            with patch("src.workflow.runtime.visualize_boxes", return_value="vis.jpg"):
+                summary = WorkflowRuntime(insight_advisor=lambda _payload: {}).export_generation(operation, records)
+
+            self.assertEqual(summary["specialist_consistency"]["llm_enabled_images"], 1)
+            self.assertEqual(summary["specialist_consistency"]["llm_review_required_images"], 1)
+            self.assertEqual(summary["specialist_consistency"]["llm_mean_prediction_consistency"], 0.25)
+
+    def test_segmentation_llm_consistency_uses_polygon_consistency_when_no_boxes(self):
+        runtime = WorkflowRuntime()
+        operation = OperationPlan(
+            action="generate",
+            task_type="segmentation",
+            llm_consistency_mode="low",
+            low_model="low",
+            high_model="high",
+            threshold=0.75,
+        )
+        base = DetectionResult(task_type="segmentation")
+        base.segments.append(PolygonSegment(
+            label="person",
+            polygon=[Point(x=0.1, y=0.1), Point(x=0.4, y=0.1), Point(x=0.4, y=0.4), Point(x=0.1, y=0.4)],
+            confidence=0.9,
+        ))
+        llm = DetectionResult(task_type="segmentation")
+        llm.segments.append(PolygonSegment(
+            label="person",
+            polygon=[Point(x=0.12, y=0.1), Point(x=0.42, y=0.1), Point(x=0.42, y=0.4), Point(x=0.12, y=0.4)],
+            confidence=0.8,
+        ))
+        runtime.low_client = FakeLLMClient("low", llm)
+
+        report = runtime._llm_consistency_rerun("image.jpg", operation, base)
+
+        self.assertTrue(report["enabled"])
+        self.assertGreater(report["mean_prediction_consistency"], 0.0)
+        self.assertEqual(report["mean_bbox_agreement"], report["mean_prediction_consistency"])
+        self.assertFalse(report["review_required"])
 
 
 if __name__ == "__main__":

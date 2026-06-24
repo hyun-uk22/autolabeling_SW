@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..core.llm_client import extract_json
 from ..core.model_config import resolve_planner_model
+from ..utils.label_importer import extract_class_names_from_text
 from .conversation_router import _call_model
 from .models import OperationPlan
 
@@ -43,7 +45,8 @@ Allowed response shape:
     "framework": "huggingface|mmsegmentation|detectron2|pytorch|custom",
     "dataset_purpose": "training|inference|evaluation",
     "repo_url": "https://github.com/owner/repo",
-    "repo_path": "path"
+    "repo_path": "path",
+    "prompt": "optional updated generation prompt"
   }
 }
 
@@ -72,6 +75,7 @@ ALLOWED_UPDATE_FIELDS = {
     "dataset_purpose",
     "repo_url",
     "repo_path",
+    "prompt",
 }
 ALLOWED_FORMATS = {"yolo", "pascal_voc", "coco", "vision_json"}
 ALLOWED_SOURCE_FORMATS = ALLOWED_FORMATS | {"auto", "csv", "generic_json", "custom_mapping", "mask_image"}
@@ -92,6 +96,15 @@ ALLOWED_USAGE_MODES = {"library", "official_repo", "custom"}
 ALLOWED_FRAMEWORKS = {"huggingface", "mmsegmentation", "detectron2", "pytorch", "custom"}
 ALLOWED_PURPOSES = {"training", "inference", "evaluation"}
 PATH_FIELDS = {"input_path", "img_dir", "out_dir", "vis_dir", "classes_path", "repo_path"}
+TASK_ALIASES = {
+    "classification": ("classification", "분류", "이미지 분류", "classify"),
+    "object_detection": ("object detection", "object_detection", "detection", "detect", "객체 탐지", "객체 검출", "탐지", "검출"),
+    "segmentation": ("segmentation", "세그멘테이션", "분할", "seg"),
+    "pose_estimation": ("pose estimation", "pose_estimation", "pose", "포즈", "keypoint", "키포인트"),
+    "ocr": ("ocr", "문자 인식", "텍스트 인식", "글자 인식"),
+    "tracking": ("tracking", "추적", "track"),
+    "all": ("all", "전체 태스크", "모든 태스크"),
+}
 
 
 class PlanPatch(BaseModel):
@@ -220,6 +233,11 @@ def _sanitize_updates(updates: Dict[str, Any], current_operation: Dict[str, Any]
                 sanitized[key] = str(value).strip().lower() in {"true", "1", "yes", "y", "on", "strict", "엄격"}
         elif key == "repo_path":
             sanitized[key] = _resolve_any_path(value, workspace)
+        elif key == "prompt":
+            prompt = str(value).strip()
+            if not prompt:
+                raise ValueError("prompt 값이 비어 있습니다.")
+            sanitized[key] = prompt
         elif key in PATH_FIELDS:
             sanitized[key] = _resolve_path(value, workspace)
 
@@ -255,6 +273,86 @@ def _call_patch_model(
     return PlanPatch.model_validate(payload)
 
 
+def _task_type_from_request(request: str) -> Optional[str]:
+    lowered = request.lower().replace("-", " ")
+    for task_type, aliases in TASK_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return task_type
+    return None
+
+
+def _summary_with_task(summary: str, task_type: str) -> str:
+    base = (summary or "실행 계획").replace(" (수정됨)", "")
+    updated = re.sub(r"(이미지\s+\d+개에 대해\s+)\S+(\s+라벨 생성)", rf"\1{task_type}\2", base)
+    if updated == base and "라벨 생성" in base:
+        updated = re.sub(r"(\s+라벨 생성)", rf" {task_type}\1", base, count=1)
+    if updated == base:
+        updated = f"{base} (수정됨)"
+    else:
+        updated = f"{updated} (수정됨)"
+    return updated
+
+
+def _without_class_missing_warnings(warnings: List[str]) -> List[str]:
+    return [
+        warning
+        for warning in warnings
+        if "검출 대상 클래스 목록이 필요" not in warning
+        and "찾을 클래스명이 필요" not in warning
+        and "Grounding DINO/Grounded SAM2 기반 생성" not in warning
+    ]
+
+
+def _prompt_with_request_classes(prompt: str, request: str) -> tuple[str, List[str]]:
+    labels = extract_class_names_from_text(request)
+    if not labels:
+        return prompt, []
+    merged_prompt = str(prompt or "").strip()
+    if request.strip() and request.strip() not in merged_prompt:
+        merged_prompt = f"{merged_prompt}\n{request.strip()}".strip()
+    if "classes:" not in merged_prompt.lower() and "names:" not in merged_prompt.lower():
+        merged_prompt = f"{merged_prompt}\nclasses: {', '.join(labels)}".strip()
+    return merged_prompt, labels
+
+
+def _deterministic_patch(
+    request: str,
+    current_proposal: Dict[str, Any],
+    workspace: Path,
+) -> Optional[Dict[str, Any]]:
+    operations = current_proposal.get("plan", {}).get("operations", [])
+    if len(operations) != 1:
+        return None
+    before = operations[0]
+    if before.get("action") != "generate":
+        return None
+    task_type = _task_type_from_request(request)
+    if not task_type or task_type == before.get("task_type"):
+        return None
+
+    prompt, labels = _prompt_with_request_classes(str(before.get("prompt") or ""), request)
+    raw_updates = {"task_type": task_type}
+    if labels:
+        raw_updates["prompt"] = prompt
+    updates = _sanitize_updates(raw_updates, before, workspace)
+    revised = copy.deepcopy(current_proposal)
+    revised["plan"]["operations"][0].update(updates)
+    revised["warnings"] = _without_class_missing_warnings(list(revised.get("warnings", [])))
+    if labels:
+        revised["warnings"].append(
+            "수정 요청에서 검출 대상 클래스를 추출해 specialist labels로 반영했습니다: "
+            + ", ".join(labels)
+        )
+    revised["warnings"].append("요청에서 태스크 변경을 감지해 실행 계획에 반영했습니다.")
+    revised["summary"] = _summary_with_task(revised.get("summary", "실행 계획"), task_type)
+    return {
+        "kind": "patch",
+        "reason": "사용자가 라벨 생성 태스크 변경을 요청했습니다.",
+        "proposal": revised,
+        "changes": _describe_changes(before, updates, workspace),
+    }
+
+
 def _describe_changes(before: Dict[str, Any], updates: Dict[str, Any], workspace: Path) -> List[str]:
     changes = []
     for key, after in updates.items():
@@ -276,6 +374,9 @@ def revise_pending_proposal(
     caller: Optional[Callable[[str], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     workspace_path = Path(workspace).expanduser().resolve()
+    deterministic = _deterministic_patch(request, current_proposal, workspace_path)
+    if deterministic:
+        return deterministic
     patch = _call_patch_model(
         request,
         current_proposal,
@@ -298,7 +399,11 @@ def revise_pending_proposal(
     revised["plan"]["operations"][0].update(updates)
     revised["warnings"] = list(revised.get("warnings", []))
     revised["warnings"].append("LLM plan patch 제안을 검증한 뒤 실행 계획에 반영했습니다.")
-    revised["summary"] = f"{revised.get('summary', '실행 계획')} (수정됨)"
+    if before.get("action") == "generate" and "task_type" in updates:
+        revised["summary"] = _summary_with_task(revised.get("summary", "실행 계획"), updates["task_type"])
+    else:
+        summary = (revised.get("summary", "실행 계획") or "실행 계획").replace(" (수정됨)", "")
+        revised["summary"] = f"{summary} (수정됨)"
     return {
         "kind": "patch",
         "reason": patch.reason,

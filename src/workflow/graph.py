@@ -171,6 +171,8 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
             return {
                 "current_result": empty.model_dump(),
                 "current_issues": [f"draft_failed:{exc}"],
+                "current_low_attempts": max(1, operation.inference_count),
+                "current_status": "DraftFailed",
                 "errors": list(state.get("errors", [])) + [str(exc)],
                 "history": _event(state, "draft_failed", error=str(exc)),
             }
@@ -203,12 +205,23 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
         result = DetectionResult.model_validate(state["current_result"])
         image_path = _image_path(operation, state["current_image"])
         issues = validate_result(result, image_path)
-        required, reason = runtime.needs_high_verification(
-            operation,
-            result,
-            state.get("current_plugin_records", []),
-            issues,
-        )
+        try:
+            required, reason = runtime.needs_high_verification(
+                operation,
+                result,
+                state.get("current_plugin_records", []),
+                issues,
+            )
+        except Exception as exc:
+            reason = f"high_decision_failed:{exc}"
+            return {
+                "current_issues": list(issues) + [reason],
+                "high_required": False,
+                "approval_reason": reason,
+                "current_status": "HighDecisionFailed",
+                "errors": list(state.get("errors", [])) + [str(exc)],
+                "history": _event(state, "high_decision_failed", error=str(exc)),
+            }
         return {
             "current_issues": issues,
             "high_required": required,
@@ -260,6 +273,12 @@ def build_workflow_graph(runtime: WorkflowRuntime, checkpointer=None):
         result = DetectionResult.model_validate(state["current_result"])
         image_path = _image_path(operation, state["current_image"])
         issues = validate_result(result, image_path)
+        plugin_errors = [
+            f"plugin_error:{record.get('plugin', 'unknown')}:{record.get('error')}"
+            for record in state.get("current_plugin_records", [])
+            if record.get("status") == "error" and record.get("error")
+        ]
+        issues = list(dict.fromkeys(list(issues) + plugin_errors))
         can_repair = bool(issues) and state.get("retries", 0) < operation.max_retries
         return {
             "current_issues": issues,
