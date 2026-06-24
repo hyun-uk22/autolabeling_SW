@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from ..core.llm_client import extract_json
+from ..core.model_config import resolve_planner_model
 from .conversation_router import _call_model
 from .models import OperationPlan
 
@@ -278,7 +279,7 @@ def revise_pending_proposal(
     patch = _call_patch_model(
         request,
         current_proposal,
-        model_name or os.getenv("PLAN_PATCH_MODEL") or os.getenv("INTENT_ROUTER_MODEL") or os.getenv("PLANNER_MODEL") or os.getenv("LOW_MODEL"),
+        model_name or os.getenv("PLAN_PATCH_MODEL") or os.getenv("INTENT_ROUTER_MODEL") or resolve_planner_model(),
         caller,
     )
     if patch.mode != "patch":

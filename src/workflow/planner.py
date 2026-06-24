@@ -3,7 +3,7 @@ import os
 from typing import Optional
 
 from ..core.llm_client import extract_json
-from ..core.model_config import is_bedrock_model
+from ..core.model_config import is_bedrock_model, resolve_planner_model
 from .models import OperationPlan, WorkflowPlan
 
 
@@ -47,7 +47,7 @@ Do not invent absolute paths. Use project-relative defaults when paths are omitt
 
 class WorkflowPlanner:
     def __init__(self, model_name: Optional[str] = None):
-        self.model_name = model_name or os.getenv("PLANNER_MODEL") or os.getenv("LOW_MODEL")
+        self.model_name = resolve_planner_model(model_name)
 
     def plan(self, request: str, supplied_plan: Optional[dict] = None) -> WorkflowPlan:
         if supplied_plan:

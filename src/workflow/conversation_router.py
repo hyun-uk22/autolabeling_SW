@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from ..core.llm_client import extract_json
-from ..core.model_config import is_bedrock_model
+from ..core.model_config import is_bedrock_model, resolve_planner_model
 from . import conversation as conversation_module
 from .conversation import diagnose_model_dataset_request
 
@@ -156,8 +156,7 @@ class IntentRouter:
         self.model_name = (
             model_name
             or os.getenv("INTENT_ROUTER_MODEL")
-            or os.getenv("PLANNER_MODEL")
-            or os.getenv("LOW_MODEL")
+            or resolve_planner_model()
         )
         self.caller = caller
 
@@ -185,8 +184,7 @@ class ChatNode:
             model_name
             or os.getenv("CHAT_MODEL")
             or os.getenv("INTENT_ROUTER_MODEL")
-            or os.getenv("PLANNER_MODEL")
-            or os.getenv("LOW_MODEL")
+            or resolve_planner_model()
         )
         self.caller = caller
 

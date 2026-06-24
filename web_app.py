@@ -50,6 +50,7 @@ from src.core.models import (
     TextRegion,
     TrackInstance,
 )
+from src.core.model_config import resolve_planner_model
 from src.core.user_settings import (
     ENV_FIELDS,
     SECRET_FIELDS,
@@ -2438,7 +2439,7 @@ with convert_tab:
                 with st.status("커스텀 라벨 샘플 분석 중", expanded=True) as status:
                     sample_path = sample_custom_label_file(resolve_workspace_path(workspace, input_path))
                     st.write(f"샘플 파일: {sample_path}")
-                    model_name = os.getenv("CUSTOM_LABEL_MAPPER_MODEL") or os.getenv("LOW_MODEL") or os.getenv("PLANNER_MODEL")
+                    model_name = os.getenv("CUSTOM_LABEL_MAPPER_MODEL") or resolve_planner_model()
                     spec = infer_custom_mapping_spec_from_sample(sample_path, model_name=model_name)
                     st.session_state.convert_custom_mapping_text_pending = json.dumps(spec, ensure_ascii=False, indent=2)
                     status.update(label="커스텀 매핑 스펙 생성 완료", state="complete", expanded=False)

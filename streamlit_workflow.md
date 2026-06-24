@@ -75,9 +75,7 @@ LLM Intent Router는 작업을 직접 실행하지 않는다. `convert_labels`, 
 실제 경로 탐색, Pydantic 계획 검증, 승인 및 실행은 기존 workflow가 담당한다. 규칙으로 이미
 해석 가능한 요청에는 LLM을 호출하지 않는다.
 
-`INTENT_ROUTER_MODEL`과 `CHAT_MODEL`을 별도로 설정할 수 있다. 생략하면 각각
-`PLANNER_MODEL`, `LOW_MODEL` 순으로 fallback한다. 사용할 모델이 전혀 설정되지 않았거나
-LLM 호출에 실패하면 기존 규칙 parser의 오류를 사용자에게 표시하며 임의 계획을 실행하지 않는다.
+`INTENT_ROUTER_MODEL`과 `CHAT_MODEL`을 별도로 설정할 수 있다. 생략하면 `PLANNER_MODEL`을 사용하고, `PLANNER_MODEL`도 비어 있으면 코드 기본값인 Bedrock Sonnet을 사용한다. LLM 호출에 실패하면 기존 규칙 parser의 오류를 사용자에게 표시하며 임의 계획을 실행하지 않는다.
 
 예시:
 

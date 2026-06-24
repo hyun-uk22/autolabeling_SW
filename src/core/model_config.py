@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 
 DEFAULT_BEDROCK_LOW_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_BEDROCK_HIGH_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+DEFAULT_BEDROCK_PLANNER_MODEL_ID = DEFAULT_BEDROCK_HIGH_MODEL_ID
 
 
 def is_bedrock_model(model_name: str) -> bool:
@@ -14,6 +15,19 @@ def as_bedrock_model(model_id: Optional[str]) -> Optional[str]:
     if not model_id:
         return None
     return model_id if model_id.startswith("bedrock:") else f"bedrock:{model_id}"
+
+
+def default_planner_model() -> str:
+    return as_bedrock_model(DEFAULT_BEDROCK_PLANNER_MODEL_ID) or ""
+
+
+def resolve_planner_model(model_name: Optional[str] = None) -> str:
+    return (
+        model_name
+        or os.getenv("PLANNER_MODEL")
+        or as_bedrock_model(os.getenv("AWS_BEDROCK_PLANNER_MODEL_ID"))
+        or default_planner_model()
+    )
 
 
 def model_capacity_rank(model_name: str) -> int:
