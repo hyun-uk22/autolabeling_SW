@@ -2,7 +2,7 @@
 
 ## 1. 목적
 
-`agentic_workflow.py`는 사용자의 자연어 또는 구조화 JSON 요청을 실행 가능한 `WorkflowPlan`으로 변환하고, 자동 라벨 생성, 기존 라벨 변환, 정량 평가를 하나의 상태 그래프에서 실행한다.
+`agentic_workflow.py`는 사용자의 자연어 또는 구조화 JSON 요청을 실행 가능한 `WorkflowPlan`으로 변환하고, 자동 라벨 생성, 기존 라벨 변환, 정량 평가를 하나의 상태 그래프에서 실행한다. Streamlit 기본 UI에서는 평가 탭 대신 라벨 편집 탭을 제공하지만, 평가 operation과 CLI 경로는 workflow 런타임에 유지된다.
 
 LangGraph는 실제 라벨 추론 모델을 대체하지 않는다. 상태, 조건 분기, 반복, 승인, checkpoint, 재개를 담당하고 실제 처리는 기존 service와 plugin이 담당한다.
 
@@ -128,7 +128,7 @@ START
 4. specialist 결과가 있으면 low VLM 호출 없이 validation/export 후보로 사용한다.
 5. specialist 결과가 비어 있거나 operation이 `generation_strategy=vlm_first`이면 low VLM을 반복 호출해 draft와 self-consistency를 만든다.
 6. plugin agreement와 VLM consistency를 함께 검사한다.
-7. threshold 미만 또는 validation issue가 있으면 high verification 대상으로 지정한다.
+7. VLM fallback 경로에서 threshold 미만 또는 validation issue가 있으면 high verification 대상으로 지정한다. 별도의 LMM 재생성 비교는 최종 라벨을 자동 교체하지 않고 1차 specialist 결과와 LMM 결과의 agreement만 리포트한다.
 8. high VLM 호출 전 approval interrupt를 발생시킨다.
 9. 승인 시 high 결과와 전문 모델 결과를 병합한다.
 10. validation 실패 시 repair node가 malformed 항목을 제거한다.

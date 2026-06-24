@@ -284,11 +284,12 @@ tracking 검사:
 
 ### 5.6 Skip 정책
 
-다음 issue는 출력 포맷 변환에 이미지 크기가 필요하므로 `--strict` 여부와 관계없이 항상 skip한다.
+다음 issue는 이미지 파일 자체를 열 수 없거나 크기를 알 수 없는 상태이므로 `--strict` 여부와 관계없이 항상 skip한다.
 
-- `missing_image:*`
 - `image_open_failed:*`
 - `invalid_image_size`
+
+`missing_image:*`는 사용자가 라벨 파일만 가지고 변환하거나 점검하는 시나리오를 고려해 기본 모드에서는 blocking issue로 처리하지 않는다. 가능한 출력 포맷은 계속 생성하고, 이미지 크기나 실제 이미지 파일이 필요한 포맷에서 저장하지 못한 항목은 export issue에 `missing_image`로 기록한다. `--strict`를 사용하면 다른 validation issue와 동일하게 해당 레코드를 skip할 수 있다.
 
 그 외 issue 처리:
 

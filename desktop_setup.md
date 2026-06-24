@@ -92,10 +92,11 @@ dist-installer\AutoLabel-Setup.exe
 torch
 transformers
 ultralytics
-easyocr
+paddleocr
+mmpose/mmcv/mmengine/mmdet
 ```
 
-따라서 기본 installer에서는 API 기반 VLM 생성, 라벨 변환, 평가를 사용할 수 있다. Grounding DINO, SAM2, Ultralytics pose/tracking, EasyOCR plugin을 포함한 별도 GPU/CPU 배포판은 대상 CUDA/PyTorch 조합을 고정해 별도로 빌드해야 한다. 현재 기본 SAM backend는 Ultralytics SAM2(`sam2_b.pt`)이며 plugin 최초 실행 시 Ultralytics cache에 weight를 받는다. 공식 SAM3(`facebook/sam3`)는 Hugging Face gated model이라 사용자별 접근 승인과 로그인 토큰이 필요하므로 일반 `setup.exe` 기본값으로 묶기보다 고급 옵션 plugin 설정으로 제공한다. 모델 가중치는 installer에 포함하지 않고 plugin 최초 실행 시 공급자 cache에 받는 방식을 사용한다.
+따라서 기본 installer에서는 API 기반 VLM 생성, 라벨 변환, 평가를 사용할 수 있다. SigLIP classification, Grounding DINO, Grounded-SAM2, Ultralytics pose/tracking, PaddleOCR plugin을 포함한 별도 GPU/CPU 배포판은 대상 CUDA/PyTorch 조합을 고정해 별도로 빌드해야 한다. 현재 기본 segmentation backend는 Grounding DINO + Ultralytics SAM2(`sam2_b.pt`) pipeline이며 plugin 최초 실행 시 공급자 cache에 weight를 받는다. 공식 SAM3(`facebook/sam3`)는 Hugging Face gated model이라 사용자별 접근 승인과 로그인 토큰이 필요하므로 일반 `setup.exe` 기본값으로 묶기보다 고급 옵션 plugin 설정으로 제공한다. 모델 가중치는 installer에 포함하지 않고 plugin 최초 실행 시 공급자 cache에 받는 방식을 사용한다.
 
 ## 배포 전 점검
 

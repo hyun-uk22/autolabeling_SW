@@ -20,9 +20,9 @@
 
 1. 자연어 prompt를 사용해 라벨링 대상과 태스크를 지정한다.
 2. 태스크별 전문 모델 plugin을 먼저 실행해 VLM 결과가 섞이지 않은 라벨을 생성한다.
-3. 전문 모델 결과가 비어 있거나 불충분한 경우에만 저비용 VLM의 반복 추론으로 초안 라벨을 생성한다.
-4. 반복 결과의 self-consistency를 측정한다.
-5. consistency가 낮은 이미지만 고성능 VLM으로 에스컬레이션한다.
+3. 전문 모델 결과가 비어 있거나 `vlm_first` 전략을 사용할 때만 저비용 VLM의 반복 추론으로 초안 라벨을 생성한다.
+4. 선택적으로 specialist 재추론 또는 Low/High LMM 재생성 비교를 수행해 1차 결과와의 agreement를 측정한다.
+5. agreement 임계치 미달 이미지를 결과 리포트와 라벨 편집 큐로 전달한다.
 6. 결과를 내부 공통 표현으로 정규화한다.
 7. YOLO, Pascal VOC, COCO, Vision JSONL, custom 포맷으로 저장한다.
 8. 처리 시간, API 호출, uncertainty, GT 평가 결과를 기록한다.
@@ -40,7 +40,7 @@
 | consistency | `src/utils/geometry.py` | IoU 및 Jaccard 기반 일관성 계산 |
 | plugin registry | `src/plugins/registry.py` | built-in/custom plugin 로드 |
 | plugin orchestrator | `src/plugins/orchestrator.py` | 전문 모델 실행, 결과 병합, 점수 갱신 |
-| built-in plugins | `src/plugins/builtin.py` | CLIP, DINO, SAM, pose, OCR, tracking adapter |
+| built-in plugins | `src/plugins/builtin.py` | SigLIP, Grounding DINO, Grounded-SAM2, pose, OCR, tracking adapter |
 | exporter | `src/utils/format_converter.py` | 라벨 포맷 저장 |
 | visualization | `src/utils/visualize.py` | 이미지 위 라벨 시각화 |
 | evaluation | `src/utils/evaluation.py` | YOLO GT 평가와 실험 리포트 |
@@ -51,12 +51,12 @@
 
 | task type | VLM 출력 필드 | 전문 plugin 예시 | 대표 출력 |
 | --- | --- | --- | --- |
-| `classification` | `classifications` | CLIP | Vision JSONL/custom |
+| `classification` | `classifications` | SigLIP | Vision JSONL/custom |
 | `object_detection` | `boxes` | Grounding DINO | YOLO/VOC/COCO/Vision JSONL |
-| `segmentation` | `segments` | Grounding DINO + SAM | COCO/Vision JSONL |
+| `segmentation` | `segments` | Grounded-SAM2 pipeline(Grounding DINO + SAM2) | COCO/Vision JSONL |
 | `pose_estimation` | `poses` | Ultralytics pose | Vision JSONL/custom |
 | `ocr` | `texts` | PaddleOCR | Vision JSONL/custom |
-| `tracking` | `tracks` | Grounding DINO + ByteTrack | Vision JSONL/custom |
+| `tracking` | `tracks` | YOLO26n + ByteTrack | Vision JSONL/custom |
 | `all` | 전체 필드 | 설정된 모든 plugin | Vision JSONL/COCO/custom |
 
 기본 태스크는 `object_detection`이다.
@@ -173,10 +173,10 @@ python main.py
 | `--prompt` | 객체 탐지 기본 prompt | VLM에 전달할 사용자 지시문 |
 | `--task_type` | `object_detection` | 라벨링 태스크 |
 | `--generation_strategy` | `specialist_first` | `specialist_first` 또는 기존 `vlm_first` |
-| `--classes_path` | 없음 | Grounding DINO와 SAM3 옵션 후보 클래스에 사용할 `classes.txt` 또는 YOLO `data.yaml` |
+| `--classes_path` | 없음 | Grounding DINO, Grounded-SAM2, classification 후보 클래스에 사용할 `classes.txt` 또는 YOLO `data.yaml` |
 | `--specialist_consistency_runs` | `0` | 1이면 1차 specialist 결과를 유지한 채 검증용 specialist 재추론 1회 수행 |
 | `--specialist_advisor_mode` | `none` | 재추론 설정 patch 제안 방식. `none`, `low`, `high`, `both` |
-| `--threshold` | `0.75` | low 결과 consistency 에스컬레이션 기준 |
+| `--threshold` | `0.75` | specialist/LMM agreement 검토 기준 및 VLM fallback consistency 기준 |
 | `--low_model` | 환경 변수 또는 `gpt-4o-mini` | 초안 생성 VLM |
 | `--high_model` | 환경 변수 또는 `gpt-4o` | 불확실 샘플 검증 VLM |
 | `--inference_count` | `3` | low VLM 반복 추론 횟수 |
@@ -598,13 +598,13 @@ uncertainty = 1 - reliability
 
 현재 두 항목은 동일한 가중치 `0.5`를 사용한다.
 
-## 17. High VLM 에스컬레이션
+## 17. VLM fallback과 High LMM 검증
 
 결정 규칙:
 
 ```text
-consistency < threshold -> High VLM
-consistency >= threshold -> Low 결과 사용
+VLM fallback 경로에서 consistency < threshold -> High LMM 검증
+VLM fallback 경로에서 consistency >= threshold -> Low 결과 사용
 ```
 
 ### 17.1 Consistent 경로
@@ -626,6 +626,8 @@ high 결과의 `consistency_score`에는 low 반복 결과의 consistency가 들
 high 결과의 `mean_confidence`는 high 결과로 다시 계산한다.
 
 현재 `uncertainty_score`는 high 결과 confidence로 다시 계산하지 않고, low consistency와 첫 low 결과 confidence로 계산한 값을 유지한다.
+
+기본 `specialist_first` 경로에서 specialist 결과가 충분히 생성되면 이 단계는 실행되지 않을 수 있다. 사용자가 LMM 재생성 비교를 선택한 경우에는 High LMM 검증이 아니라 1차 specialist 결과와 LMM 재생성 결과의 agreement를 계산하는 report-only 비교로 동작한다.
 
 ## 18. 전문 모델 Plugin 단계
 
@@ -650,11 +652,11 @@ orchestrator는 설정 순서대로 plugin을 순회하고 현재 `task_type`을
 
 | plugin | 기본 모델/엔진 | 역할 |
 | --- | --- | --- |
-| `classification` | `openai/clip-vit-base-patch32` | zero-shot classification |
+| `classification` | `google/siglip-base-patch16-224` | zero-shot classification |
 | `grounding_dino` | `IDEA-Research/grounding-dino-base` | text-conditioned bbox |
 | `sam` | `sam2_b.pt` (`ultralytics_sam2`) | seed bbox 기반 polygon mask 생성 |
-| `pose` | `yolo11n-pose.pt` | pose keypoint |
-| `ocr` | PaddleOCR | text detection/recognition |
+| `pose` | `yolo26l-pose.pt` | pose keypoint |
+| `ocr` | PaddleOCR PP-OCRv5 + `korean_PP-OCRv5_mobile_rec` | text detection/recognition |
 | `tracking` | `yolo26n.pt` + ByteTrack | frame sequence tracking |
 
 모델 파일은 repository에 포함되지 않으며 태스크 시작 시 plugin prepare 단계에서 library가 다운로드할 수 있다. 기본 배포 설정은 별도 Hugging Face 승인이 필요 없는 `ultralytics_sam2` backend와 `sam2_b.pt`를 사용한다.
@@ -669,7 +671,7 @@ user prompt
 현재까지의 seed DetectionResult
 ```
 
-Grounding DINO는 설정의 `labels`와 VLM 결과의 classification/box/segment/pose label을 후보 text prompt로 사용한다.
+Grounding DINO는 설정의 `labels`, `classes_path`, 프롬프트의 YOLO `names:` 블록, VLM 결과의 classification/box/segment/pose label을 후보 text prompt로 사용한다.
 
 기본 SAM2 backend는 seed bbox가 필요하다. 따라서 segmentation chain에서 Grounding DINO가 SAM보다 먼저 있어야 한다.
 
@@ -750,9 +752,9 @@ bedrock:...+grounding_dino+sam
 
 `--plugin_fail_fast` 사용 시 plugin 오류를 다시 발생시켜 현재 이미지의 처리 흐름을 중단한다. 바깥 이미지별 예외 처리에서 오류를 출력하고 다음 이미지로 이동한다.
 
-### 18.8 Plugin 기반 에스컬레이션
+### 18.8 Plugin 결과와 VLM fallback 검증
 
-high VLM 에스컬레이션 결정은 low VLM 초안과 specialist plugin 실행 이후에 수행된다. 따라서 low VLM consistency, plugin agreement, validation issue를 함께 사용해 고성능 VLM 호출 여부를 결정할 수 있다.
+VLM fallback 경로의 high LMM 검증 결정은 low VLM 초안과 specialist plugin 실행 이후에 수행된다. 따라서 low VLM consistency, plugin agreement, validation issue를 함께 사용해 고성능 LMM 호출 여부를 결정할 수 있다.
 
 기본 순서:
 
@@ -788,6 +790,12 @@ LLM advisor는 다음 필드만 제안할 수 있다.
 ```
 
 사용자가 지정한 class list는 immutable이다. advisor는 클래스 추가, 삭제, 이름 변경, synonym 치환, bbox 생성, 최종 라벨 수정을 수행할 수 없다. 결과에는 `specialist_result_consistency`, `specialist_bbox_agreement`, `specialist_mean_matched_iou`, `specialist_rerun_patch`가 기록된다.
+
+### 18.10 LMM 재생성 Agreement
+
+`llm_consistency_mode`가 `low`, `high`, `both`이면 1차 Vision Specialist 결과를 pseudo-reference로 두고 선택한 LMM이 같은 이미지에 대해 라벨을 재생성한다. 이 단계는 최종 라벨을 자동 교체하지 않으며, bbox IoU 기반 `Prediction Agreement`, `pseudo_precision`, `pseudo_recall`, `pseudo_f1`, `mean_matched_iou`를 기록한다.
+
+이미지별 agreement가 `threshold`보다 낮으면 `review_required=true`로 표시된다. 실행 요약에는 `llm_review_images`와 `llm_review_records`가 저장되고, Streamlit 결과 리포트에서는 이 이미지들만 라벨 편집 큐로 전달할 수 있다. threshold를 통과한 이미지는 해당 라벨 편집 큐에 표시하지 않는다.
 
 ## 19. Dataset Insight Agent
 
