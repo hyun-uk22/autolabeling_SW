@@ -442,6 +442,43 @@ path: d:\\datasets\\yolo
         self.assertAlmostEqual(box.xmax, 0.4)
         self.assertAlmostEqual(box.ymax, 0.4)
 
+    def test_custom_mapping_imports_two_point_bbox(self):
+        self._write(
+            "vendor/custom_label.json",
+            json.dumps({
+                "images": [{"file_name": "mapped.jpg", "width": 200, "height": 100}],
+                "annotations": [
+                    {"category_name": "lion", "bbox": [[20, 10], [80, 40]]},
+                ],
+            }),
+        )
+        spec = {
+            "format": "json",
+            "image_name_path": "$.images[0].file_name",
+            "image_width_path": "$.images[0].width",
+            "image_height_path": "$.images[0].height",
+            "objects_path": "$.annotations[*]",
+            "label_path": "@.category_name",
+            "bbox_path": "@.bbox",
+            "bbox_format": "xyxy",
+            "bbox_unit": "pixel",
+        }
+
+        batch = import_labels_with_report(
+            os.path.join(self.label_dir, "vendor"),
+            self.image_dir,
+            source_format="custom_mapping",
+            custom_mapping_spec=json.dumps(spec),
+        )
+
+        self.assertEqual(len(batch.records), 1)
+        box = batch.records[0][1].boxes[0]
+        self.assertEqual(box.label, "lion")
+        self.assertAlmostEqual(box.xmin, 0.1)
+        self.assertAlmostEqual(box.ymin, 0.1)
+        self.assertAlmostEqual(box.xmax, 0.4)
+        self.assertAlmostEqual(box.ymax, 0.4)
+
 
 if __name__ == "__main__":
     unittest.main()

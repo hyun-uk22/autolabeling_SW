@@ -273,6 +273,17 @@ def _bbox_from_value(value: Any) -> Optional[Tuple[float, float, float, float]]:
             return x, y, x + float(value["w"]), y + float(value["h"])
     if isinstance(value, list) and len(value) >= 4:
         return tuple(float(item) for item in value[:4])  # type: ignore[return-value]
+    if (
+        isinstance(value, list)
+        and len(value) >= 2
+        and all(isinstance(point, list) and len(point) >= 2 for point in value[:2])
+    ):
+        return (
+            float(value[0][0]),
+            float(value[0][1]),
+            float(value[1][0]),
+            float(value[1][1]),
+        )
     return None
 
 
