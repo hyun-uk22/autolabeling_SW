@@ -5,6 +5,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from ..utils.custom_label_mapper import (
+    CUSTOM_MAPPING_FORMAT,
+    infer_custom_mapping_spec_from_sample,
+    sample_custom_label_file,
+)
+from ..utils import json_io
 from .models import OperationPlan, WorkflowPlan
 
 
@@ -128,7 +134,7 @@ def _json_format(path: Path) -> Optional[str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
         return None
-    if isinstance(data, dict) and {"images", "annotations", "categories"}.issubset(data):
+    if _is_coco_like(data):
         return "coco"
     if isinstance(data, list) and data and all(isinstance(item, dict) for item in data[:10]):
         return "generic_json"
@@ -139,6 +145,25 @@ def _json_format(path: Path) -> Optional[str]:
     if any(isinstance(item, dict) and "bbox" in item for item in iter_dicts(data)):
         return "generic_json"
     return None
+
+
+def _is_coco_like(data: Any) -> bool:
+    if not isinstance(data, dict) or not {"images", "annotations", "categories"}.issubset(data):
+        return False
+    images = data.get("images") or []
+    annotations = data.get("annotations") or []
+    categories = data.get("categories") or []
+    if not isinstance(images, list) or not isinstance(annotations, list) or not isinstance(categories, list):
+        return False
+    if images and not all(isinstance(item, dict) and "id" in item and "file_name" in item for item in images[:10]):
+        return False
+    if annotations and not all(
+        isinstance(item, dict) and {"image_id", "category_id", "bbox"}.issubset(item) for item in annotations[:10]
+    ):
+        return False
+    if categories and not all(isinstance(item, dict) and "id" in item and "name" in item for item in categories[:10]):
+        return False
+    return True
 
 
 def iter_dicts(value):
@@ -534,8 +559,14 @@ def _source_format(request: str) -> Optional[str]:
         for alias in aliases:
             for match in re.finditer(re.escape(alias), lowered):
                 suffix = lowered[match.end():match.end() + 18]
-                if re.match(r"\s*(?:라벨|데이터셋|파일)", suffix):
-                    return name
+                if re.match(r"\s*(?:라벨|데이터셋|파일|형식|포맷|규격)", suffix):
+                    if re.match(r"\s*(?:라벨|데이터셋|파일)", suffix):
+                        return name
+                    if re.match(
+                        r"\s*(?:형식|포맷|규격)\s*(?:이야|입니다|이고|이며|이다|임|은|는|라고|로 되어|으로 되어)",
+                        suffix,
+                    ):
+                        return name
     return None
 
 
@@ -708,11 +739,53 @@ def _select_label_candidate(
         if not selected:
             raise ValueError(f"지정한 경로에서 변환 가능한 라벨을 찾지 못했습니다: {_relative(explicit_path, root)}")
     if requested_format:
-        matching = [candidate for candidate in selected if candidate["format"] == requested_format]
+        if requested_format == CUSTOM_MAPPING_FORMAT:
+            matching = [
+                candidate
+                for candidate in selected
+                if candidate["format"] in {"generic_json", "coco"}
+            ]
+        else:
+            matching = [candidate for candidate in selected if candidate["format"] == requested_format]
         if not matching:
             raise ValueError(f"Workspace에서 요청한 입력 포맷 `{requested_format}` 라벨을 찾지 못했습니다.")
         selected = matching
     return selected[0]
+
+
+def _custom_label_field_from_request(request: str) -> Optional[str]:
+    patterns = (
+        r'라벨[^\r\n]{0,80}"[^"]+"\s*(?:의|에서|안의)\s*"([^"]+)"',
+        r"라벨[^\r\n]{0,80}'[^']+'\s*(?:의|에서|안의)\s*'([^']+)'",
+        r'라벨[^\r\n]{0,80}"([A-Za-z_][A-Za-z0-9_]*)"',
+        r"라벨[^\r\n]{0,80}'([A-Za-z_][A-Za-z0-9_]*)'",
+        r"(?:label\s*(?:name|field)?)[^\r\n]{0,60}`?([A-Za-z_][A-Za-z0-9_]*)`?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, request, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _custom_mapping_for_path(input_path: str, request: str = "") -> tuple[str, Optional[str]]:
+    sample_path = sample_custom_label_file(input_path)
+    spec = infer_custom_mapping_spec_from_sample(sample_path)
+    label_field = _custom_label_field_from_request(request)
+    if label_field:
+        spec["label_path"] = f"@.{label_field}"
+    return json_io.dumps(spec, ensure_ascii=False, indent=2), label_field
+
+
+def _should_use_custom_mapping(
+    selected: Dict[str, Any],
+    requested_source_format: Optional[str],
+) -> bool:
+    if requested_source_format == CUSTOM_MAPPING_FORMAT:
+        return True
+    if requested_source_format:
+        return False
+    return selected["format"] == "generic_json"
 
 
 def build_conversation_plan(
@@ -767,13 +840,31 @@ def build_conversation_plan(
                 warnings.append(
                     "원본 이미지 디렉터리를 찾지 못했습니다. YOLO/Vision JSON처럼 이미지 크기가 필요 없는 출력은 계속 진행합니다."
                 )
+        use_custom_mapping = _should_use_custom_mapping(selected, requested_source_format)
+        source_format = CUSTOM_MAPPING_FORMAT if use_custom_mapping else (requested_source_format or "auto")
+        custom_label_mapping = None
+        input_path = selected["path"]
+        if use_custom_mapping:
+            selected_path = Path(selected["path"])
+            if explicit_path and explicit_path.is_dir():
+                input_path = str(explicit_path)
+            elif selected_path.is_file():
+                input_path = str(selected_path.parent)
+            custom_label_mapping, label_field_override = _custom_mapping_for_path(input_path, request)
+            if requested_source_format == CUSTOM_MAPPING_FORMAT:
+                warnings.append("커스텀 라벨 샘플을 분석해 custom_mapping 매핑 스펙을 자동 생성했습니다.")
+            else:
+                warnings.append("generic JSON 라벨을 custom_mapping으로 자동 분석해 변환합니다.")
+            if label_field_override:
+                warnings.append(f"프롬프트에서 지정한 라벨 필드 `{label_field_override}`를 custom_mapping에 반영했습니다.")
         operation = OperationPlan(
             action="convert",
-            input_path=selected["path"],
+            input_path=input_path,
             img_dir=selected_images["path"],
             out_dir=str((root / "data" / "converted").resolve()),
             formats=formats,
-            source_format="auto",
+            source_format=source_format,
+            custom_label_mapping=custom_label_mapping,
             duplicate_iou=duplicate_iou if duplicate_iou is not None else 0.85,
             strict=bool(overrides.get("strict")) or _contains_any(request.lower(), ("strict", "엄격")),
             require_approval=False,

@@ -147,6 +147,29 @@ def _first_key(item: Dict[str, Any], keys: Iterable[str]) -> Optional[str]:
     return None
 
 
+def _looks_like_two_point_bbox(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) >= 2
+        and all(isinstance(point, list) and len(point) >= 2 for point in value[:2])
+    )
+
+
+def _looks_like_pixel_bbox(value: Any) -> bool:
+    if _looks_like_two_point_bbox(value):
+        coordinates = [float(value[0][0]), float(value[0][1]), float(value[1][0]), float(value[1][1])]
+        return any(abs(coordinate) > 1.0 for coordinate in coordinates)
+    if isinstance(value, list) and len(value) >= 4:
+        return any(abs(float(item)) > 1.0 for item in value[:4])
+    if isinstance(value, dict):
+        numeric_values = []
+        for key in ("xmin", "ymin", "xmax", "ymax", "x", "y", "width", "height", "w", "h"):
+            if key in value:
+                numeric_values.append(float(value[key]))
+        return any(abs(item) > 1.0 for item in numeric_values)
+    return False
+
+
 def infer_custom_mapping_spec_heuristic(sample_path: str) -> Dict[str, Any]:
     data = json_io.load_file(sample_path)
     if not isinstance(data, dict):
@@ -180,6 +203,12 @@ def infer_custom_mapping_spec_heuristic(sample_path: str) -> Dict[str, Any]:
         image_key = _first_key(data["image"], ("file_name", "filename", "name", "path"))
         if image_key:
             image_name_path = f"$.image.{image_key}"
+    if not image_name_path and isinstance(data.get("images"), list) and data["images"]:
+        first_image = data["images"][0]
+        if isinstance(first_image, dict):
+            image_key = _first_key(first_image, ("file_name", "filename", "name", "path"))
+            if image_key:
+                image_name_path = f"$.images[0].{image_key}"
     if not image_name_path:
         object_image_key = _first_key(object_sample, ("image", "image_name", "file_name", "filename", "path"))
         if object_image_key:
@@ -192,6 +221,19 @@ def infer_custom_mapping_spec_heuristic(sample_path: str) -> Dict[str, Any]:
             width_path = "$.image.width"
         if "height" in data["image"]:
             height_path = "$.image.height"
+    if isinstance(data.get("images"), list) and data["images"]:
+        first_image = data["images"][0]
+        if isinstance(first_image, dict):
+            if "width" in first_image:
+                width_path = "$.images[0].width"
+            if "height" in first_image:
+                height_path = "$.images[0].height"
+
+    bbox_value = object_sample.get(bbox_key)
+    bbox_format = "xyxy" if _looks_like_two_point_bbox(bbox_value) else "xywh"
+    bbox_unit = "pixel" if width_path and height_path else "normalized"
+    if _looks_like_pixel_bbox(bbox_value):
+        bbox_unit = "pixel"
 
     return {
         "format": "json",
@@ -201,8 +243,8 @@ def infer_custom_mapping_spec_heuristic(sample_path: str) -> Dict[str, Any]:
         "objects_path": object_path,
         "label_path": f"@.{label_key}" if label_key else None,
         "bbox_path": f"@.{bbox_key}",
-        "bbox_format": "xywh",
-        "bbox_unit": "pixel" if width_path and height_path else "normalized",
+        "bbox_format": bbox_format,
+        "bbox_unit": bbox_unit,
         "confidence_path": "@.score" if "score" in object_sample else ("@.confidence" if "confidence" in object_sample else None),
         "default_image_ext": ".jpg",
     }

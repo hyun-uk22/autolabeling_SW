@@ -161,9 +161,144 @@ class ConversationWorkflowTests(unittest.TestCase):
             )
             operation = proposal["plan"]["operations"][0]
 
-            self.assertEqual(Path(operation["input_path"]), label_dir / "custom.json")
+            self.assertEqual(Path(operation["input_path"]), label_dir)
             self.assertEqual(operation["formats"], ["yolo"])
-            self.assertEqual(operation["source_format"], "auto")
+            self.assertEqual(operation["source_format"], "custom_mapping")
+            self.assertTrue(operation["custom_label_mapping"])
+
+    def test_custom_mapping_conversion_plan_infers_mapping_from_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "labeled"
+            image_dir = root / "raw"
+            label_dir.mkdir()
+            image_dir.mkdir()
+            Image.new("RGB", (1920, 1080), "white").save(image_dir / "sample.jpg")
+            (label_dir / "sample.json").write_text(
+                json.dumps(
+                    {
+                        "images": [
+                            {
+                                "file_name": "sample.jpg",
+                                "width": 1920,
+                                "height": 1080,
+                            }
+                        ],
+                        "annotations": [
+                            {
+                                "category_name": "inermis",
+                                "bbox": [[1189.35, 152.11], [1570.34, 436.59]],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            proposal = build_conversation_plan(
+                "커스텀 포맷 라벨 데이터를 yolo 형식으로 바꿔줘",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+            mapping = json.loads(operation["custom_label_mapping"])
+
+            self.assertEqual(operation["action"], "convert")
+            self.assertEqual(operation["source_format"], "custom_mapping")
+            self.assertEqual(Path(operation["input_path"]), label_dir)
+            self.assertEqual(Path(operation["img_dir"]), image_dir)
+            self.assertEqual(operation["formats"], ["yolo"])
+            self.assertEqual(mapping["image_name_path"], "$.images[0].file_name")
+            self.assertEqual(mapping["image_width_path"], "$.images[0].width")
+            self.assertEqual(mapping["image_height_path"], "$.images[0].height")
+            self.assertEqual(mapping["objects_path"], "$.annotations[*]")
+            self.assertEqual(mapping["label_path"], "@.category_name")
+            self.assertEqual(mapping["bbox_path"], "@.bbox")
+            self.assertEqual(mapping["bbox_format"], "xyxy")
+            self.assertEqual(mapping["bbox_unit"], "pixel")
+
+            result = execute_workflow_plan(proposal["plan"], thread_id="conversation-custom-mapping-test")
+
+            self.assertEqual(result["status"], "completed")
+            output = result["operation_outputs"][0]
+            self.assertEqual(output["resolved_source_format"], "custom_mapping")
+            self.assertEqual(output["records_converted"], 1)
+
+    def test_generic_json_conversion_prompt_uses_custom_mapping_automatically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "data" / "labeled"
+            image_dir = root / "data" / "raw"
+            label_dir.mkdir(parents=True)
+            image_dir.mkdir(parents=True)
+            Image.new("RGB", (1920, 1080), "white").save(image_dir / "sample.jpg")
+            (label_dir / "sample.json").write_text(
+                json.dumps(
+                    {
+                        "images": [{"file_name": "sample.jpg", "width": 1920, "height": 1080}],
+                        "annotations": [{"species": "inermis", "bbox": [[100, 100], [300, 300]]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            proposal = build_conversation_plan(
+                "현재 데이터셋의 라벨링 형식을 yolo 형식으로 바꿔줘",
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+
+            self.assertEqual(operation["source_format"], "custom_mapping")
+            self.assertEqual(Path(operation["input_path"]), label_dir)
+            self.assertTrue(operation["custom_label_mapping"])
+            self.assertTrue(any("custom_mapping으로 자동 분석" in warning for warning in proposal["warnings"]))
+
+            result = execute_workflow_plan(proposal["plan"], thread_id="conversation-auto-custom-mapping-test")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["operation_outputs"][0]["records_converted"], 1)
+
+    def test_custom_mapping_prompt_can_override_label_field(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = root / "data" / "labeled"
+            image_dir = root / "data" / "raw"
+            label_dir.mkdir(parents=True)
+            image_dir.mkdir(parents=True)
+            Image.new("RGB", (1920, 1080), "white").save(image_dir / "sample.jpg")
+            (label_dir / "sample.json").write_text(
+                json.dumps(
+                    {
+                        "images": [{"file_name": "sample.jpg", "width": 1920, "height": 1080}],
+                        "annotations": [
+                            {
+                                "species": "inermis",
+                                "category_name": "wrong_category",
+                                "bbox": [[100, 100], [300, 300]],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            proposal = build_conversation_plan(
+                '현재 데이터셋의 라벨링 형식은 custom mapping 형식이야. '
+                '이것을 yolo 형식으로 바꿔주는데, 라벨 이름은 "annotations"의 "species" 로 해줘',
+                root,
+            )
+            operation = proposal["plan"]["operations"][0]
+            mapping = json.loads(operation["custom_label_mapping"])
+
+            self.assertEqual(operation["source_format"], "custom_mapping")
+            self.assertEqual(mapping["label_path"], "@.species")
+            self.assertTrue(any("species" in warning for warning in proposal["warnings"]))
+
+            result = execute_workflow_plan(proposal["plan"], thread_id="conversation-species-custom-mapping-test")
+
+            self.assertEqual(result["status"], "completed")
+            output = result["operation_outputs"][0]
+            self.assertEqual(output["records_converted"], 1)
+            self.assertEqual(output["dataset_insight"]["distribution"]["inermis"]["count"], 1)
 
     def test_rule_parser_runs_before_llm_intent_router(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -203,7 +338,7 @@ class ConversationWorkflowTests(unittest.TestCase):
             self.assertEqual(routed["route_source"], "llm")
             self.assertEqual(operation["action"], "convert")
             self.assertEqual(operation["formats"], ["coco"])
-            self.assertEqual(operation["source_format"], "auto")
+            self.assertEqual(operation["source_format"], "yolo")
 
     def test_llm_router_recovers_from_stale_conversation_plan_import(self):
         with tempfile.TemporaryDirectory() as directory:
