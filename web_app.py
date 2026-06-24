@@ -377,6 +377,32 @@ def start_label_editor_issue_queue(workspace, files, context):
     st.rerun()
 
 
+def start_label_editor_context(workspace, context):
+    context = dict(context or {})
+    context.setdefault("source_format", "auto")
+    context.setdefault("task_type", "object_detection")
+    context.setdefault("output_dir", WORKSPACE_DEFAULTS["labels"])
+    if context.get("source_format") not in SOURCE_OPTIONS:
+        context["source_format"] = "auto"
+    for key, state_key in {
+        "label_path": "editor_label_path",
+        "image_dir": "editor_image_dir",
+        "source_format": "editor_source_format",
+        "classes_path": "editor_classes",
+        "task_type": "editor_task",
+        "output_dir": "editor_output",
+    }.items():
+        value = context.get(key)
+        if value:
+            st.session_state[state_key] = _relative_workspace_path(workspace, value) if Path(str(value)).is_absolute() else str(value)
+    st.session_state.editor_issue_queue = []
+    st.session_state.editor_issue_index = 0
+    st.session_state.editor_issue_context = {}
+    st.session_state.editor_loaded_context_signature = ""
+    st.session_state.editor_auto_load = True
+    st.session_state.open_label_editor = True
+
+
 def render_issue_editor_launcher(files, context, key_prefix, title="문제 파일 라벨 편집", filter_to_issue_queue=False):
     issue_files = unique_issue_files(files)
     if not issue_files:
@@ -429,6 +455,30 @@ def workflow_editor_context(output):
         "task_type": output.get("task_type", "object_detection"),
         "output_dir": output_dir,
     }
+
+
+def generation_editor_context_options(output):
+    options = [("1차 Vision Model 라벨", workflow_editor_context(output))]
+    llm_exports = output.get("llm_exports") or {}
+    output_root = llm_exports.get("output_root")
+    artifacts = llm_exports.get("artifacts") or {}
+    if output_root:
+        for level in ("low", "high"):
+            if level in artifacts:
+                context = workflow_editor_context(output)
+                context["label_path"] = str(Path(output_root) / level)
+                context["output_dir"] = context["label_path"]
+                options.append((f"{level.upper()} LMM 재생성 라벨", context))
+    review_root = llm_exports.get("review_root")
+    review_artifacts = llm_exports.get("review_artifacts") or {}
+    if review_root:
+        for level in ("low", "high"):
+            if level in review_artifacts:
+                context = workflow_editor_context(output)
+                context["label_path"] = str(Path(review_root) / level)
+                context["output_dir"] = context["label_path"]
+                options.append((f"{level.upper()} LMM 검토 후보 라벨", context))
+    return options
 
 
 def default_editor_save_formats(source_format, report=None):
@@ -652,6 +702,27 @@ def render_workflow_report(result, key_prefix="report"):
                 st.caption(
                     "1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 self_consistency를 계산합니다."
                 )
+                llm_exports = output.get("llm_exports") or {}
+                if llm_exports.get("enabled"):
+                    st.caption(
+                        f"LMM 재생성 라벨 저장 위치: `{llm_exports.get('output_root')}` / "
+                        f"검토 필요 라벨 저장 위치: `{llm_exports.get('review_root')}`"
+                    )
+                    export_rows = []
+                    for level, artifacts in (llm_exports.get("artifacts") or {}).items():
+                        export_rows.append({
+                            "LMM": level,
+                            "저장 폴더": str(Path(llm_exports.get("output_root", "")) / level),
+                            "산출물": ", ".join(sorted(artifacts.keys())) if isinstance(artifacts, dict) else "",
+                        })
+                    for level, artifacts in (llm_exports.get("review_artifacts") or {}).items():
+                        export_rows.append({
+                            "LMM": f"{level} review",
+                            "저장 폴더": str(Path(llm_exports.get("review_root", "")) / level),
+                            "산출물": ", ".join(sorted(artifacts.keys())) if isinstance(artifacts, dict) else "",
+                        })
+                    if export_rows:
+                        st.dataframe(export_rows, width="stretch")
                 llm_review_records = specialist_consistency.get("llm_review_records") or []
                 if llm_review_records:
                     st.markdown("**LMM 기준 검토 대상 이미지**")
@@ -667,9 +738,18 @@ def render_workflow_report(result, key_prefix="report"):
                         })
                     st.dataframe(review_rows, width="stretch")
                     review_files = [row["파일"] for row in review_rows if row.get("파일")]
+                    context_options = generation_editor_context_options(output)
+                    context_labels = [label for label, _ in context_options]
+                    selected_context_label = st.selectbox(
+                        "라벨 편집에 사용할 라벨 기준",
+                        context_labels,
+                        key=f"{key_prefix}-{index}-llm-review-editor-source",
+                        help="같은 이미지 큐를 1차 Vision 라벨 또는 LMM 재생성 라벨 중 어떤 산출물 기준으로 편집할지 선택합니다.",
+                    )
+                    selected_context = dict(context_options[context_labels.index(selected_context_label)][1])
                     render_issue_editor_launcher(
                         review_files,
-                        workflow_editor_context(output),
+                        selected_context,
                         f"{key_prefix}-{index}-llm-review",
                         title="LMM 임계치 미달 이미지만 라벨 편집",
                         filter_to_issue_queue=True,
@@ -1229,6 +1309,9 @@ def object_polygon_points(obj, width, height):
     top = to_float(obj.get("top"))
     scale_x = to_float(obj.get("scaleX"), 1.0)
     scale_y = to_float(obj.get("scaleY"), 1.0)
+    path_offset = obj.get("pathOffset") or {}
+    offset_x = to_float(path_offset.get("x"), 0.0) if isinstance(path_offset, dict) else 0.0
+    offset_y = to_float(path_offset.get("y"), 0.0) if isinstance(path_offset, dict) else 0.0
     points = obj.get("points") or []
     if not points and obj.get("path"):
         points = []
@@ -1238,7 +1321,7 @@ def object_polygon_points(obj, width, height):
             command_type = str(command[0]).upper()
             if command_type not in {"M", "L"}:
                 continue
-            points.append({"x": command[1], "y": command[2], "_absolute": True})
+            points.append({"x": command[1], "y": command[2], "_path": True})
     result = []
     for point in points:
         point_x = to_float(point.get("x"))
@@ -1246,12 +1329,15 @@ def object_polygon_points(obj, width, height):
         if point.get("_absolute"):
             x = point_x / max(width, 1)
             y = point_y / max(height, 1)
+        elif point.get("_path"):
+            x = (left + point_x * scale_x) / max(width, 1)
+            y = (top + point_y * scale_y) / max(height, 1)
         elif 0 <= point_x <= 1 and 0 <= point_y <= 1:
             x = point_x
             y = point_y
         else:
-            x = (left + point_x * scale_x) / max(width, 1)
-            y = (top + point_y * scale_y) / max(height, 1)
+            x = (left + (point_x - offset_x) * scale_x) / max(width, 1)
+            y = (top + (point_y - offset_y) * scale_y) / max(height, 1)
         result.append(Point(x=clamp_unit(x), y=clamp_unit(y)))
     return result
 
@@ -1318,39 +1404,45 @@ def boxes_for_vertex_editor(result):
 
 def result_with_vertex_editor_payload(base_result, segment_payload, box_payload):
     result = DetectionResult.model_validate(base_result).model_copy(deep=True)
+    has_segment_payload = segment_payload is not None
+    has_box_payload = box_payload is not None
     updated_segments = []
-    for item in segment_payload or []:
-        label = str(item.get("label") or "object").strip()
-        points = [
-            Point(x=clamp_unit(point.get("x")), y=clamp_unit(point.get("y")))
-            for point in item.get("polygon", [])
-            if isinstance(point, dict)
-        ]
-        if len(points) >= 3:
-            updated_segments.append(PolygonSegment(
+    if has_segment_payload:
+        for item in segment_payload or []:
+            label = str(item.get("label") or "object").strip()
+            points = [
+                Point(x=clamp_unit(point.get("x")), y=clamp_unit(point.get("y")))
+                for point in item.get("polygon", [])
+                if isinstance(point, dict)
+            ]
+            if len(points) >= 3:
+                updated_segments.append(PolygonSegment(
+                    label=label,
+                    polygon=points,
+                    confidence=clamp_unit(item.get("confidence", 1.0)),
+                ))
+        if updated_segments or not result.segments:
+            result.segments = updated_segments
+    updated_boxes = []
+    if has_box_payload:
+        for item in box_payload or []:
+            label = str(item.get("label") or "object").strip()
+            xmin = clamp_unit(item.get("xmin"))
+            ymin = clamp_unit(item.get("ymin"))
+            xmax = clamp_unit(item.get("xmax"))
+            ymax = clamp_unit(item.get("ymax"))
+            if xmin >= xmax or ymin >= ymax:
+                continue
+            updated_boxes.append(BoundingBox(
                 label=label,
-                polygon=points,
+                xmin=xmin,
+                ymin=ymin,
+                xmax=xmax,
+                ymax=ymax,
                 confidence=clamp_unit(item.get("confidence", 1.0)),
             ))
-    result.segments = updated_segments
-    updated_boxes = []
-    for item in box_payload or []:
-        label = str(item.get("label") or "object").strip()
-        xmin = clamp_unit(item.get("xmin"))
-        ymin = clamp_unit(item.get("ymin"))
-        xmax = clamp_unit(item.get("xmax"))
-        ymax = clamp_unit(item.get("ymax"))
-        if xmin >= xmax or ymin >= ymax:
-            continue
-        updated_boxes.append(BoundingBox(
-            label=label,
-            xmin=xmin,
-            ymin=ymin,
-            xmax=xmax,
-            ymax=ymax,
-            confidence=clamp_unit(item.get("confidence", 1.0)),
-        ))
-    result.boxes = updated_boxes
+        if updated_boxes or not result.boxes:
+            result.boxes = updated_boxes
     return result
 
 
@@ -1470,7 +1562,10 @@ def render_label_editor_tab(workspace):
     auto_load_issue_context = bool(issue_context and issue_queue) and (
         st.session_state.get("editor_loaded_context_signature") != context_signature
     )
-    if load_clicked or auto_load_issue_context:
+    auto_load_editor_context = bool(st.session_state.pop("editor_auto_load", False)) and (
+        st.session_state.get("editor_loaded_context_signature") != context_signature
+    )
+    if load_clicked or auto_load_issue_context or auto_load_editor_context:
         try:
             records, report = load_editor_records(
                 resolve_workspace_path(workspace, editor_label_path),
@@ -1485,15 +1580,19 @@ def render_label_editor_tab(workspace):
             st.session_state.editor_report = report
             st.session_state.editor_loaded_context_signature = context_signature
             st.session_state.editor_selected_image = records[0]["image"] if records else ""
+            if records:
+                st.session_state.editor_selected_image_select = records[0]["image"]
             st.session_state.editor_save_formats = default_editor_save_formats(editor_source_format, report)
             if load_clicked:
                 st.success(
                     f"{len(records)}개 라벨 데이터를 불러왔습니다. "
                     f"저장 포맷 기본값: {', '.join(st.session_state.editor_save_formats)}"
                 )
+            elif auto_load_editor_context:
+                st.success(f"대화형 요청으로 {len(records)}개 라벨 데이터를 불러왔습니다.")
         except Exception as exc:
             message = f"라벨 불러오기 실패: {exc}"
-            if auto_load_issue_context:
+            if auto_load_issue_context or auto_load_editor_context:
                 st.warning(message)
             else:
                 st.error(message)
@@ -1648,7 +1747,8 @@ def render_label_editor_tab(workspace):
                     if editor_value and (editor_value.get("segments") is not None or editor_value.get("boxes") is not None):
                         update_key = f"polygon_vertex_editor_update_{selected_image}"
                         updated_at = editor_value.get("updatedAt")
-                        if updated_at and st.session_state.get(update_key) != updated_at:
+                        action = editor_value.get("action")
+                        if action in {"move_vertex", "add_bbox", "add_polygon"} and updated_at and st.session_state.get(update_key) != updated_at:
                             st.session_state.setdefault(undo_key, []).append(result.model_dump())
                             updated = result_with_vertex_editor_payload(
                                 result,
@@ -2237,6 +2337,10 @@ def render_conversation(workspace):
                     response = describe_plan(proposal, workspace)
                     st.session_state.pending_proposal = proposal
                     st.session_state.pending_preflight_preview = render_chat_preflight_for_proposal(proposal)
+                elif routed["kind"] == "open_editor":
+                    st.session_state.pending_model_dataset_request = None
+                    response = routed["response"]
+                    start_label_editor_context(workspace, routed.get("editor_context") or {})
                 else:
                     response = routed["response"]
                     if routed.get("diagnosis"):

@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+
 from src.core.models import BoundingBox, DetectionResult
 from src.plugins.base import PluginOutput, VisionTaskPlugin
 from src.plugins.orchestrator import TaskPluginOrchestrator
@@ -199,6 +201,82 @@ class SpecialistConsistencyTests(unittest.TestCase):
         self.assertEqual([item["image"] for item in queue], ["fail.jpg"])
         self.assertEqual(queue[0]["mode"], "high")
         self.assertEqual(queue[0]["mean_bbox_agreement"], 0.4)
+
+    def test_export_generation_writes_low_and_high_llm_labels_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            img_dir = root / "images"
+            out_dir = root / "labeled"
+            vis_dir = root / "visualized"
+            img_dir.mkdir()
+            Image.new("RGB", (100, 100), "white").save(img_dir / "sample.jpg")
+
+            base = DetectionResult(task_type="object_detection", source_model="vision")
+            base.boxes.append(BoundingBox(label="person", xmin=0.1, ymin=0.1, xmax=0.4, ymax=0.4, confidence=0.9))
+            low = DetectionResult(task_type="object_detection", source_model="low")
+            low.boxes.append(BoundingBox(label="person", xmin=0.12, ymin=0.1, xmax=0.42, ymax=0.4, confidence=0.8))
+            high = DetectionResult(task_type="object_detection", source_model="high")
+            high.boxes.append(BoundingBox(label="car", xmin=0.5, ymin=0.5, xmax=0.7, ymax=0.7, confidence=0.7))
+
+            operation = OperationPlan(
+                action="generate",
+                task_type="object_detection",
+                img_dir=str(img_dir),
+                out_dir=str(out_dir),
+                vis_dir=str(vis_dir),
+                formats=["yolo"],
+                llm_consistency_mode="both",
+                threshold=0.75,
+            )
+            records = [
+                {
+                    "image": "sample.jpg",
+                    "status": "Completed",
+                    "result": base.model_dump(),
+                    "issues": [],
+                    "plugin_records": [],
+                    "elapsed_sec": 0.1,
+                    "low_api_attempts": 0,
+                    "high_api_attempts": 0,
+                    "specialist_consistency": {
+                        "llm_consistency": {
+                            "enabled": True,
+                            "mode": "both",
+                            "threshold": 0.75,
+                            "review_required": True,
+                            "comparisons": [
+                                {
+                                    "level": "low",
+                                    "model": "low-model",
+                                    "result": low.model_dump(),
+                                    "bbox_agreement": {"agreement": 1.0},
+                                    "review_required": False,
+                                },
+                                {
+                                    "level": "high",
+                                    "model": "high-model",
+                                    "result": high.model_dump(),
+                                    "bbox_agreement": {"agreement": 0.0},
+                                    "review_required": True,
+                                },
+                            ],
+                        }
+                    },
+                }
+            ]
+
+            summary = WorkflowRuntime().export_generation(operation, records)
+
+            self.assertTrue((out_dir / "sample.txt").is_file())
+            self.assertTrue((root / "labeled_llm" / "low" / "sample.txt").is_file())
+            self.assertTrue((root / "labeled_llm" / "high" / "sample.txt").is_file())
+            self.assertFalse((root / "labeled_review" / "low" / "sample.txt").exists())
+            self.assertTrue((root / "labeled_review" / "high" / "sample.txt").is_file())
+            self.assertTrue(summary["llm_exports"]["enabled"])
+            self.assertEqual(summary["llm_exports"]["output_root"], str(root / "labeled_llm"))
+            comparisons = records[0]["specialist_consistency"]["llm_consistency"]["comparisons"]
+            self.assertIn("label_paths", comparisons[0])
+            self.assertIn("review_label_paths", comparisons[1])
 
 
 if __name__ == "__main__":

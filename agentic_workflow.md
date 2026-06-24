@@ -127,8 +127,8 @@ START
 3. 기본 `specialist_first` 전략에서는 task를 지원하는 plugin을 설정 순서대로 먼저 실행한다.
 4. specialist 결과가 있으면 low VLM 호출 없이 validation/export 후보로 사용한다.
 5. specialist 결과가 비어 있거나 operation이 `generation_strategy=vlm_first`이면 low VLM을 반복 호출해 draft와 self-consistency를 만든다.
-6. plugin agreement와 VLM consistency를 함께 검사한다.
-7. VLM fallback 경로에서 threshold 미만 또는 validation issue가 있으면 high verification 대상으로 지정한다. 별도의 LMM 재생성 비교는 최종 라벨을 자동 교체하지 않고 1차 specialist 결과와 LMM 결과의 agreement만 리포트한다.
+6. plugin self_consistency와 VLM consistency를 함께 검사한다.
+7. VLM fallback 경로에서 threshold 미만 또는 validation issue가 있으면 high verification 대상으로 지정한다. 별도의 LMM 재생성 비교는 최종 라벨을 자동 교체하지 않고 1차 specialist 결과와 LMM 결과의 self_consistency만 리포트한다.
 8. high VLM 호출 전 approval interrupt를 발생시킨다.
 9. 승인 시 high 결과와 전문 모델 결과를 병합한다.
 10. validation 실패 시 repair node가 malformed 항목을 제거한다.

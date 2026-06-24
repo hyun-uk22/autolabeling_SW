@@ -16,7 +16,7 @@ ROUTER_SYSTEM_PROMPT = """
 You are an intent router for a vision dataset application. Classify the user's request; do not
 answer it and do not perform any operation. Return JSON only with this shape:
 {
-  "intent": "convert_labels|generate_labels|evaluate_labels|inspect_dataset|explain_result|configure_workspace|general_chat|unknown",
+  "intent": "convert_labels|generate_labels|evaluate_labels|open_label_editor|inspect_dataset|explain_result|configure_workspace|general_chat|unknown",
   "confidence": 0.0,
     "parameters": {
     "target_formats": ["yolo|pascal_voc|coco|vision_json"],
@@ -29,7 +29,7 @@ answer it and do not perform any operation. Return JSON only with this shape:
   },
   "missing_parameters": []
 }
-Only classify executable requests as convert_labels, generate_labels, or evaluate_labels.
+Only classify executable requests as convert_labels, generate_labels, evaluate_labels, or open_label_editor.
 Use general_chat for greetings and questions that do not request a dataset operation.
 Never invent a path or parameter. Omit unknown parameters. Preserve workspace-relative paths.
 """
@@ -87,7 +87,7 @@ class IntentParameters(BaseModel):
 
 class IntentRoute(BaseModel):
     intent: Literal[
-        "convert_labels", "generate_labels", "evaluate_labels", "inspect_dataset",
+        "convert_labels", "generate_labels", "evaluate_labels", "open_label_editor", "inspect_dataset",
         "explain_result", "configure_workspace", "general_chat", "unknown",
     ]
     confidence: float = Field(ge=0.0, le=1.0)
@@ -211,6 +211,20 @@ def _build_conversation_plan_with_overrides(
     return builder(request, workspace, intent_overrides=overrides)
 
 
+def _build_label_editor_request_with_overrides(
+    request: str,
+    workspace: str,
+    overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    builder = conversation_module.build_label_editor_request
+    if "intent_overrides" not in inspect.signature(builder).parameters:
+        builder = reload(conversation_module).build_label_editor_request
+    result = builder(request, workspace, intent_overrides=overrides)
+    if not result:
+        raise ValueError("라벨 편집 요청을 해석하지 못했습니다.")
+    return result
+
+
 def handle_conversation(
     request: str,
     workspace: str,
@@ -252,6 +266,10 @@ def handle_conversation(
             "response": "\n".join(lines),
             "diagnosis": model_diagnosis,
         }
+    editor_request = conversation_module.build_label_editor_request(request, workspace)
+    if editor_request:
+        editor_request["route_source"] = "rules"
+        return editor_request
     try:
         proposal = conversation_module.build_conversation_plan(request, workspace)
         return {"kind": "plan", "proposal": proposal, "route_source": "rules"}
@@ -279,6 +297,14 @@ def handle_conversation(
                 "response": f"작업 계획에 필요한 정보가 부족합니다: {missing}",
                 "route": route.model_dump(),
             }
+        if route.intent == "open_label_editor":
+            overrides = route.parameters.model_dump(exclude_none=True)
+            overrides["action"] = "open_editor"
+            editor_request = _build_label_editor_request_with_overrides(request, workspace, overrides)
+            editor_request["warnings"].append("규칙 기반 해석이 불충분하여 LLM Intent Router로 라벨 편집 의도를 보완했습니다.")
+            editor_request["route"] = route.model_dump()
+            editor_request["route_source"] = "llm"
+            return editor_request
         if route.intent not in ACTION_INTENTS:
             try:
                 response = (chat_node or ChatNode(model_name=router.model_name)).respond(request)

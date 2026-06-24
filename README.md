@@ -14,7 +14,7 @@
 - 변환 전 사전 점검과 부족 정보 안내
 - 결과 리포트, 입력 데이터 문제, 결과 파일 문제 표시
 - 1차 Vision Specialist 결과와 선택적 Low/High LMM 재생성 결과 간 IoU 기반 self_consistency 계산
-- self_consistency 임계치 미달 이미지만 라벨 편집 큐로 전달
+- self_consistency 임계치 미달 이미지만 라벨 편집 큐로 전달하고 1차/LMM 라벨 중 편집 기준 선택
 - bbox, polygon, OCR, tracking, pose, classification 라벨 편집
 - 결과 파일과 리포트 다운로드
 
@@ -105,10 +105,19 @@ path: D:\project\autolabel\test_images
 
 대화형 작업 특징:
 - 라벨 생성, 형식 변환, 실험 평가 요청을 해석합니다.
+- 라벨 편집 요청은 실행 계획으로 만들지 않고 라벨 편집 탭으로 바로 이동합니다.
 - 규칙 기반 parser가 먼저 동작하고, 실패 시 LMM Intent Router를 사용할 수 있습니다.
-- 실행 계획이 뜬 뒤 사용자가 추가 프롬프트로 경로, 출력 포맷, 태스크 등을 수정할 수 있습니다.
+- 실행 계획이 뜬 뒤에도 추가 프롬프트로 경로, 출력 포맷, 태스크 등을 수정할 수 있습니다.
 - 실행 전 확인 사항과 검증 이슈를 함께 보여줍니다.
 - 실행 완료 후 결과 리포트 탭에서 상세 결과를 확인합니다.
+
+라벨 편집 진입 예시:
+
+```text
+현재 데이터셋 바탕으로 라벨 편집 진행하고 싶어
+```
+
+이 요청은 workspace에서 라벨 후보와 이미지 후보를 자동 선택한 뒤 라벨 편집 탭으로 이동하고, 가능한 경우 라벨을 자동으로 불러옵니다.
 
 ## 2. 형식 변환
 
@@ -128,7 +137,8 @@ path: D:\project\autolabel\test_images
 - Pascal VOC
 - COCO
 - Vision JSON
-- custom template
+
+Streamlit 형식 변환 탭의 출력은 위 네 가지를 기본 지원합니다. custom template 출력은 CLI/WorkflowPlan의 보조 경로로 유지됩니다.
 
 주요 입력 항목:
 
@@ -162,10 +172,10 @@ path: D:\project\autolabel\test_images
 | 태스크 | 기본 모델 흐름 |
 | --- | --- |
 | classification | SigLIP |
-| object detection | Grounding DINO |
-| segmentation | Grounded-SAM2 pipeline, Grounding DINO + SAM2 |
-| pose estimation | Ultralytics YOLO26 pose |
-| OCR | PaddleOCR PP-OCRv5, Korean mobile recognition |
+| object detection | Grounding DINO base |
+| segmentation | `grounded_sam2` wrapper: Grounding DINO base + Ultralytics SAM2 `sam2_b.pt` |
+| pose estimation | Ultralytics YOLO26l-pose |
+| OCR | PaddleOCR PP-OCRv5 mobile det + `korean_PP-OCRv5_mobile_rec` |
 | tracking | YOLO26n + ByteTrack |
 
 입력 항목:
@@ -184,11 +194,22 @@ path: D:\project\autolabel\test_images
 
 1. Vision Specialist Model로 1차 추론
 2. 결과 리포트 표시
-3. 사용자가 선택할 경우 specialist 재추론 또는 LMM 재생성 비교 실행
+3. 사용자가 선택할 경우 Low/High LMM 재생성 비교 실행
 4. IoU 기반 self_consistency 계산
 5. 임계치 미달 이미지만 라벨 편집 큐로 전달
+6. 라벨 편집으로 넘길 때 1차 Vision Model 라벨, Low LMM 라벨, High LMM 라벨 중 편집 기준 선택
 
 LMM 재생성 비교는 최종 라벨을 자동 교체하지 않습니다. 1차 Vision Model 결과와 Low/High LMM 결과를 비교해 검토 우선순위를 정하는 용도입니다.
+
+LMM 재생성 비교를 실행하면 1차 Vision Model 결과는 기존 라벨 출력 폴더에 유지하고, LMM 재생성 라벨은 별도 폴더에 저장합니다.
+
+```text
+<라벨 출력>                  1차 Vision Model 결과
+<라벨 출력>_llm/low          Low LMM 재생성 결과
+<라벨 출력>_llm/high         High LMM 재생성 결과
+<라벨 출력>_review/low       self_consistency 미달 Low LMM 검토 후보
+<라벨 출력>_review/high      self_consistency 미달 High LMM 검토 후보
+```
 
 ## 4. 라벨 편집
 
@@ -315,7 +336,9 @@ data/visualized/
 - Grounding DINO: Hugging Face loader
 - SAM2: `sam2_b.pt`
 - PaddleOCR: PP-OCRv5 Korean mobile recognition
-- YOLO26n / YOLO26 pose: Ultralytics loader
+- YOLO26n / YOLO26l-pose: Ultralytics loader
+
+`grounded_sam2`는 공식 Grounded-SAM-2 repository를 통째로 vendoring한 단일 모델이 아니라, 현재 코드의 plugin wrapper가 Grounding DINO 결과 bbox를 SAM2에 전달하는 pipeline입니다.
 
 ## Windows Setup 배포
 

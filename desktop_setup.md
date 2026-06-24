@@ -1,8 +1,10 @@
-# Windows 데스크톱 앱 및 Setup 명세
+# Windows Setup 배포 명세
+
+현재 기본 사용 흐름은 Streamlit(`web_app.py`)이다. Windows `setup.exe`는 로컬 사용자가 설치형 앱 형태로 실행할 수 있게 하는 배포 경로이며, 대용량 specialist 의존성과 모델 weight를 항상 포함하는 방식은 기본 정책으로 두지 않는다.
 
 ## 실행
 
-개발 환경에서 GUI를 실행한다.
+개발 환경에서 기존 데스크톱 GUI를 실행할 수 있다.
 
 ```powershell
 .\.venv\Scripts\python.exe desktop_app.py
@@ -17,7 +19,7 @@ installer를 실행하기 전에 브라우저 인터페이스로 workflow를 확
 
 접속 주소는 `http://localhost:8501`이다. Streamlit과 데스크톱 앱은 같은 사용자 `.env`를 사용한다.
 
-화면은 형식 변환, 라벨 생성, 평가, 설정으로 구성된다. 작업은 기존 LangGraph `WorkflowPlan`으로 변환되어 CLI와 동일한 runtime에서 실행된다. 라벨 생성 실행 전에는 고비용 모델 호출 가능성을 확인하는 승인 창이 표시된다.
+현재 기능 검증과 발표 시연은 Streamlit의 대화형 작업, 형식 변환, 라벨 생성, 라벨 편집, 결과 리포트, 설정 탭을 기준으로 한다. 데스크톱 GUI 경로는 packaging 대상이지만, 최신 라벨 편집 UI와 대화형 라벨 편집 진입은 Streamlit에서 우선 제공된다. workflow 작업은 기존 LangGraph `WorkflowPlan` 또는 Streamlit UI route를 통해 공통 runtime으로 연결된다.
 
 앱 시작 시 workspace 선택 창이 항상 표시되고 마지막 선택 경로가 기본값으로 제공된다. `표준 폴더 구조 생성`을 선택한 경우 다음 경로를 만들며, 화면에서도 workspace 상대 기본값으로 사용한다.
 
@@ -96,7 +98,7 @@ paddleocr
 mmpose/mmcv/mmengine/mmdet
 ```
 
-따라서 기본 installer에서는 API 기반 VLM 생성, 라벨 변환, 평가를 사용할 수 있다. SigLIP classification, Grounding DINO, Grounded-SAM2, Ultralytics pose/tracking, PaddleOCR plugin을 포함한 별도 GPU/CPU 배포판은 대상 CUDA/PyTorch 조합을 고정해 별도로 빌드해야 한다. 현재 기본 segmentation backend는 Grounding DINO + Ultralytics SAM2(`sam2_b.pt`) pipeline이며 plugin 최초 실행 시 공급자 cache에 weight를 받는다. 공식 SAM3(`facebook/sam3`)는 Hugging Face gated model이라 사용자별 접근 승인과 로그인 토큰이 필요하므로 일반 `setup.exe` 기본값으로 묶기보다 고급 옵션 plugin 설정으로 제공한다. 모델 가중치는 installer에 포함하지 않고 plugin 최초 실행 시 공급자 cache에 받는 방식을 사용한다.
+따라서 기본 installer에서는 라벨 변환, 리포트, 설정, API 기반 LMM 경로를 우선 지원하는 경량 구성을 권장한다. SigLIP classification, Grounding DINO base, `grounded_sam2` wrapper(Grounding DINO base + Ultralytics SAM2 `sam2_b.pt`), YOLO26l-pose, YOLO26n+ByteTrack, PaddleOCR PP-OCRv5 plugin을 포함한 별도 GPU/CPU 배포판은 대상 CUDA/PyTorch 조합을 고정해 별도로 빌드해야 한다. 모델 가중치는 installer에 포함하지 않고 plugin 최초 실행 시 공급자 cache에 받는 방식을 사용한다.
 
 ## 배포 전 점검
 

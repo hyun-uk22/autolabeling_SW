@@ -145,11 +145,21 @@ def _llm_review_queue(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "pseudo_recall": (comparison.get("bbox_agreement") or {}).get("pseudo_recall"),
                     "pseudo_f1": (comparison.get("bbox_agreement") or {}).get("pseudo_f1"),
                     "review_required": comparison.get("review_required"),
+                    "label_paths": comparison.get("label_paths", {}),
+                    "review_label_paths": comparison.get("review_label_paths", {}),
                 }
                 for comparison in comparisons
             ],
         })
     return review_rows
+
+
+def _derived_output_dir(output_dir: str, suffix: str) -> str:
+    normalized = os.path.normpath(output_dir)
+    parent = os.path.dirname(normalized)
+    name = os.path.basename(normalized.rstrip(os.sep))
+    derived = f"{name}_{suffix}" if name else suffix
+    return os.path.join(parent, derived) if parent else derived
 
 
 def _confidence_summary(values: List[float]) -> Dict[str, Any]:
@@ -616,6 +626,97 @@ class WorkflowRuntime:
             "elapsed_sec": time.perf_counter() - started,
         }
 
+    def _export_llm_consistency_labels(
+        self,
+        operation: OperationPlan,
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        llm_root = _derived_output_dir(operation.out_dir, "llm")
+        review_root = _derived_output_dir(operation.out_dir, "review")
+        writers: Dict[str, LabelExportWriter] = {}
+        review_writers: Dict[str, LabelExportWriter] = {}
+        exported_records = []
+        review_records = []
+
+        for record in records:
+            image_name = record.get("image", "")
+            image_path = os.path.join(operation.img_dir, image_name)
+            llm_consistency = (record.get("specialist_consistency") or {}).get("llm_consistency") or {}
+            if not llm_consistency.get("enabled"):
+                continue
+            for comparison in llm_consistency.get("comparisons") or []:
+                level = str(comparison.get("level") or "llm")
+                result_payload = comparison.get("result")
+                if not result_payload:
+                    continue
+                result = DetectionResult.model_validate(result_payload)
+                resolved_formats = resolve_export_formats(result, operation.formats, operation.task_type or result.task_type)
+                writer = writers.get(level)
+                if writer is None:
+                    writer = LabelExportWriter(
+                        os.path.join(llm_root, level),
+                        formats=operation.formats,
+                        custom_template_path=operation.custom_label_template,
+                        custom_extension=operation.custom_label_extension,
+                    )
+                    writers[level] = writer
+                paths = writer.save(result, image_path, formats=resolved_formats)
+                exported_records.append({
+                    "image": image_name,
+                    "level": level,
+                    "model": comparison.get("model"),
+                    "review_required": bool(comparison.get("review_required")),
+                    "paths": paths,
+                })
+                comparison["label_paths"] = paths
+
+                if comparison.get("review_required"):
+                    review_writer = review_writers.get(level)
+                    if review_writer is None:
+                        review_writer = LabelExportWriter(
+                            os.path.join(review_root, level),
+                            formats=operation.formats,
+                            custom_template_path=operation.custom_label_template,
+                            custom_extension=operation.custom_label_extension,
+                        )
+                        review_writers[level] = review_writer
+                    review_paths = review_writer.save(result, image_path, formats=resolved_formats)
+                    review_records.append({
+                        "image": image_name,
+                        "level": level,
+                        "model": comparison.get("model"),
+                        "paths": review_paths,
+                    })
+                    comparison["review_label_paths"] = review_paths
+
+        artifacts = {
+            level: writer.finalize()
+            for level, writer in writers.items()
+        }
+        review_artifacts = {
+            level: writer.finalize()
+            for level, writer in review_writers.items()
+        }
+        if not exported_records:
+            return {
+                "enabled": False,
+                "output_root": llm_root,
+                "review_root": review_root,
+                "records": [],
+                "review_records": [],
+                "artifacts": {},
+                "review_artifacts": {},
+            }
+        return {
+            "enabled": True,
+            "output_root": llm_root,
+            "review_root": review_root,
+            "records": exported_records,
+            "review_records": review_records,
+            "artifacts": artifacts,
+            "review_artifacts": review_artifacts,
+        }
+
     def export_generation(
         self,
         operation: OperationPlan,
@@ -629,6 +730,7 @@ class WorkflowRuntime:
             custom_extension=operation.custom_label_extension,
         )
         auditor = ArtifactAuditor()
+        llm_exports = self._export_llm_consistency_labels(operation, records)
         metric_rows = []
         export_records = []
         exported_results = []
@@ -840,6 +942,7 @@ class WorkflowRuntime:
                 "artifact_issues": artifact_issues,
                 "records": export_records,
             },
+            "llm_exports": llm_exports,
             "user_action_report": user_action_report,
             "artifacts": artifacts,
         }

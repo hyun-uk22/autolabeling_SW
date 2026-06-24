@@ -2,15 +2,15 @@
 
 ## 1. 목적
 
-이 문서는 이미지로부터 새 라벨을 생성하는 자동 라벨링 기능의 상세 명세, 실행 조건, 데이터 흐름, 계층적 검증 방식, 태스크별 처리, 전문 모델 plugin 연동, 출력 및 평가 과정을 설명한다.
+이 문서는 이미지로부터 새 라벨을 생성하는 자동 라벨링 기능의 상세 명세, 실행 조건, 데이터 흐름, 계층적 검증 방식, 태스크별 처리, 전문 모델 plugin 연동, 출력 및 리포트 과정을 설명한다.
 
-자동 라벨 생성의 직접 실행 진입점은 `main.py`다. 자연어 계획, 승인 interrupt, checkpoint/resume, 복합 operation이 필요하면 `agentic_workflow.py`를 사용한다.
+일반 사용자는 Streamlit의 `라벨 생성` 탭 또는 `대화형 작업` 탭을 통해 이 기능을 실행한다. 개발·실험 자동화에서는 `main.py`를 직접 사용할 수 있고, 자연어 계획, 승인 interrupt, checkpoint/resume, 복합 operation이 필요하면 `agentic_workflow.py`를 사용한다.
 
 이 기능은 기존 라벨 파일을 다른 포맷으로 바꾸는 `convert_labels.py`와 구분된다.
 
 | 기능 | 입력 | 출력 | 실행 파일 |
 | --- | --- | --- | --- |
-| 자동 라벨 생성 | 이미지 + 자연어 prompt | 새 라벨과 검증 지표 | `main.py` |
+| 자동 라벨 생성 | 이미지 + 자연어 prompt | 새 라벨과 검증 지표 | Streamlit, `main.py` |
 | Agentic 복합 workflow | 자연어 또는 WorkflowPlan | 생성/변환/평가 결과 | `agentic_workflow.py` |
 | 기존 라벨 변환 | 기존 라벨 + 원본 이미지 | 변환된 라벨 | `convert_labels.py` |
 
@@ -21,7 +21,7 @@
 1. 자연어 prompt를 사용해 라벨링 대상과 태스크를 지정한다.
 2. 태스크별 전문 모델 plugin을 먼저 실행해 VLM 결과가 섞이지 않은 라벨을 생성한다.
 3. 전문 모델 결과가 비어 있거나 `vlm_first` 전략을 사용할 때만 저비용 VLM의 반복 추론으로 초안 라벨을 생성한다.
-4. 선택적으로 specialist 재추론 또는 Low/High LMM 재생성 비교를 수행해 1차 결과와의 self_consistency를 측정한다.
+4. Streamlit에서는 선택적으로 Low/High LMM 재생성 비교를 수행해 1차 결과와의 self_consistency를 측정한다.
 5. self_consistency 임계치 미달 이미지를 결과 리포트와 라벨 편집 큐로 전달한다.
 6. 결과를 내부 공통 표현으로 정규화한다.
 7. YOLO, Pascal VOC, COCO, Vision JSONL, custom 포맷으로 저장한다.
@@ -40,7 +40,7 @@
 | consistency | `src/utils/geometry.py` | IoU 및 Jaccard 기반 일관성 계산 |
 | plugin registry | `src/plugins/registry.py` | built-in/custom plugin 로드 |
 | plugin orchestrator | `src/plugins/orchestrator.py` | 전문 모델 실행, 결과 병합, 점수 갱신 |
-| built-in plugins | `src/plugins/builtin.py` | SigLIP, Grounding DINO, Grounded-SAM2, pose, OCR, tracking adapter |
+| built-in plugins | `src/plugins/builtin.py` | SigLIP, Grounding DINO, `grounded_sam2` wrapper, pose, OCR, tracking adapter |
 | exporter | `src/utils/format_converter.py` | 라벨 포맷 저장 |
 | visualization | `src/utils/visualize.py` | 이미지 위 라벨 시각화 |
 | evaluation | `src/utils/evaluation.py` | YOLO GT 평가와 실험 리포트 |
@@ -52,10 +52,10 @@
 | task type | VLM 출력 필드 | 전문 plugin 예시 | 대표 출력 |
 | --- | --- | --- | --- |
 | `classification` | `classifications` | SigLIP | Vision JSONL/custom |
-| `object_detection` | `boxes` | Grounding DINO | YOLO/VOC/COCO/Vision JSONL |
-| `segmentation` | `segments` | Grounded-SAM2 pipeline(Grounding DINO + SAM2) | COCO/Vision JSONL |
-| `pose_estimation` | `poses` | Ultralytics pose | Vision JSONL/custom |
-| `ocr` | `texts` | PaddleOCR | Vision JSONL/custom |
+| `object_detection` | `boxes` | Grounding DINO base | YOLO/VOC/COCO/Vision JSONL |
+| `segmentation` | `segments` | `grounded_sam2` wrapper(Grounding DINO base + Ultralytics SAM2 `sam2_b.pt`) | COCO/Vision JSONL |
+| `pose_estimation` | `poses` | Ultralytics YOLO26l-pose, optional ViTPose plugin disabled by default | Vision JSONL/custom |
+| `ocr` | `texts` | PaddleOCR PP-OCRv5 mobile det + Korean mobile recognition | Vision JSONL/custom |
 | `tracking` | `tracks` | YOLO26n + ByteTrack | Vision JSONL/custom |
 | `all` | 전체 필드 | 설정된 모든 plugin | Vision JSONL/COCO/custom |
 
@@ -67,6 +67,7 @@
 - Specialist layer: 모든 라벨 생성에서 태스크 전용 모델로 결과를 보강한다.
 
 전문 모델 plugin 설정 파일을 지정하지 않아도 기본 plugin chain이 자동으로 생성된다. 설정 파일은 기본 chain을 끄는 용도가 아니라 모델 checkpoint, 장치, threshold, weight를 조정하는 용도다.
+현재 기본 `grounded_sam2`는 공식 Grounded-SAM-2 repository 전체를 포함한 단일 모델이 아니라, 코드 내부 wrapper가 Grounding DINO bbox를 SAM2 prompt로 전달하는 pipeline이다.
 
 ## 5. 전체 워크플로우
 
@@ -173,7 +174,7 @@ python main.py
 | `--prompt` | 객체 탐지 기본 prompt | VLM에 전달할 사용자 지시문 |
 | `--task_type` | `object_detection` | 라벨링 태스크 |
 | `--generation_strategy` | `specialist_first` | `specialist_first` 또는 기존 `vlm_first` |
-| `--classes_path` | 없음 | Grounding DINO, Grounded-SAM2, classification 후보 클래스에 사용할 `classes.txt` 또는 YOLO `data.yaml` |
+| `--classes_path` | 없음 | Grounding DINO, `grounded_sam2` wrapper, classification 후보 클래스에 사용할 `classes.txt` 또는 YOLO `data.yaml` |
 | `--specialist_consistency_runs` | `0` | 1이면 1차 specialist 결과를 유지한 채 검증용 specialist 재추론 1회 수행 |
 | `--specialist_advisor_mode` | `none` | 재추론 설정 patch 제안 방식. `none`, `low`, `high`, `both` |
 | `--threshold` | `0.75` | specialist/LMM self_consistency 검토 기준 및 VLM fallback consistency 기준 |

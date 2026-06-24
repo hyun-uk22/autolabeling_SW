@@ -586,6 +586,26 @@ def _action(request: str) -> str:
     raise ValueError("요청에서 작업 종류를 확인하지 못했습니다. 변환, 라벨 생성 또는 평가 작업을 명시해 주세요.")
 
 
+def _is_label_editor_request(request: str) -> bool:
+    lowered = request.lower()
+    label_context = _contains_any(lowered, ("라벨", "label", "annotation", "어노테이션", "데이터셋"))
+    edit_context = _contains_any(
+        lowered,
+        (
+            "편집",
+            "수정",
+            "고치",
+            "검수",
+            "리뷰",
+            "라벨 에디터",
+            "label editor",
+            "edit label",
+            "edit annotation",
+        ),
+    )
+    return label_context and edit_context
+
+
 def _task_type(request: str) -> str:
     lowered = request.lower()
     mappings = (
@@ -786,6 +806,70 @@ def _should_use_custom_mapping(
     if requested_source_format:
         return False
     return selected["format"] == "generic_json"
+
+
+def build_label_editor_request(
+    request: str,
+    workspace: str | Path,
+    intent_overrides: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    overrides = intent_overrides or {}
+    if not _is_label_editor_request(request) and overrides.get("action") != "open_editor":
+        return None
+
+    root = Path(workspace).expanduser().resolve()
+    inventory = discover_workspace(root)
+    candidates = inventory["label_candidates"]
+    if not candidates:
+        raise ValueError("Workspace에서 편집 가능한 라벨 파일을 찾지 못했습니다.")
+
+    requested_source_format = overrides.get("source_format") or _source_format(request)
+    source_path = overrides.get("source_path")
+    explicit_path = _explicit_workspace_path(source_path, root) if source_path else _explicit_workspace_path(request, root)
+    selected = _select_label_candidate(candidates, root, explicit_path, requested_source_format)
+    selected_images = _select_image_for_label(inventory["image_directories"], selected, root)
+    task_type = overrides.get("task_type") or _task_type(request)
+
+    output_path = Path(selected["path"])
+    output_dir = output_path if output_path.is_dir() else output_path.parent
+    source_format = requested_source_format or "auto"
+    context = {
+        "label_path": selected["path"],
+        "image_dir": selected_images["path"],
+        "source_format": source_format,
+        "classes_path": "",
+        "task_type": task_type,
+        "output_dir": str(output_dir.resolve()),
+    }
+
+    warnings = []
+    if len(candidates) > 1:
+        warnings.append(f"라벨 후보 {len(candidates)}개 중 {selected['relative_path']}을 편집 대상으로 선택했습니다.")
+    if selected_images.get("missing"):
+        warnings.append("이미지 폴더를 찾지 못해 라벨 경로를 이미지 경로로 임시 지정했습니다. 이미지 시각화 없이 표 편집 위주로 동작할 수 있습니다.")
+    elif len(inventory["image_directories"]) > 1:
+        warnings.append(f"이미지 후보 {len(inventory['image_directories'])}개 중 {selected_images['relative_path']}을 연결했습니다.")
+
+    lines = [
+        "라벨 편집 탭으로 이동합니다.",
+        "",
+        f"- 편집 라벨: `{selected['relative_path']}`",
+        f"- 이미지 폴더: `{selected_images['relative_path']}`",
+        f"- 라벨 형식: `{source_format}`",
+        f"- 편집 태스크: `{task_type}`",
+    ]
+    if warnings:
+        lines.append("")
+        lines.append("확인 사항:")
+        lines.extend(f"- {warning}" for warning in warnings)
+
+    return {
+        "kind": "open_editor",
+        "response": "\n".join(lines),
+        "editor_context": context,
+        "warnings": warnings,
+        "inventory": inventory,
+    }
 
 
 def build_conversation_plan(

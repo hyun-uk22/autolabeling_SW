@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from src.workflow.conversation import build_conversation_plan, describe_plan, discover_workspace
+from src.workflow.conversation import build_conversation_plan, build_label_editor_request, describe_plan, discover_workspace
 from src.workflow import conversation_router as conversation_router_module
 from src.workflow.conversation_router import ChatNode, IntentRouter, handle_conversation
 from src.workflow.plan_patcher import revise_pending_proposal
@@ -316,6 +316,32 @@ class ConversationWorkflowTests(unittest.TestCase):
             self.assertEqual(routed["kind"], "plan")
             self.assertEqual(routed["route_source"], "rules")
             self.assertEqual(calls, [])
+
+    def test_korean_label_editor_request_opens_editor_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._workspace(root)
+            calls = []
+            router = IntentRouter(caller=lambda request: calls.append(request))
+
+            routed = handle_conversation(
+                "현재 데이터셋 바탕으로 라벨 편집 진행하고 싶어.",
+                str(root),
+                intent_router=router,
+            )
+            context = routed["editor_context"]
+
+            self.assertEqual(routed["kind"], "open_editor")
+            self.assertEqual(routed["route_source"], "rules")
+            self.assertEqual(Path(context["label_path"]), root / "data" / "labeled")
+            self.assertEqual(Path(context["image_dir"]), root / "data" / "raw")
+            self.assertEqual(context["source_format"], "auto")
+            self.assertEqual(context["task_type"], "object_detection")
+            self.assertEqual(calls, [])
+
+    def test_label_editor_builder_returns_none_for_non_editor_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(build_label_editor_request("COCO와 YOLO 차이가 뭐야?", directory))
 
     def test_llm_router_fills_unsupported_conversion_expression(self):
         with tempfile.TemporaryDirectory() as directory:
