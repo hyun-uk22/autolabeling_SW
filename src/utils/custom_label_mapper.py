@@ -21,8 +21,8 @@ The returned JSON must use this schema:
   "image_width_path": "$.image.width",
   "image_height_path": "$.image.height",
   "objects_path": "$.annotations[*]",
-  "label_path": "$.label",
-  "bbox_path": "$.bbox",
+  "label_path": "@.label",
+  "bbox_path": "@.bbox",
   "bbox_format": "xywh",
   "bbox_unit": "pixel",
   "confidence_path": "$.score",
@@ -32,6 +32,7 @@ The returned JSON must use this schema:
 Supported bbox_format values: xywh, xyxy.
 Supported bbox_unit values: pixel, normalized.
 Use null for optional paths that are absent.
+Use @.field for fields inside each object selected by objects_path.
 """
 
 
@@ -107,6 +108,16 @@ def select_values(data: Any, path: Optional[str], context: Optional[Any] = None)
 def select_first(data: Any, path: Optional[str], context: Optional[Any] = None) -> Any:
     values = select_values(data, path, context=context)
     return values[0] if values else None
+
+
+def select_first_with_context_fallback(data: Any, path: Optional[str], context: Optional[Any] = None) -> Any:
+    value = select_first(data, path, context=context)
+    if value is not None or context is None or not path:
+        return value
+    text = str(path).strip()
+    if text.startswith("$."):
+        return select_first(data, "@." + text[2:], context=context)
+    return value
 
 
 def _candidate_json_files(input_path: str) -> List[str]:
@@ -326,12 +337,12 @@ def import_custom_mapping(input_path: str, image_dir: str, spec_or_path: Any) ->
             height = height or found_height
         result = DetectionResult(task_type="object_detection")
         for obj in objects:
-            bbox_value = select_first(data, spec.get("bbox_path"), context=obj)
+            bbox_value = select_first_with_context_fallback(data, spec.get("bbox_path"), context=obj)
             bbox = _bbox_from_value(bbox_value)
             if bbox is None:
                 continue
-            label = select_first(data, spec.get("label_path"), context=obj) or "object"
-            confidence = select_first(data, spec.get("confidence_path"), context=obj)
+            label = select_first_with_context_fallback(data, spec.get("label_path"), context=obj) or "object"
+            confidence = select_first_with_context_fallback(data, spec.get("confidence_path"), context=obj)
             xmin, ymin, xmax, ymax = _normalize_box(
                 bbox,
                 spec["bbox_format"],
