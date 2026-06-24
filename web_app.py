@@ -634,7 +634,7 @@ def render_workflow_report(result, key_prefix="report"):
                 sc_columns[1].metric("Advisor", specialist_consistency.get("advisor_mode", "none"))
                 mean_agreement = specialist_consistency.get("mean_bbox_agreement")
                 sc_columns[2].metric(
-                    "BBox Agreement",
+                    "BBox Self-Consistency",
                     "-" if mean_agreement is None else f"{mean_agreement * 100:.1f}%",
                 )
             if specialist_consistency.get("llm_enabled_images"):
@@ -644,12 +644,12 @@ def render_workflow_report(result, key_prefix="report"):
                 llm_columns[1].metric("LMM 모드", specialist_consistency.get("llm_mode", "none"))
                 llm_agreement = specialist_consistency.get("llm_mean_bbox_agreement")
                 llm_columns[2].metric(
-                    "Prediction Agreement",
+                    "Prediction Self-Consistency",
                     "-" if llm_agreement is None else f"{llm_agreement * 100:.1f}%",
                 )
                 llm_columns[3].metric("검토 필요", specialist_consistency.get("llm_review_required_images", 0))
                 st.caption(
-                    "1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 agreement를 계산합니다."
+                    "1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 self_consistency를 계산합니다."
                 )
                 llm_review_records = specialist_consistency.get("llm_review_records") or []
                 if llm_review_records:
@@ -661,7 +661,7 @@ def render_workflow_report(result, key_prefix="report"):
                         review_rows.append({
                             "파일": record.get("image", ""),
                             "LMM 모드": record.get("mode", ""),
-                            "Prediction Agreement": "-" if agreement is None else f"{agreement * 100:.1f}%",
+                            "Prediction Self-Consistency": "-" if agreement is None else f"{agreement * 100:.1f}%",
                             "임계치": "-" if threshold is None else f"{threshold * 100:.1f}%",
                         })
                     st.dataframe(review_rows, width="stretch")
@@ -2060,13 +2060,13 @@ def render_selective_rerun_controls(first_pass_plan, key_prefix, on_complete):
         return
     st.divider()
     st.markdown("#### 1차 추론 이후 LMM 재생성 비교")
-    st.caption("1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 agreement를 계산합니다.")
+    st.caption("1차 Vision Model 결과를 pseudo-reference로 두고, 선택한 LMM 재생성 결과와 bbox IoU 기반 self_consistency를 계산합니다.")
     llm_mode = st.selectbox(
         "재생성 LMM",
         ["low", "high", "both"],
         index=0,
         key=f"{key_prefix}_llm_consistency_mode",
-        help="선택한 Low/High LMM이 같은 이미지에 대해 라벨을 다시 생성하고, 1차 Vision 결과와 prediction-to-prediction agreement를 계산합니다.",
+        help="선택한 Low/High LMM이 같은 이미지에 대해 라벨을 다시 생성하고, 1차 Vision 결과와 prediction-to-prediction self_consistency를 계산합니다.",
     )
     if st.button("LMM 재생성 비교 실행", type="secondary", key=f"{key_prefix}_llm_consistency_rerun"):
         try:
@@ -2357,6 +2357,9 @@ with convert_tab:
         st.session_state.convert_image_dir = image_dir_candidates[0]
     if "convert_custom_mapping_text" not in st.session_state:
         st.session_state.convert_custom_mapping_text = ""
+    pending_custom_mapping_text = st.session_state.pop("convert_custom_mapping_text_pending", None)
+    if pending_custom_mapping_text is not None:
+        st.session_state.convert_custom_mapping_text = pending_custom_mapping_text
     with st.container(border=True):
         st.markdown('<span class="path-panel-marker"></span>', unsafe_allow_html=True)
         st.markdown('<div class="form-section">데이터 경로</div>', unsafe_allow_html=True)
@@ -2437,7 +2440,7 @@ with convert_tab:
                     st.write(f"샘플 파일: {sample_path}")
                     model_name = os.getenv("CUSTOM_LABEL_MAPPER_MODEL") or os.getenv("LOW_MODEL") or os.getenv("PLANNER_MODEL")
                     spec = infer_custom_mapping_spec_from_sample(sample_path, model_name=model_name)
-                    st.session_state.convert_custom_mapping_text = json.dumps(spec, ensure_ascii=False, indent=2)
+                    st.session_state.convert_custom_mapping_text_pending = json.dumps(spec, ensure_ascii=False, indent=2)
                     status.update(label="커스텀 매핑 스펙 생성 완료", state="complete", expanded=False)
                 st.rerun()
             except Exception as exc:

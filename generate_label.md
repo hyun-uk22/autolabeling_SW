@@ -21,8 +21,8 @@
 1. 자연어 prompt를 사용해 라벨링 대상과 태스크를 지정한다.
 2. 태스크별 전문 모델 plugin을 먼저 실행해 VLM 결과가 섞이지 않은 라벨을 생성한다.
 3. 전문 모델 결과가 비어 있거나 `vlm_first` 전략을 사용할 때만 저비용 VLM의 반복 추론으로 초안 라벨을 생성한다.
-4. 선택적으로 specialist 재추론 또는 Low/High LMM 재생성 비교를 수행해 1차 결과와의 agreement를 측정한다.
-5. agreement 임계치 미달 이미지를 결과 리포트와 라벨 편집 큐로 전달한다.
+4. 선택적으로 specialist 재추론 또는 Low/High LMM 재생성 비교를 수행해 1차 결과와의 self_consistency를 측정한다.
+5. self_consistency 임계치 미달 이미지를 결과 리포트와 라벨 편집 큐로 전달한다.
 6. 결과를 내부 공통 표현으로 정규화한다.
 7. YOLO, Pascal VOC, COCO, Vision JSONL, custom 포맷으로 저장한다.
 8. 처리 시간, API 호출, uncertainty, GT 평가 결과를 기록한다.
@@ -176,7 +176,7 @@ python main.py
 | `--classes_path` | 없음 | Grounding DINO, Grounded-SAM2, classification 후보 클래스에 사용할 `classes.txt` 또는 YOLO `data.yaml` |
 | `--specialist_consistency_runs` | `0` | 1이면 1차 specialist 결과를 유지한 채 검증용 specialist 재추론 1회 수행 |
 | `--specialist_advisor_mode` | `none` | 재추론 설정 patch 제안 방식. `none`, `low`, `high`, `both` |
-| `--threshold` | `0.75` | specialist/LMM agreement 검토 기준 및 VLM fallback consistency 기준 |
+| `--threshold` | `0.75` | specialist/LMM self_consistency 검토 기준 및 VLM fallback consistency 기준 |
 | `--low_model` | 환경 변수 또는 `gpt-4o-mini` | 초안 생성 VLM |
 | `--high_model` | 환경 변수 또는 `gpt-4o` | 불확실 샘플 검증 VLM |
 | `--inference_count` | `3` | low VLM 반복 추론 횟수 |
@@ -627,7 +627,7 @@ high 결과의 `mean_confidence`는 high 결과로 다시 계산한다.
 
 현재 `uncertainty_score`는 high 결과 confidence로 다시 계산하지 않고, low consistency와 첫 low 결과 confidence로 계산한 값을 유지한다.
 
-기본 `specialist_first` 경로에서 specialist 결과가 충분히 생성되면 이 단계는 실행되지 않을 수 있다. 사용자가 LMM 재생성 비교를 선택한 경우에는 High LMM 검증이 아니라 1차 specialist 결과와 LMM 재생성 결과의 agreement를 계산하는 report-only 비교로 동작한다.
+기본 `specialist_first` 경로에서 specialist 결과가 충분히 생성되면 이 단계는 실행되지 않을 수 있다. 사용자가 LMM 재생성 비교를 선택한 경우에는 High LMM 검증이 아니라 1차 specialist 결과와 LMM 재생성 결과의 self_consistency를 계산하는 report-only 비교로 동작한다.
 
 ## 18. 전문 모델 Plugin 단계
 
@@ -708,7 +708,7 @@ score: optional confidence
 metadata: model/provenance
 ```
 
-score가 없으면 seed와 plugin 결과의 agreement를 score로 사용한다.
+score가 없으면 seed와 plugin 결과의 self_consistency를 score로 사용한다.
 
 ### 18.5 결과 병합
 
@@ -754,7 +754,7 @@ bedrock:...+grounding_dino+sam
 
 ### 18.8 Plugin 결과와 VLM fallback 검증
 
-VLM fallback 경로의 high LMM 검증 결정은 low VLM 초안과 specialist plugin 실행 이후에 수행된다. 따라서 low VLM consistency, plugin agreement, validation issue를 함께 사용해 고성능 LMM 호출 여부를 결정할 수 있다.
+VLM fallback 경로의 high LMM 검증 결정은 low VLM 초안과 specialist plugin 실행 이후에 수행된다. 따라서 low VLM consistency, plugin self_consistency, validation issue를 함께 사용해 고성능 LMM 호출 여부를 결정할 수 있다.
 
 기본 순서:
 
@@ -764,7 +764,7 @@ Specialist Plugins -> 결과가 비어 있을 때 Low VLM 반복 -> High 여부 
 
 `generation_strategy=vlm_first`를 지정하면 기존 순서인 `Low VLM 반복 -> Specialist Plugins -> High 여부 결정`으로 실행할 수 있다.
 
-### 18.9 Specialist 재추론 Agreement
+### 18.9 Specialist 재추론 Self-Consistency
 
 `specialist_consistency_runs=1`이면 1차 specialist 결과를 최종 라벨 후보로 유지하고, 같은 이미지에 대해 specialist plugin을 한 번 더 실행한다. 재추론 결과는 최종 라벨을 덮어쓰지 않으며 안정성 리포트에만 사용한다.
 
@@ -791,11 +791,11 @@ LLM advisor는 다음 필드만 제안할 수 있다.
 
 사용자가 지정한 class list는 immutable이다. advisor는 클래스 추가, 삭제, 이름 변경, synonym 치환, bbox 생성, 최종 라벨 수정을 수행할 수 없다. 결과에는 `specialist_result_consistency`, `specialist_bbox_agreement`, `specialist_mean_matched_iou`, `specialist_rerun_patch`가 기록된다.
 
-### 18.10 LMM 재생성 Agreement
+### 18.10 LMM 재생성 Self-Consistency
 
-`llm_consistency_mode`가 `low`, `high`, `both`이면 1차 Vision Specialist 결과를 pseudo-reference로 두고 선택한 LMM이 같은 이미지에 대해 라벨을 재생성한다. 이 단계는 최종 라벨을 자동 교체하지 않으며, bbox IoU 기반 `Prediction Agreement`, `pseudo_precision`, `pseudo_recall`, `pseudo_f1`, `mean_matched_iou`를 기록한다.
+`llm_consistency_mode`가 `low`, `high`, `both`이면 1차 Vision Specialist 결과를 pseudo-reference로 두고 선택한 LMM이 같은 이미지에 대해 라벨을 재생성한다. 이 단계는 최종 라벨을 자동 교체하지 않으며, bbox IoU 기반 `Prediction Self-Consistency`, `pseudo_precision`, `pseudo_recall`, `pseudo_f1`, `mean_matched_iou`를 기록한다.
 
-이미지별 agreement가 `threshold`보다 낮으면 `review_required=true`로 표시된다. 실행 요약에는 `llm_review_images`와 `llm_review_records`가 저장되고, Streamlit 결과 리포트에서는 이 이미지들만 라벨 편집 큐로 전달할 수 있다. threshold를 통과한 이미지는 해당 라벨 편집 큐에 표시하지 않는다.
+이미지별 self_consistency가 `threshold`보다 낮으면 `review_required=true`로 표시된다. 실행 요약에는 `llm_review_images`와 `llm_review_records`가 저장되고, Streamlit 결과 리포트에서는 이 이미지들만 라벨 편집 큐로 전달할 수 있다. threshold를 통과한 이미지는 해당 라벨 편집 큐에 표시하지 않는다.
 
 ## 19. Dataset Insight Agent
 
@@ -1147,7 +1147,7 @@ python evaluate_experiments.py `
 
 - 전문 모델 weight는 repository에 포함되지 않음
 - 전문 모델의 실제 추론은 설치 환경과 checkpoint availability에 의존
-- plugin agreement는 consistency에 반영되지만 별도의 GT calibration이나 task별 학습 weight는 없음
+- plugin self_consistency는 consistency에 반영되지만 별도의 GT calibration이나 task별 학습 weight는 없음
 - low 반복 결과 중 첫 번째 결과만 최종 초안으로 사용
 - high escalation 후 uncertainty가 high confidence 기준으로 재계산되지 않음
 - segmentation mask IoU는 512 x 512 raster 근사이며 hole/multi-polygon을 별도 표현하지 않음

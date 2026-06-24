@@ -9,12 +9,12 @@
 - 자연어 기반 대화형 작업 계획 생성
 - classification, object detection, segmentation, pose estimation, OCR, tracking 라벨 생성
 - YOLO, Pascal VOC, COCO, Vision JSON 등 라벨 포맷 변환
-- YOLO `data.yaml`, `dataset.yaml`, `classes.txt` 기반 class mapping 자동 탐색
+- 포맷별 클래스 정보 수집: YOLO mapping 파일, COCO categories, Pascal VOC object name, Vision JSON/CSV label 필드
 - 혼합 라벨 포맷 입력의 파일별 감지, 병합, 중복 제거
 - 변환 전 사전 점검과 부족 정보 안내
 - 결과 리포트, 입력 데이터 문제, 결과 파일 문제 표시
-- 1차 Vision Specialist 결과와 선택적 Low/High LMM 재생성 결과 간 IoU 기반 agreement 계산
-- agreement 임계치 미달 이미지만 라벨 편집 큐로 전달
+- 1차 Vision Specialist 결과와 선택적 Low/High LMM 재생성 결과 간 IoU 기반 self_consistency 계산
+- self_consistency 임계치 미달 이미지만 라벨 편집 큐로 전달
 - bbox, polygon, OCR, tracking, pose, classification 라벨 편집
 - 결과 파일과 리포트 다운로드
 
@@ -36,7 +36,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-web.txt
 ```
 
-태스크별 Vision Specialist Model을 사용할 경우:
+태스크별 특정 Vision Model을 사용할 경우:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-specialists.txt
@@ -54,7 +54,7 @@ python -m venv .venv
 
 앱을 시작하면 작업 기준 디렉터리인 workspace를 선택합니다. 화면에 표시되는 대부분의 경로는 workspace 기준 상대 경로입니다.
 
-기본 폴더 구조:
+권장 폴더 구조:
 
 ```text
 data/raw                 입력 이미지
@@ -185,7 +185,7 @@ path: D:\project\autolabel\test_images
 1. Vision Specialist Model로 1차 추론
 2. 결과 리포트 표시
 3. 사용자가 선택할 경우 specialist 재추론 또는 LMM 재생성 비교 실행
-4. IoU 기반 agreement 계산
+4. IoU 기반 self_consistency 계산
 5. 임계치 미달 이미지만 라벨 편집 큐로 전달
 
 LMM 재생성 비교는 최종 라벨을 자동 교체하지 않습니다. 1차 Vision Model 결과와 Low/High LMM 결과를 비교해 검토 우선순위를 정하는 용도입니다.
@@ -205,7 +205,7 @@ LMM 재생성 비교는 최종 라벨을 자동 교체하지 않습니다. 1차 
 
 결과 리포트나 검증 이슈 상세에서 특정 파일을 선택해 라벨 편집 탭으로 넘길 수 있습니다.
 
-LMM agreement 임계치 미달 이미지의 경우:
+LMM self_consistency 임계치 미달 이미지의 경우:
 - 미달 이미지만 라벨 편집 큐에 들어갑니다.
 - 임계치를 통과한 이미지는 해당 큐에 표시하지 않습니다.
 - 이전/다음 이슈 버튼으로 순차 편집할 수 있습니다.
@@ -224,7 +224,7 @@ LMM agreement 임계치 미달 이미지의 경우:
 - 검토 필요 파일
 - Dataset Insight
 - 클래스 분포
-- LMM 재생성 agreement 요약
+- LMM 재생성 self_consistency 요약
 - 임계치 미달 이미지 목록
 - 결과 파일 다운로드
 
