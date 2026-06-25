@@ -62,6 +62,33 @@ class StreamlitAppTests(unittest.TestCase):
             [(0.125, 0.0), (0.375, 0.0), (0.375, 0.333), (0.125, 0.333)],
         )
 
+    def test_polygon_canvas_absolute_path_points_are_not_shifted_by_left_top(self):
+        from src.ui.canvas_geometry import object_polygon_points
+
+        obj = {
+            "type": "path",
+            "left": 100,
+            "top": 50,
+            "width": 100,
+            "height": 100,
+            "scaleX": 1,
+            "scaleY": 1,
+            "path": [
+                ["M", 100, 50],
+                ["L", 200, 50],
+                ["L", 200, 150],
+                ["L", 100, 150],
+                ["Z"],
+            ],
+        }
+
+        points = object_polygon_points(obj, 400, 300)
+
+        self.assertEqual(
+            [(round(point.x, 3), round(point.y, 3)) for point in points],
+            [(0.25, 0.167), (0.5, 0.167), (0.5, 0.5), (0.25, 0.5)],
+        )
+
     def test_initial_screen_requires_workspace_selection(self):
         from streamlit.testing.v1 import AppTest
 

@@ -76,6 +76,9 @@ def object_polygon_points(obj: Dict[str, Any], width: int, height: int) -> List[
         if point.get("_absolute"):
             x = point_x / max(width, 1)
             y = point_y / max(height, 1)
+        elif point.get("_path") and absolute_like:
+            x = point_x / max(width, 1)
+            y = point_y / max(height, 1)
         elif point.get("_path"):
             x = (left + point_x * scale_x) / max(width, 1)
             y = (top + point_y * scale_y) / max(height, 1)
